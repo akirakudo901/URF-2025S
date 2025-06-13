@@ -83,7 +83,8 @@ class PositionalEncoding(nn.Module):
 class TransformerVQVAE(nn.Module):
     def __init__(self, vocab_size, d_model=512, nhead=8, num_encoder_layers=6,
                  num_decoder_layers=6, dim_feedforward=2048, dropout=0.1,
-                 num_embeddings=512, commitment_cost=0.25):
+                 num_embeddings=512, commitment_cost=0.25, aggregation_hidden_dim=1024, 
+                 num_thoughts=32):
         super(TransformerVQVAE, self).__init__()
         
         # Token embedding layers
@@ -104,7 +105,18 @@ class TransformerVQVAE(nn.Module):
         # Output layer
         self.output_layer = nn.Linear(d_model, vocab_size)
         
+        # Aggregation MLP
+        # TODO CONSIDER DIFFERENT OPTIONS! THIS MIGHT BE A VERY STRONG
+        # BACK-BONE AND MIGHT CAUSE POSTERIOR COLLAPSE EVEN WITH A VQ-VAE
+        self.aggregation_mlp = nn.Sequential(
+            nn.Linear(num_thoughts * d_model, aggregation_hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(aggregation_hidden_dim, d_model)
+        )
+        
         self.d_model = d_model
+        self.num_thoughts = num_thoughts
 
     def aggregate(self, memory, mode="linear"):
         """
@@ -118,7 +130,16 @@ class TransformerVQVAE(nn.Module):
         :param str mode: Mode of aggregation across same position & input tokens, 
         defaults to "linear"
         """
-        pass
+        _, M, d_model = memory.shape
+        if mode == "linear":
+            # reshape to pass through mlp
+            memory = memory.view(-1, M*d_model)
+            # Pass through MLP for non-linear transformation
+            aggregated = self.aggregation_mlp(memory)  # [batch_size*L, num_thoughts*d_model]
+        else:
+            raise ValueError(f"Unsupported aggregation mode: {mode}")
+            
+        return aggregated
         
     def encode(self, src, src_mask=None, is_causal=True):
         """
