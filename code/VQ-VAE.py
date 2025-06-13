@@ -141,7 +141,7 @@ class TransformerVQVAE(nn.Module):
             
         return aggregated
         
-    def encode(self, src, src_mask=None, is_causal=True):
+    def encode(self, src, src_mask=None, is_causal=True, aggregate_mode="linear"):
         """
         Encodes BATCH * M sequences of length L into BATCH sequences of L latent tokens.
         The encoding can be done causally, in which case the ith latent token is produced only
@@ -152,6 +152,8 @@ class TransformerVQVAE(nn.Module):
         :param torch.Tensor src_mask: Optional mask applied to src, defaults to None
         :param bool is_causal: Whether to apply the causal attention mask for the encoders, 
         defaults to True
+        :param str aggregate_mode: Mode of aggregation of tokens from different chains.
+        Defaults to linear, using an MLP for mapping
         """
         # src shape: [batch_size, M, L] where M is num sequences and L is sequence length
         batch_size, M, L = src.shape
@@ -172,7 +174,7 @@ class TransformerVQVAE(nn.Module):
         memory = memory.reshape(batch_size * L, M, -1)  # [batch_size*L, M, d_model]
         
         # aggregate the memory content per-prompt into single chains 
-        aggregated = self.aggregate(memory, mode="linear") # [batch_size*L, d_model]
+        aggregated = self.aggregate(memory, mode=aggregate_mode) # [batch_size*L, d_model]
         
         # Apply VQ to each position's tokens across sequences
         quantized, vq_loss, perplexity, indices = self.vector_quantizer(aggregated)
