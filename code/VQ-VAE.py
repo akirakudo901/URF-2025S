@@ -107,6 +107,17 @@ class TransformerVQVAE(nn.Module):
         self.d_model = d_model
         
     def encode(self, src, src_mask=None, is_causal=True):
+        """
+        Encodes BATCH * M sequences of length L into BATCH sequences of L latent tokens.
+        The encoding can be done causally, in which case the ith latent token is produced only
+        looking at up to the ith tokens from the M sequences.
+
+        :param torch.Tensor src: The source data to be encoded. 
+        [batch_size, M, L] where M is num sequences and L is sequence length.
+        :param torch.Tensor src_mask: Optional mask applied to src, defaults to None
+        :param bool is_causal: Whether to apply the causal attention mask for the encoders, 
+        defaults to True
+        """
         # src shape: [batch_size, M, L] where M is num sequences and L is sequence length
         batch_size, M, L = src.shape
         
