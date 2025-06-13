@@ -106,7 +106,7 @@ class TransformerVQVAE(nn.Module):
         
         self.d_model = d_model
         
-    def encode(self, src, src_mask=None):
+    def encode(self, src, src_mask=None, is_causal=True):
         # src shape: [batch_size, M, L] where M is num sequences and L is sequence length
         batch_size, M, L = src.shape
         
@@ -118,7 +118,7 @@ class TransformerVQVAE(nn.Module):
         src = self.positional_encoding(src)
         
         # Transformer encoding
-        memory = self.transformer_encoder(src, src_mask)
+        memory = self.transformer_encoder(src, src_mask, is_causal)
         
         # Reshape to group tokens at same positions across sequences
         memory = memory.view(batch_size, M, L, -1)
