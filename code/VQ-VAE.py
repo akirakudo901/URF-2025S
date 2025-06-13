@@ -105,6 +105,20 @@ class TransformerVQVAE(nn.Module):
         self.output_layer = nn.Linear(d_model, vocab_size)
         
         self.d_model = d_model
+
+    def aggregate(self, memory, mode="linear"):
+        """
+        Aggregates same-position embeddings from chains sharing the same prompt, compressing
+        it into one embedding of the same dimensions.
+        e.g. three same-position embeddings of dimension 512 will be compressed into
+             one 512-dimensional latent embedding
+
+        :param torch.Tensor memory: The embeddings obtained from the encoder, of shape:
+        [batch_size*L, num_thoughts, d_model] where L is the length of sequences.
+        :param str mode: Mode of aggregation across same position & input tokens, 
+        defaults to "linear"
+        """
+        pass
         
     def encode(self, src, src_mask=None, is_causal=True):
         """
@@ -136,8 +150,14 @@ class TransformerVQVAE(nn.Module):
         memory = memory.transpose(1, 2)  # [batch_size, L, M, d_model]
         memory = memory.reshape(batch_size * L, M, -1)  # [batch_size*L, M, d_model]
         
+        # aggregate the memory content per-prompt into single chains 
+        aggregated = self.aggregate(memory, mode="linear") # [batch_size*L, d_model]
+        
         # Apply VQ to each position's tokens across sequences
-        quantized, vq_loss, perplexity, indices = self.vector_quantizer(memory)
+        quantized, vq_loss, perplexity, indices = self.vector_quantizer(aggregated)
+
+        # then tile back to obtain the same shape and amount of info for the quantized result
+        quantized = quantized.unsqueeze(1).repeat(1, M, 1)  # [batch_size*L, M, d_model]
         
         # Reshape back
         quantized = quantized.view(batch_size, L, M, -1)
