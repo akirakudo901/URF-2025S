@@ -198,6 +198,10 @@ class TransformerVQVAE(nn.Module):
         # Reshape memory for decoder
         memory = memory.transpose(1, 2)  # [batch_size, M, L, d_model]
         memory = memory.reshape(batch_size * M, L, -1)
+
+        # add a "chain-positional encoding" indicating which chain we want the transformer to decode into
+        # also condition the decoder on the prompt?
+        
         
         # Decode
         output = self.transformer_decoder(tgt, memory, tgt_mask)
@@ -238,7 +242,38 @@ def train_step(model, optimizer, src, tgt, criterion):
     
     return loss.item(), reconstruction_loss.item(), vq_loss.item(), perplexity.item()
 
-
+    
+class SequenceAwareTransformerVQVAE(TransformerVQVAE):
+    # A model with sequence-aware components
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Learnable embeddings for sequence positions
+        self.sequence_embeddings = nn.Embedding(kwargs.get('num_sequences', 3), self.d_model)
+        
+    def decode(self, memory, tgt, tgt_mask=None):
+        # memory shape: [batch_size, L, M, d_model]
+        batch_size, L, M, _ = memory.shape
+        
+        # Prepare target
+        tgt = tgt.view(batch_size * M, -1)
+        tgt = self.token_embedding(tgt) * math.sqrt(self.d_model)
+        tgt = self.positional_encoding(tgt)
+        
+        # Add sequence embeddings
+        sequence_indices = torch.arange(M, device=tgt.device).repeat(batch_size)
+        sequence_emb = self.sequence_embeddings(sequence_indices).unsqueeze(1)
+        tgt = tgt + sequence_emb
+        
+        # Reshape memory for decoder
+        memory = memory.transpose(1, 2)  # [batch_size, M, L, d_model]
+        memory = memory.reshape(batch_size * M, L, -1)
+        
+        # Decode
+        output = self.transformer_decoder(tgt, memory, tgt_mask)
+        
+        # Project to vocabulary
+        output = self.output_layer(output)
+        return output
 
 if __name__ == "__main__":
     VOCAB_SIZE = 1024
