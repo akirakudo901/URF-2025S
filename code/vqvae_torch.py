@@ -1,6 +1,11 @@
 # Author: Akira Kudo
 # Created: 2025/06/12
-# Last Updated: 2025/06/13
+# Last Updated: 2025/06/16
+
+"""
+!!!IMPORTANT!!!
+THIS IMPLEMENTATION IS INCOMPLETE AS WE SHIFTED IN FAVOR OF CODE BASED ON THE transformers.GPT2Model
+"""
 
 import torch
 import torch.nn as nn
