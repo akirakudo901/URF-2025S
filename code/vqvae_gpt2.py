@@ -1,14 +1,11 @@
 # Author: Akira Kudo
 # Created: 2025/06/12
-# Last Updated: 2025/06/16
+# Last Updated: 2025/06/17
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import TransformerEncoder, TransformerEncoderLayer
-from torch.nn import TransformerDecoder, TransformerDecoderLayer 
-from transformers import GPT2Model
-import math
+from transformers import GPT2Model, GPT2LMHeadModel, GPT2Config
 
 class VectorQuantizer(nn.Module):
     def __init__(self, num_embeddings : int, embedding_dim : int, 
@@ -31,6 +28,7 @@ class VectorQuantizer(nn.Module):
         # check if: 1) using weight.data instead of init makes sense
         # 2) if the code for initialization makes sense (especially dividing by num_embeddings)
         # for example, LATENT_PLANNING does this: module.weight.data.normal_(mean=0.0, std=0.02)
+        # haven't found any mathematically elaborate explanation of why this initialization makes sense
         self.embedding.weight.data.uniform_(-1/num_embeddings, 1/num_embeddings)
         # TODO REVISIT END
         
@@ -67,44 +65,36 @@ class VectorQuantizer(nn.Module):
         
         return quantized, loss, perplexity, encoding_indices.view(input_shape[:-1])
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
-        super(PositionalEncoding, self).__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        return x + self.pe[:, :x.size(1)]
-
-class TransformerVQVAE(nn.Module):
-    def __init__(self, vocab_size, d_model=512, nhead=8, num_encoder_layers=6,
-                 num_decoder_layers=6, dim_feedforward=2048, dropout=0.1,
-                 num_embeddings=512, commitment_cost=0.25, aggregation_hidden_dim=1024, 
+class GPT2VQVAE(nn.Module):
+    def __init__(self, vocab_size, d_model=768, num_embeddings=512, 
+                 commitment_cost=0.25, aggregation_hidden_dim=1024, 
                  num_thoughts=32):
-        super(TransformerVQVAE, self).__init__()
+        """
+        Initialize GPT2-based VQ-VAE model.
         
-        # Token embedding layers
-        self.token_embedding = nn.Embedding(vocab_size, d_model)
-        self.positional_encoding = PositionalEncoding(d_model)
+        Args:
+            vocab_size (int): Size of the vocabulary
+            d_model (int): Dimension of the model (default: 768 for GPT2)
+            num_embeddings (int): Size of the VQ codebook
+            commitment_cost (float): Commitment cost for VQ
+            aggregation_hidden_dim (int): Hidden dimension for aggregation MLP
+            num_thoughts (int): Number of parallel sequences
+        """
+        super(GPT2VQVAE, self).__init__()
         
-        # Transformer encoder
-        encoder_layers = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout)
-        self.transformer_encoder = TransformerEncoder(encoder_layers, num_encoder_layers)
+        # Load GPT2 model and configuration
+        self.gpt2_config = GPT2Config(
+            vocab_size=vocab_size,
+            n_embd=d_model,
+            n_positions=1024, # Adjust based on needs
+        )
+        
+        # Initialize encoder and decoder with GPT2
+        self.encoder = GPT2Model(self.gpt2_config)
+        self.decoder = GPT2LMHeadModel(self.gpt2_config)
         
         # Vector Quantizer
         self.vector_quantizer = VectorQuantizer(num_embeddings, d_model, commitment_cost)
-        
-        # Transformer decoder
-        decoder_layers = TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout)
-        self.transformer_decoder = TransformerDecoder(decoder_layers, num_decoder_layers)
-        
-        # Output layer
-        self.output_layer = nn.Linear(d_model, vocab_size)
         
         # Aggregation MLP
         # TODO CONSIDER DIFFERENT OPTIONS! THIS MIGHT BE A VERY STRONG
@@ -112,24 +102,28 @@ class TransformerVQVAE(nn.Module):
         self.aggregation_mlp = nn.Sequential(
             nn.Linear(num_thoughts * d_model, aggregation_hidden_dim),
             nn.ReLU(),
-            nn.Dropout(dropout),
+            nn.Dropout(0.1),  # Using GPT2's default dropout
             nn.Linear(aggregation_hidden_dim, d_model)
         )
         
+        # Chain-positional embeddings to differentiate between M sequences
+        self.chain_embeddings = nn.Embedding(num_thoughts, d_model)
+        # Initialize chain embeddings with small values
+        nn.init.normal_(self.chain_embeddings.weight, mean=0.0, std=0.02)
+        
         self.d_model = d_model
         self.num_thoughts = num_thoughts
-
+        
     def aggregate(self, memory, mode="linear"):
         """
-        Aggregates same-position embeddings from chains sharing the same prompt, compressing
-        it into one embedding of the same dimensions.
-        e.g. three same-position embeddings of dimension 512 will be compressed into
-             one 512-dimensional latent embedding
-
-        :param torch.Tensor memory: The embeddings obtained from the encoder, of shape:
-        [batch_size*L, num_thoughts, d_model] where L is the length of sequences.
-        :param str mode: Mode of aggregation across same position & input tokens, 
-        defaults to "linear"
+        Aggregates same-position embeddings from chains sharing the same prompt.
+        
+        Args:
+            memory (torch.Tensor): Shape [batch_size*L, num_thoughts, d_model]
+            mode (str): Aggregation mode, defaults to "linear"
+            
+        Returns:
+            torch.Tensor: Aggregated embeddings of shape [batch_size*L, d_model]
         """
         _, M, d_model = memory.shape
         if mode == "linear":
@@ -142,19 +136,19 @@ class TransformerVQVAE(nn.Module):
             
         return aggregated
         
-    def encode(self, src, src_mask=None, is_causal=True, aggregate_mode="linear"):
+    def encode(self, src, src_mask=None, aggregate_mode="linear"):
         """
         Encodes BATCH * M sequences of length L into BATCH sequences of L latent tokens.
         The encoding can be done causally, in which case the ith latent token is produced only
         looking at up to the ith tokens from the M sequences.
 
-        :param torch.Tensor src: The source data to be encoded. 
-        [batch_size, M, L] where M is num sequences and L is sequence length.
-        :param torch.Tensor src_mask: Optional mask applied to src, defaults to None
-        :param bool is_causal: Whether to apply the causal attention mask for the encoders, 
-        defaults to True
-        :param str aggregate_mode: Mode of aggregation of tokens from different chains.
-        Defaults to linear, using an MLP for mapping
+        Args:
+            src (torch.Tensor): Input sequences [batch_size, M, L]
+            src_mask (torch.Tensor, optional): Attention mask
+            aggregate_mode (str): Mode of aggregation
+            
+        Returns:
+            tuple: (quantized, vq_loss, perplexity, indices) 
         """
         # src shape: [batch_size, M, L] where M is num sequences and L is sequence length
         batch_size, M, L = src.shape
@@ -162,12 +156,16 @@ class TransformerVQVAE(nn.Module):
         # Reshape to process all sequences together
         src = src.view(batch_size * M, L)
         
-        # Embed tokens and add positional encoding
-        src = self.token_embedding(src) * math.sqrt(self.d_model)
-        src = self.positional_encoding(src)
+        # Get GPT2 encoder outputs
+        encoder_outputs = self.encoder(
+            input_ids=src,
+            attention_mask=src_mask,
+            use_cache=False,
+            return_dict=True
+        )
         
-        # Transformer encoding
-        memory = self.transformer_encoder(src, src_mask, is_causal)
+        # Get the last hidden state
+        memory = encoder_outputs.last_hidden_state
         
         # Reshape to group tokens at same positions across sequences
         memory = memory.view(batch_size, M, L, -1)
@@ -177,10 +175,10 @@ class TransformerVQVAE(nn.Module):
         # aggregate the memory content per-prompt into single chains 
         aggregated = self.aggregate(memory, mode=aggregate_mode) # [batch_size*L, d_model]
         
-        # Apply VQ to each position's tokens across sequences
+        # Apply VQ
         quantized, vq_loss, perplexity, indices = self.vector_quantizer(aggregated)
-
-        # then tile back to obtain the same shape and amount of info for the quantized result
+        
+        # Tile back to obtain the same shape and amount of info
         quantized = quantized.unsqueeze(1).repeat(1, M, 1)  # [batch_size*L, M, d_model]
         
         # Reshape back
@@ -188,39 +186,68 @@ class TransformerVQVAE(nn.Module):
         return quantized, vq_loss, perplexity, indices
         
     def decode(self, memory, tgt, tgt_mask=None):
-        # memory shape: [batch_size, L, M, d_model]
+        """
+        Decodes using GPT2 decoder with chain-positional embeddings.
+        
+        Args:
+            memory (torch.Tensor): Encoded memory [batch_size, L, M, d_model]
+            tgt (torch.Tensor): Target sequences
+            tgt_mask (torch.Tensor, optional): Attention mask
+            
+        Returns:
+            torch.Tensor: Decoded output logits
+        """
         batch_size, L, M, _ = memory.shape
         
         # Prepare target
         tgt = tgt.view(batch_size * M, -1)
-        tgt = self.token_embedding(tgt) * math.sqrt(self.d_model)
-        tgt = self.positional_encoding(tgt)
         
         # Reshape memory for decoder
         memory = memory.transpose(1, 2)  # [batch_size, M, L, d_model]
         memory = memory.reshape(batch_size * M, L, -1)
-
-        # add a "chain-positional encoding" indicating which chain we want the transformer to decode into
-        # also condition the decoder on the prompt?
         
+        # Add chain-positional embeddings to memory
+        # Create chain indices: [0, 1, ..., M-1] repeated batch_size times
+        chain_indices = torch.arange(M, device=memory.device).repeat(batch_size)
+        # Get chain embeddings and add them to the memory
+        chain_emb = self.chain_embeddings(chain_indices).unsqueeze(1)  # [batch_size*M, 1, d_model]
+        memory = memory + chain_emb  # Add to all positions in the sequence
         
-        # Decode
-        output = self.transformer_decoder(tgt, memory, tgt_mask)
+        # Get GPT2 decoder outputs with language modeling head
+        decoder_outputs = self.decoder(
+            input_ids=tgt,
+            attention_mask=tgt_mask,
+            encoder_hidden_states=memory,
+            use_cache=False,
+            return_dict=True
+        )
         
-        # Project to vocabulary
-        output = self.output_layer(output)
-        return output
+        return decoder_outputs.logits
         
     def forward(self, src, tgt, src_mask=None, tgt_mask=None):
-        quantized, vq_loss, perplexity, indices = self.encode(src, src_mask)
+        """
+        Forward pass through the model.
+        
+        Args:
+            src (torch.Tensor): Source sequences [batch_size, M, L]
+            tgt (torch.Tensor): Target sequences [batch_size, M, L]
+            src_mask (torch.Tensor, optional): Source attention mask
+            tgt_mask (torch.Tensor, optional): Target attention mask
+            
+        Returns:
+            tuple: (output, vq_loss, perplexity)
+        """
+        quantized, vq_loss, perplexity, _ = self.encode(src, src_mask)
         output = self.decode(quantized, tgt, tgt_mask)
         return output, vq_loss, perplexity
 
 def create_mask(size):
+    """Create a causal mask for the decoder."""
     mask = torch.triu(torch.ones(size, size) * float('-inf'), diagonal=1)
     return mask
 
 def train_step(model, optimizer, src, tgt, criterion):
+    """Single training step."""
     optimizer.zero_grad()
     
     # Create causal mask for the decoder
@@ -243,35 +270,29 @@ def train_step(model, optimizer, src, tgt, criterion):
     
     return loss.item(), reconstruction_loss.item(), vq_loss.item(), perplexity.item()
 
+if __name__ == "__main__":
+    # Example usage
+    VOCAB_SIZE = 50257  # GPT2's vocabulary size
+    BATCH_SIZE = 4
+    NUM_SEQUENCES = 3
+    SEQ_LENGTH = 32
     
-class SequenceAwareTransformerVQVAE(TransformerVQVAE):
-    # A model with sequence-aware components
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Learnable embeddings for sequence positions
-        self.sequence_embeddings = nn.Embedding(kwargs.get('num_sequences', 3), self.d_model)
-        
-    def decode(self, memory, tgt, tgt_mask=None):
-        # memory shape: [batch_size, L, M, d_model]
-        batch_size, L, M, _ = memory.shape
-        
-        # Prepare target
-        tgt = tgt.view(batch_size * M, -1)
-        tgt = self.token_embedding(tgt) * math.sqrt(self.d_model)
-        tgt = self.positional_encoding(tgt)
-        
-        # Add sequence embeddings
-        sequence_indices = torch.arange(M, device=tgt.device).repeat(batch_size)
-        sequence_emb = self.sequence_embeddings(sequence_indices).unsqueeze(1)
-        tgt = tgt + sequence_emb
-        
-        # Reshape memory for decoder
-        memory = memory.transpose(1, 2)  # [batch_size, M, L, d_model]
-        memory = memory.reshape(batch_size * M, L, -1)
-        
-        # Decode
-        output = self.transformer_decoder(tgt, memory, tgt_mask)
-        
-        # Project to vocabulary
-        output = self.output_layer(output)
-        return output
+    # Initialize model
+    model = GPT2VQVAE(
+        vocab_size=VOCAB_SIZE,
+        d_model=768,  # GPT2's default dimension
+        num_embeddings=512,
+        num_thoughts=NUM_SEQUENCES
+    )
+    
+    # Create example data
+    src = torch.randint(0, VOCAB_SIZE, (BATCH_SIZE, NUM_SEQUENCES, SEQ_LENGTH))
+    tgt = torch.randint(0, VOCAB_SIZE, (BATCH_SIZE, NUM_SEQUENCES, SEQ_LENGTH))
+    
+    # Initialize optimizer and criterion
+    optimizer = torch.optim.Adam(model.parameters())
+    criterion = nn.CrossEntropyLoss()
+    
+    # Training step
+    loss, rec_loss, vq_loss, perplexity = train_step(model, optimizer, src, tgt, criterion)
+    print(f"Loss: {loss:.4f}, Reconstruction Loss: {rec_loss:.4f}, VQ Loss: {vq_loss:.4f}, Perplexity: {perplexity:.4f}")
