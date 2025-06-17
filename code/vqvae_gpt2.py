@@ -130,7 +130,7 @@ class GPT2VQVAE(nn.Module):
             # reshape to pass through mlp
             memory = memory.view(-1, M*d_model)
             # Pass through MLP for non-linear transformation
-            aggregated = self.aggregation_mlp(memory)  # [batch_size*L, num_thoughts*d_model]
+            aggregated = self.aggregation_mlp(memory)  # [batch_size*L, M*d_model]
         else:
             raise ValueError(f"Unsupported aggregation mode: {mode}")
             
@@ -138,6 +138,7 @@ class GPT2VQVAE(nn.Module):
         
     def encode(self, src, src_mask=None, aggregate_mode="linear"):
         """
+        !!! TODO MAKE EFFICIENT USING KV CACHING !!!
         Encodes BATCH * M sequences of length L into BATCH sequences of L latent tokens.
         The encoding can be done causally, in which case the ith latent token is produced only
         looking at up to the ith tokens from the M sequences.
@@ -179,7 +180,8 @@ class GPT2VQVAE(nn.Module):
         quantized, vq_loss, perplexity, indices = self.vector_quantizer(aggregated)
         
         # Tile back to obtain the same shape and amount of info
-        quantized = quantized.unsqueeze(1).repeat(1, M, 1)  # [batch_size*L, M, d_model]
+        # Makes sense to expand vs repeat as its more memory efficient + no in-place change is done
+        quantized = quantized.unsqueeze(1).expand(-1, M, -1)  # [batch_size*L, M, d_model]
         
         # Reshape back
         quantized = quantized.view(batch_size, L, M, -1)
@@ -187,6 +189,7 @@ class GPT2VQVAE(nn.Module):
         
     def decode(self, memory, tgt, tgt_mask=None):
         """
+        !!! TODO MAKE EFFICIENT USING KV CACHING !!!
         Decodes using GPT2 decoder with chain-positional embeddings.
         
         Args:
