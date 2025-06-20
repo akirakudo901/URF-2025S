@@ -455,7 +455,7 @@ class GPT2VQVAE(nn.Module):
         
         return output_sequences, output_logits, vq_loss, perplexity
 
-def create_cross_attention_mask(query_length, key_length, device):
+def create_cross_attention_mask(query_length, key_length, device, dtype=torch.float32):
     """
     Create a cross-attention mask for memory attention.
     
@@ -463,17 +463,31 @@ def create_cross_attention_mask(query_length, key_length, device):
         query_length (int): Length of the query sequence (K+L)
         key_length (int): Length of the key sequence (L)
         device (torch.device): Device to create the mask on
+        dtype (torch.dtype): Data type for the mask
         
     Returns:
         torch.Tensor: Cross-attention mask of shape (query_length, key_length)
                      The ith row can attend to key positions 0 to (i-(query_length-key_length))
+                     Uses 0 for attended positions and torch.finfo(dtype).min for masked positions
     """
     # Calculate the offset: query_length - key_length = K
     offset = query_length - key_length
     
-    # Vectorized implementation
+    # Use the same pattern as _prepare_4d_causal_attention_mask_with_cache_position
+    min_dtype = torch.finfo(dtype).min
+    mask = torch.full(
+        (query_length, key_length), 
+        fill_value=min_dtype, 
+        dtype=dtype, 
+        device=device
+    )
+    
+    # Vectorized implementation: set positions that can be attended to as 0
     i = torch.arange(query_length, device=device).unsqueeze(1)  # [query_length, 1]
     j = torch.arange(key_length, device=device).unsqueeze(0)    # [1, key_length]
-    mask = (j <= i - offset).float()
+    attend_mask = (j <= i - offset)  # [query_length, key_length]
+    
+    # Set attended positions to 0 (can attend) and keep masked positions as min_dtype (cannot attend)
+    mask = torch.where(attend_mask, torch.tensor(0.0, dtype=dtype, device=device), mask)
     
     return mask
