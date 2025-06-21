@@ -163,10 +163,10 @@ class GPT2VQVAE(nn.Module):
             torch.Tensor: Combined attention mask [batch_size * M, K + L]
         """
         if prompt_mask is not None and cot_mask_flat is not None:
-            prompt_mask_expanded = prompt_mask.unsqueeze(1).expand(-1, M, -1).view(batch_size * M, K)
+            prompt_mask_expanded = prompt_mask.unsqueeze(1).expand(-1, M, -1).reshape(batch_size * M, K)
             combined_mask = torch.cat([prompt_mask_expanded, cot_mask_flat], dim=1)
         elif prompt_mask is not None:
-            prompt_mask_expanded = prompt_mask.unsqueeze(1).expand(-1, M, -1).view(batch_size * M, K)
+            prompt_mask_expanded = prompt_mask.unsqueeze(1).expand(-1, M, -1).reshape(batch_size * M, K)
             cot_mask_ones = torch.ones(batch_size * M, L, device=device)
             combined_mask = torch.cat([prompt_mask_expanded, cot_mask_ones], dim=1)
         elif cot_mask_flat is not None:
@@ -198,7 +198,7 @@ class GPT2VQVAE(nn.Module):
             for kv in layer_cache:
                 # Expand from [batch_size, num_heads, K, head_dim] to [batch_size * M, num_heads, K, head_dim]
                 padded_kv = kv.unsqueeze(1).expand(-1, M, -1, -1, -1)
-                padded_kv = padded_kv.view(batch_size * M, kv.size(1), K, kv.size(-1))
+                padded_kv = padded_kv.reshape(batch_size * M, kv.size(1), K, kv.size(-1))
                 padded_layer_cache.append(padded_kv)
             padded_cache.append(tuple(padded_layer_cache))
             
@@ -249,7 +249,7 @@ class GPT2VQVAE(nn.Module):
         # Pad prompt activations M times to match COT batch size
         # [batch_size, K, d_model] -> [batch_size * M, K, d_model]
         padded_prompt_activations = prompt_activations.unsqueeze(1).expand(-1, M, -1, -1)
-        padded_prompt_activations = padded_prompt_activations.view(batch_size * M, K, -1)
+        padded_prompt_activations = padded_prompt_activations.reshape(batch_size * M, K, -1)
         
         # Pad prompt cache M times using helper method
         padded_cache = self._pad_kv_cache(prompt_cache, batch_size, M, K)
@@ -261,7 +261,7 @@ class GPT2VQVAE(nn.Module):
         
         # Create combined input: [batch_size * M, K + L]
         # Use the original prompt tokens for the first K positions
-        prompt_tokens = prompt_sequences.unsqueeze(1).expand(-1, M, -1).view(batch_size * M, K)
+        prompt_tokens = prompt_sequences.unsqueeze(1).expand(-1, M, -1).reshape(batch_size * M, K)
         combined_input = torch.cat([prompt_tokens, cot_flat], dim=1)  # [batch_size * M, K + L]
         
         # Create combined mask using helper method
@@ -301,7 +301,7 @@ class GPT2VQVAE(nn.Module):
         
         # Tile back to obtain the same shape and amount of info
         # Expand vs repeat: more memory efficient + no in-place change
-        quantized = quantized.unsqueeze(2).expand(-1, -1, M, -1)  # [batch_size*(L or K+L), M, d_model]
+        quantized = quantized.unsqueeze(1).expand(-1, M, -1)  # [batch_size*(L or K+L), M, d_model]
         
         # Reshape back using the appropriate length
         quantized = quantized.view(batch_size, -1, M, quantized.size(-1))
@@ -352,7 +352,7 @@ class GPT2VQVAE(nn.Module):
         # Step 3: Continue decoding with COT sequences using cached prompt activations
         # Create combined input: [batch_size * M, K + L]
         # Use the original prompt tokens for the first K positions
-        prompt_tokens = prompt_sequences.unsqueeze(1).expand(-1, M, -1).view(batch_size * M, K)
+        prompt_tokens = prompt_sequences.unsqueeze(1).expand(-1, M, -1).reshape(batch_size * M, K)
         combined_input = torch.cat([prompt_tokens, cot_flat], dim=1)  # [batch_size * M, K + L]
         
         # Create combined mask using helper method
