@@ -120,7 +120,7 @@ def read_parquet_to_tensors(file_path: str,
     print(f"Total prompts: {len(prompts):,}")
     print(f"Total CoT sequences: {sum(len(cots) for cots in cot_sequences):,}")
     
-    return prompts, cot_sequences, tokenizer.eos_token
+    return prompts, cot_sequences, tokenizer.eos_token_id
 
 
 def get_dataset_stats(prompts: List[List[int]], 
@@ -226,7 +226,7 @@ def save_tensors_in_usable_form(file_path: str,
     """
     try:
         # Read and convert to tensors
-        prompts, cot_sequences, eos_token = read_parquet_to_tensors(
+        prompts, cot_sequences, eos_token_id = read_parquet_to_tensors(
             file_path, 
             max_prompts=None
         )
@@ -318,7 +318,7 @@ def save_tensors_in_usable_form(file_path: str,
         
         # Process into training format
         prompt_sequences, cot_sequences_tensor, prompt_mask, cot_mask = process_dataset(
-            filtered_prompts, filtered_cot_sequences, pad_token_id=eos_token
+            filtered_prompts, filtered_cot_sequences, pad_token_id=eos_token_id
         )
         
         print(f"\nTraining tensors shape:")
@@ -490,7 +490,7 @@ def analyze_length_distribution(file_path: str,
     """
     # Use read_parquet_to_tensors to get tokenized data
     print(f"Reading and tokenizing data from: {file_path}")
-    prompts, cot_sequences, eos_token = read_parquet_to_tensors(
+    prompts, cot_sequences, _ = read_parquet_to_tensors(
         file_path, 
         tokenizer=tokenizer,
         max_prompts=max_prompts,
