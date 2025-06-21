@@ -16,8 +16,7 @@ import argparse
 import yaml
 import gc
 # import psutil
-from torch.amp import GradScaler
-from torch.cuda.amp import autocast
+from torch.amp import autocast, GradScaler
 from collections import deque
 
 # GPU memory monitoring
@@ -520,7 +519,7 @@ class GPT2VQVAETrainer:
             
             # Forward pass with mixed precision
             if self.use_mixed_precision:
-                with autocast():
+                with autocast('cuda'):
                     _, output_logits, vq_loss, perplexity = self.model(
                         prompt=prompts,
                         cot_sequences=cots,
