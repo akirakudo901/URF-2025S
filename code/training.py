@@ -343,9 +343,9 @@ class GPT2VQVAETrainer:
             self.memory_monitor.log_pytorch_memory_usage("after_model_weights_loaded")
         
         # Enable gradient checkpointing if specified
-        if self.use_gradient_checkpointing:
-            self.model.gradient_checkpointing_enable()
-            print("Gradient checkpointing enabled")
+        # if self.use_gradient_checkpointing:
+        #     self.model.gradient_checkpointing_enable()
+        #     print("Gradient checkpointing enabled")
         
         # Log memory before optimizer initialization
         if self.memory_monitor:
