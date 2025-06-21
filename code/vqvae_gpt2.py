@@ -163,7 +163,7 @@ class GPT2VQVAE(nn.Module):
             mode (str): Aggregation mode, defaults to "linear"
             
         Returns:
-            torch.Tensor: Aggregated embeddings [batch_size*L, d_model]
+            torch.Tensor: Aggregated embeddings [batch_size*L or batch_size*(K+L), d_model]
         """
         _, M, d_model = memory.shape
         if mode == "linear":
@@ -294,18 +294,13 @@ class GPT2VQVAE(nn.Module):
         prompt_activations = prompt_outputs.last_hidden_state  # [batch_size, K, d_model]
         prompt_cache = prompt_outputs.past_key_values
         
-        # Step 2: Process COT sequences with padded prompt activations
+        # Step 2: Process COT sequences with padded prompt cache
         # Reshape COT sequences to [batch_size * M, L]
         cot_flat = cot_sequences.view(batch_size * M, L)  # [batch_size * M, L]
         if cot_mask is not None:
             cot_mask_flat = cot_mask.view(batch_size * M, L)  # [batch_size * M, L]
         else:
             cot_mask_flat = None
-        
-        # Pad prompt activations M times to match COT batch size
-        # [batch_size, K, d_model] -> [batch_size * M, K, d_model]
-        padded_prompt_activations = prompt_activations.unsqueeze(1).expand(-1, M, -1, -1)
-        padded_prompt_activations = padded_prompt_activations.reshape(batch_size * M, K, -1)
         
         # Pad prompt cache M times using helper method
         padded_cache = self._pad_kv_cache(prompt_cache, batch_size, M, K)
@@ -315,7 +310,7 @@ class GPT2VQVAE(nn.Module):
         combined_mask = self._create_combined_mask(prompt_mask, cot_mask_flat, batch_size, M, K, L, cot_flat.device)
         
         # Continue encoding with cached activations - only pass COT sequences as input_ids
-        full_outputs = self.encoder(
+        cot_outputs = self.encoder(
             input_ids=cot_flat,  # Only COT sequences, not combined input
             attention_mask=combined_mask,
             past_key_values=padded_cache,  # Use padded prompt cache
@@ -323,19 +318,28 @@ class GPT2VQVAE(nn.Module):
             return_dict=True
         )
         
-        # Get the full hidden state
-        full_memory = full_outputs.last_hidden_state  # [batch_size * M, K + L, d_model]
-        
-        # Reshape to group tokens at same positions across sequences
-        full_memory = full_memory.view(batch_size, M, K + L, -1)
-        full_memory = full_memory.transpose(1, 2)  # [batch_size, K + L, M, d_model]
+        # Get COT hidden states (only the newly computed activations)
+        cot_memory = cot_outputs.last_hidden_state  # [batch_size * M, L, d_model]
         
         if quantize_cot_only:
-            # Only keep memory positions corresponding to COT sequences (K to K+L-1)
-            memory = full_memory[:, K:K+L, :, :]  # [batch_size, L, M, d_model]
+            # Only use COT activations, no need to concatenate with prompt
+            # Reshape to group tokens at same positions across sequences
+            cot_memory = cot_memory.view(batch_size, M, L, -1)
+            memory = cot_memory.transpose(1, 2)  # [batch_size, L, M, d_model]
         else:
-            # Keep all positions
-            memory = full_memory  # [batch_size, K + L, M, d_model]
+            # Pad prompt activations M times to match COT batch size
+            # [batch_size, K, d_model] -> [batch_size * M, K, d_model]
+            padded_prompt_activations = prompt_activations.unsqueeze(1).expand(-1, M, -1, -1)
+            padded_prompt_activations = padded_prompt_activations.reshape(batch_size * M, K, -1)
+            
+            # Concatenate prompt activations with COT activations to get full sequence
+            # padded_prompt_activations: [batch_size * M, K, d_model]
+            # cot_memory: [batch_size * M, L, d_model]
+            full_memory = torch.cat([padded_prompt_activations, cot_memory], dim=1)  # [batch_size * M, K + L, d_model]
+            
+            # Reshape to group tokens at same positions across sequences
+            full_memory = full_memory.view(batch_size, M, K + L, -1)
+            memory = full_memory.transpose(1, 2)  # [batch_size, K + L, M, d_model]
 
         # Reshape for aggregation
         memory = memory.reshape(-1, M, memory.size(-1))  # [batch_size*L or batch_size*(K+L), M, d_model]
@@ -368,7 +372,7 @@ class GPT2VQVAE(nn.Module):
             cot_mask (torch.Tensor, optional): COT attention mask for padding
             
         Returns:
-            torch.Tensor: Decoded output logits [batch_size, M, K+L, vocab_size]
+            torch.Tensor: Decoded output logits [batch_size, M, L, vocab_size] (only COT positions)
         """
         batch_size, K = prompt_sequences.shape
         _, M, L = cot_sequences.shape
@@ -430,8 +434,11 @@ class GPT2VQVAE(nn.Module):
             return_dict=True
         )
 
-        # Reshape back to [batch_size, M, K+L, vocab_size]
-        return decoder_outputs.logits.view(batch_size, M, K+L, -1)
+        # Get COT logits (only the newly computed logits for COT positions)
+        cot_logits = decoder_outputs.logits  # [batch_size * M, L, vocab_size]
+        
+        # Reshape back to [batch_size, M, L, vocab_size] (only COT positions)
+        return cot_logits.view(batch_size, M, L, -1)
         
     def forward(self, prompt, cot_sequences, cot_mask=None, prompt_mask=None, inference=False, quantize_cot_only=True):
         """
@@ -474,10 +481,7 @@ class GPT2VQVAE(nn.Module):
         
         if not inference:
             # During training, use teacher forcing with single forward pass to get all logits
-            full_logits = self.decode(cot_quantized, prompt, cot_sequences, prompt_mask, cot_mask) # [batch_size, M, K+L, vocab_size]
-            
-            # Extract only the logits corresponding to COT positions : K to K+L-1
-            output_logits = full_logits[:, :, K:, :]  # [batch_size, M, L, vocab_size]
+            output_logits = self.decode(cot_quantized, prompt, cot_sequences, prompt_mask, cot_mask) # [batch_size, M, L, vocab_size]
             
             # Get the predicted tokens from logits
             output_sequences = torch.argmax(output_logits, dim=-1)
