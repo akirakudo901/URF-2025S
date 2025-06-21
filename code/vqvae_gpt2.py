@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import GPT2Model, GPT2LMHeadModel, GPT2Config
+from transformers.cache_utils import DynamicCache
 
 class VectorQuantizer(nn.Module):
     def __init__(self, num_embeddings : int, embedding_dim : int, 
@@ -182,25 +183,50 @@ class GPT2VQVAE(nn.Module):
         Pad KV cache M times to match COT batch size.
         
         Args:
-            prompt_cache (tuple): KV cache from prompt processing
+            prompt_cache: KV cache from prompt processing (Cache object or legacy tuple format)
             batch_size (int): Batch size
             M (int): Number of COT sequences
             K (int): Prompt length
             
         Returns:
-            list: Padded KV cache for each layer
+            Padded KV cache in the same format as input (Cache object or legacy tuple)
         """
-        padded_cache = []
-        for layer_cache in prompt_cache:
-            # Each layer cache is a tuple of (key, value) for each layer
-            # key/value shape: [batch_size, num_heads, seq_len, head_dim]
-            padded_layer_cache = []
-            for kv in layer_cache:
+        # Check if it's a Cache object (like DynamicCache)
+        if hasattr(prompt_cache, 'key_cache') and hasattr(prompt_cache, 'value_cache'):
+            # It's a Cache object (e.g., DynamicCache)
+            padded_cache = type(prompt_cache)()  # Create new instance of same type
+            
+            # Pad each layer's key and value tensors
+            for layer_idx in range(len(prompt_cache.key_cache)):
+                key_tensor = prompt_cache.key_cache[layer_idx]  # [batch_size, num_heads, K, head_dim]
+                value_tensor = prompt_cache.value_cache[layer_idx]  # [batch_size, num_heads, K, head_dim]
+                
                 # Expand from [batch_size, num_heads, K, head_dim] to [batch_size * M, num_heads, K, head_dim]
-                padded_kv = kv.unsqueeze(1).expand(-1, M, -1, -1, -1)
-                padded_kv = padded_kv.reshape(batch_size * M, kv.size(1), K, kv.size(-1))
-                padded_layer_cache.append(padded_kv)
-            padded_cache.append(tuple(padded_layer_cache))
+                padded_key = key_tensor.unsqueeze(1).expand(-1, M, -1, -1, -1)
+                padded_key = padded_key.reshape(batch_size * M, key_tensor.size(1), K, key_tensor.size(-1))
+                
+                padded_value = value_tensor.unsqueeze(1).expand(-1, M, -1, -1, -1)
+                padded_value = padded_value.reshape(batch_size * M, value_tensor.size(1), K, value_tensor.size(-1))
+                
+                # Update the cache with padded tensors
+                padded_cache.update(padded_key, padded_value, layer_idx)
+                
+        else:
+            # It's a legacy tuple format: Tuple[Tuple[torch.Tensor, torch.Tensor]]
+            padded_cache = []
+            for layer_cache in prompt_cache:
+                # Each layer cache is a tuple of (key, value) for each layer
+                # key/value shape: [batch_size, num_heads, seq_len, head_dim]
+                padded_layer_cache = []
+                for kv in layer_cache:
+                    # Expand from [batch_size, num_heads, K, head_dim] to [batch_size * M, num_heads, K, head_dim]
+                    padded_kv = kv.unsqueeze(1).expand(-1, M, -1, -1, -1)
+                    padded_kv = padded_kv.reshape(batch_size * M, kv.size(1), K, kv.size(-1))
+                    padded_layer_cache.append(padded_kv)
+                padded_cache.append(tuple(padded_layer_cache))
+            
+            # Convert back to tuple format
+            padded_cache = tuple(padded_cache)
             
         return padded_cache
         
@@ -230,6 +256,7 @@ class GPT2VQVAE(nn.Module):
         prompt_outputs = self.encoder(
             input_ids=prompt_sequences,
             attention_mask=prompt_mask,
+            past_key_values=DynamicCache(),
             use_cache=True,
             return_dict=True
         )
@@ -255,23 +282,14 @@ class GPT2VQVAE(nn.Module):
         padded_cache = self._pad_kv_cache(prompt_cache, batch_size, M, K)
         
         # Step 3: Continue encoding with COT sequences using cached prompt activations
-        # We need to create a combined sequence for the encoder to process
-        # Since we can't directly inject activations, we'll use a different approach:
-        # Create dummy tokens for prompt positions and use the cached activations
-        
-        # Create combined input: [batch_size * M, K + L]
-        # Use the original prompt tokens for the first K positions
-        prompt_tokens = prompt_sequences.unsqueeze(1).expand(-1, M, -1).reshape(batch_size * M, K)
-        combined_input = torch.cat([prompt_tokens, cot_flat], dim=1)  # [batch_size * M, K + L]
-        
         # Create combined mask using helper method
         combined_mask = self._create_combined_mask(prompt_mask, cot_mask_flat, batch_size, M, K, L, cot_flat.device)
         
-        # Continue encoding with cached activations
+        # Continue encoding with cached activations - only pass COT sequences as input_ids
         full_outputs = self.encoder(
-            input_ids=combined_input,
+            input_ids=cot_flat,  # Only COT sequences, not combined input
             attention_mask=combined_mask,
-            past_key_values=padded_cache,
+            past_key_values=padded_cache,  # Use padded prompt cache
             use_cache=False,
             return_dict=True
         )
@@ -331,6 +349,7 @@ class GPT2VQVAE(nn.Module):
         prompt_outputs = self.decoder(
             input_ids=prompt_sequences,
             attention_mask=prompt_mask,
+            past_key_values=DynamicCache(),
             use_cache=True,
             return_dict=True
         )
@@ -350,11 +369,6 @@ class GPT2VQVAE(nn.Module):
         padded_cache = self._pad_kv_cache(prompt_cache, batch_size, M, K)
         
         # Step 3: Continue decoding with COT sequences using cached prompt activations
-        # Create combined input: [batch_size * M, K + L]
-        # Use the original prompt tokens for the first K positions
-        prompt_tokens = prompt_sequences.unsqueeze(1).expand(-1, M, -1).reshape(batch_size * M, K)
-        combined_input = torch.cat([prompt_tokens, cot_flat], dim=1)  # [batch_size * M, K + L]
-        
         # Create combined mask using helper method
         combined_mask = self._create_combined_mask(prompt_mask, cot_mask_flat, batch_size, M, K, L, cot_flat.device)
         
@@ -367,8 +381,7 @@ class GPT2VQVAE(nn.Module):
         chain_emb = self.chain_embeddings(chain_indices).unsqueeze(1)  # [batch_size*M, 1, d_model]
         memory = memory + chain_emb  # Add to all positions in the sequence
         
-        # Create cross-attention mask for memory attention
-        # Create cross-attention mask: (K+L) x L
+        # Create cross-attention mask for memory attention: (K+L) x L
         cross_attention_mask = create_cross_attention_mask(K + L, L, memory.device)
         
         # Expand to match batch and sequence dimensions for GPT2
@@ -377,8 +390,9 @@ class GPT2VQVAE(nn.Module):
             batch_size * M, -1, K + L, L)
         
         # Get GPT2 decoder outputs with language modeling head using cached prompt activations
+        # Only pass COT sequences as input_ids, not the combined sequence
         decoder_outputs = self.decoder(
-            input_ids=combined_input,
+            input_ids=cot_flat,  # Only COT sequences, not combined input
             attention_mask=combined_mask,
             encoder_hidden_states=memory,
             encoder_attention_mask=cross_attention_mask,  # Apply cross-attention mask to memory attention
