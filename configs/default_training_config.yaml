@@ -1,0 +1,47 @@
+# Default training configuration for GPT2VQVAE
+# This file can be used with: python code/training.py --config configs/default_training_config.yaml
+
+model_config:
+  # Model architecture parameters
+  vocab_size: 50257  # GPT2 vocabulary size
+  d_model: 768       # GPT2 model dimension
+  num_embeddings: 512  # VQ codebook size
+  commitment_cost: 0.25  # VQ commitment cost
+  aggregation_hidden_dim: 1024  # Aggregation MLP hidden dim
+  num_thoughts: 32   # Number of parallel sequences
+  n_positions: 1024  # Maximum sequence length
+
+training_config:
+  # Optimizer parameters
+  learning_rate: 1e-4
+  weight_decay: 0.01
+  beta1: 0.9
+  beta2: 0.999
+  
+  # Learning rate scheduler
+  use_lr_scheduler: true
+  min_lr: 1e-6
+  
+  # Training parameters
+  num_epochs: 50
+  batch_size: 4  # Adjust based on your GPU memory
+  gradient_clip: 1.0
+  vq_loss_weight: 1.0
+  quantize_cot_only: true
+  
+  # Checkpointing
+  save_every: 5
+  checkpoint_dir: checkpoints/gpt2vqvae
+  pad_token_id: 0
+  
+  # Data splitting
+  val_split: 0.1
+  
+  # Data directory
+  data_dir: data/GSM8K
+
+# Additional notes:
+# - Adjust batch_size based on your GPU memory
+# - Modify num_epochs based on your training needs
+# - The data_dir should point to the directory containing the preprocessed tensors
+# - You can override data_dir using --data-dir argument when running the script 

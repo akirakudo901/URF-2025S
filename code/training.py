@@ -6,16 +6,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
-import pandas as pd
-from transformers import GPT2Tokenizer
-import numpy as np
-from typing import List, Tuple, Optional, Dict, Any
+from typing import Tuple, Optional, Dict, Any
 import os
 import json
-from datetime import datetime
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-import wandb  # Optional: for experiment tracking
+# import wandb  # Optional: for experiment tracking
+import argparse
+import yaml
 
 # Import the GPT2VQVAE model
 import sys
@@ -495,28 +493,95 @@ def train_gpt2vqvae(prompt_sequences: torch.Tensor,
     
     return trainer
 
-# Example usage and configuration
-def example_training():
+def load_config(config_path: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
-    Example of how to use the training functions.
-    """
-    # Load preprocessed data
-    data_dir = "data/GSM8K"
+    Load configuration from a YAML or JSON file.
     
-    try:
-        prompt_sequences = torch.load(os.path.join(data_dir, "prompt_sequences.pt"))
-        cot_sequences = torch.load(os.path.join(data_dir, "cot_sequences_tensor.pt"))
-        prompt_mask = torch.load(os.path.join(data_dir, "prompt_mask.pt"))
-        cot_mask = torch.load(os.path.join(data_dir, "cot_mask.pt"))
+    Args:
+        config_path: Path to the configuration file
         
-        print(f"Loaded data shapes:")
-        print(f"  prompt_sequences: {prompt_sequences.shape}")
-        print(f"  cot_sequences: {cot_sequences.shape}")
-        print(f"  prompt_mask: {prompt_mask.shape}")
-        print(f"  cot_mask: {cot_mask.shape}")
+    Returns:
+        Tuple of (model_config, training_config)
+    """
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
+    
+    with open(config_path, 'r') as f:
+        if config_path.endswith('.yaml') or config_path.endswith('.yml'):
+            config = yaml.safe_load(f)
+        elif config_path.endswith('.json'):
+            config = json.load(f)
+        else:
+            raise ValueError("Configuration file must be .yaml, .yml, or .json")
+    
+    # Extract model and training configs
+    model_config = config.get('model_config', {})
+    training_config = config.get('training_config', {})
+    
+    # Validate required fields
+    required_model_fields = ['vocab_size', 'd_model', 'num_embeddings']
+    required_training_fields = ['learning_rate', 'num_epochs', 'batch_size']
+    
+    missing_model = [field for field in required_model_fields if field not in model_config]
+    missing_training = [field for field in required_training_fields if field not in training_config]
+    
+    if missing_model:
+        raise ValueError(f"Missing required model config fields: {missing_model}")
+    if missing_training:
+        raise ValueError(f"Missing required training config fields: {missing_training}")
+    
+    return model_config, training_config
+
+def load_training_data(data_dir: str) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Load preprocessed training data.
+    
+    Args:
+        data_dir: Directory containing the preprocessed data files
         
-        # Model configuration
-        model_config = {
+    Returns:
+        Tuple of (prompt_sequences, cot_sequences, prompt_mask, cot_mask)
+    """
+    required_files = [
+        "prompt_sequences.pt",
+        "cot_sequences_tensor.pt", 
+        "prompt_mask.pt",
+        "cot_mask.pt"
+    ]
+    
+    # Check if all required files exist
+    missing_files = []
+    for file_name in required_files:
+        file_path = os.path.join(data_dir, file_name)
+        if not os.path.exists(file_path):
+            missing_files.append(file_name)
+    
+    if missing_files:
+        raise FileNotFoundError(f"Missing data files in {data_dir}: {missing_files}")
+    
+    # Load the tensors
+    prompt_sequences = torch.load(os.path.join(data_dir, "prompt_sequences.pt"))
+    cot_sequences = torch.load(os.path.join(data_dir, "cot_sequences_tensor.pt"))
+    prompt_mask = torch.load(os.path.join(data_dir, "prompt_mask.pt"))
+    cot_mask = torch.load(os.path.join(data_dir, "cot_mask.pt"))
+    
+    print(f"Loaded data shapes:")
+    print(f"  prompt_sequences: {prompt_sequences.shape}")
+    print(f"  cot_sequences: {cot_sequences.shape}")
+    print(f"  prompt_mask: {prompt_mask.shape}")
+    print(f"  cot_mask: {cot_mask.shape}")
+    
+    return prompt_sequences, cot_sequences, prompt_mask, cot_mask
+
+def create_default_config(output_path: str):
+    """
+    Create a default configuration file.
+    
+    Args:
+        output_path: Path where to save the default config
+    """
+    default_config = {
+        'model_config': {
             'vocab_size': 50257,  # GPT2 vocabulary size
             'd_model': 768,       # GPT2 model dimension
             'num_embeddings': 512,  # VQ codebook size
@@ -524,10 +589,8 @@ def example_training():
             'aggregation_hidden_dim': 1024,  # Aggregation MLP hidden dim
             'num_thoughts': 32,   # Number of parallel sequences
             'n_positions': 1024   # Maximum sequence length
-        }
-        
-        # Training configuration
-        training_config = {
+        },
+        'training_config': {
             'learning_rate': 1e-4,
             'weight_decay': 0.01,
             'beta1': 0.9,
@@ -541,32 +604,123 @@ def example_training():
             'quantize_cot_only': True,
             'save_every': 5,
             'checkpoint_dir': 'checkpoints/gpt2vqvae',
-            'pad_token_id': 0
+            'pad_token_id': 0,
+            'val_split': 0.1
+        },
+        'data_config': {
+            'data_dir': 'data/GSM8K'
         }
+    }
+    
+    # Determine file format based on extension
+    if output_path.endswith('.yaml') or output_path.endswith('.yml'):
+        with open(output_path, 'w') as f:
+            yaml.dump(default_config, f, default_flow_style=False, indent=2)
+    elif output_path.endswith('.json'):
+        with open(output_path, 'w') as f:
+            json.dump(default_config, f, indent=2)
+    else:
+        # Default to YAML
+        output_path = output_path + '.yaml'
+        with open(output_path, 'w') as f:
+            yaml.dump(default_config, f, default_flow_style=False, indent=2)
+    
+    print(f"Default configuration saved to: {output_path}")
+    print("You can modify this file and use it for training.")
+
+def main():
+    """
+    Main function for command-line training.
+    """
+    parser = argparse.ArgumentParser(description='Train GPT2VQVAE model')
+    parser.add_argument('--config', '-c', type=str, required=True,
+                       help='Path to configuration file (YAML or JSON)')
+    parser.add_argument('--data-dir', type=str, default=None,
+                       help='Override data directory from config')
+    parser.add_argument('--resume-from', type=str, default=None,
+                       help='Path to checkpoint to resume training from')
+    parser.add_argument('--create-config', type=str, default=None,
+                       help='Create a default configuration file at the specified path')
+    parser.add_argument('--device', type=str, default=None,
+                       help='Device to train on (cuda/cpu)')
+    
+    args = parser.parse_args()
+    
+    # Handle create-config option
+    if args.create_config:
+        create_default_config(args.create_config)
+        return
+    
+    try:
+        # Load configuration
+        print(f"Loading configuration from: {args.config}")
+        model_config, training_config = load_config(args.config)
         
-        # Train the model
-        trainer = train_gpt2vqvae(
+        # Override data directory if specified
+        if args.data_dir:
+            training_config['data_dir'] = args.data_dir
+        
+        # Set device
+        if args.device:
+            device = args.device
+        else:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        print(f"Using device: {device}")
+        if device == "cuda":
+            print(f"CUDA device: {torch.cuda.get_device_name()}")
+            print(f"Available memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        
+        # Load training data
+        data_dir = training_config.get('data_dir', 'data/GSM8K')
+        print(f"Loading data from: {data_dir}")
+        
+        prompt_sequences, cot_sequences, prompt_mask, cot_mask = load_training_data(data_dir)
+        
+        # Initialize trainer
+        print("Initializing trainer...")
+        trainer = GPT2VQVAETrainer(model_config, training_config, device=device)
+        
+        # Resume from checkpoint if specified
+        if args.resume_from:
+            print(f"Resuming from checkpoint: {args.resume_from}")
+            trainer.load_checkpoint(args.resume_from)
+        
+        # Get validation split from config
+        val_split = training_config.get('val_split', 0.1)
+        
+        # Start training
+        print("Starting training...")
+        trainer.train(
             prompt_sequences=prompt_sequences,
             cot_sequences=cot_sequences,
             prompt_mask=prompt_mask,
             cot_mask=cot_mask,
-            model_config=model_config,
-            training_config=training_config,
-            val_split=0.1,
-            save_history=True
+            val_split=val_split,
+            resume_from=args.resume_from
         )
         
+        # Save training history
+        history_path = os.path.join(
+            training_config.get('checkpoint_dir', 'checkpoints'),
+            'training_history.png'
+        )
+        trainer.plot_training_history(history_path)
+        
         print("Training completed successfully!")
-        return trainer
+        print(f"Best model saved to: {trainer.best_model_path}")
+        print(f"Training history saved to: {history_path}")
         
     except FileNotFoundError as e:
-        print(f"Data files not found: {e}")
-        print("Please run the data preprocessing first.")
-        return None
+        print(f"Error: {e}")
+        print("Please check that the configuration file and data files exist.")
+    except ValueError as e:
+        print(f"Configuration error: {e}")
     except Exception as e:
-        print(f"Error during training: {e}")
-        return None
+        print(f"Training error: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
-    # Run example training
-    trainer = example_training()
+    # Run main function for command-line training
+    main()
