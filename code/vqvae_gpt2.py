@@ -168,7 +168,7 @@ class GPT2VQVAE(nn.Module):
         _, M, d_model = memory.shape
         if mode == "linear":
             # Reshape to pass through MLP
-            memory = memory.view(-1, M*d_model)         # [batch_size*L, M*d_model]
+            memory = memory.reshape(-1, M*d_model)         # [batch_size*L, M*d_model]
             # Pass through MLP for non-linear transformation
             aggregated = self.aggregation_mlp(memory)   # [batch_size*L, d_model]
         else:
