@@ -58,7 +58,7 @@ class GPUMemoryMonitor:
             #     print(f"Warning: Could not initialize NVML for device {device_id}: {e}")
             #     self.nvml_available = False
             self.handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
-            self.device_name = pynvml.nvmlDeviceGetName(self.handle).decode('utf-8')
+            self.device_name = pynvml.nvmlDeviceGetName(self.handle)
             print(f"GPU Memory Monitor initialized for: {self.device_name}")
     
     def get_memory_info(self) -> Dict[str, float]:
