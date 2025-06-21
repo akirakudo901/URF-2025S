@@ -991,13 +991,14 @@ class GPT2VQVAETrainer:
         
         plt.show()
 
-    def load_training_data_memory_efficient(self, data_dir: str, max_samples: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def load_training_data_memory_efficient(self, data_dir: str, max_samples: Optional[int] = None, num_thoughts: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Load training data with memory-efficient loading.
+        Load training data with memory-efficient loading and truncate based on num_thoughts.
         
         Args:
             data_dir: Directory containing the preprocessed data files
             max_samples: Maximum number of samples to load (for debugging/memory constraints)
+            num_thoughts: Number of parallel sequences to use (truncates dataset if needed)
             
         Returns:
             Tuple of (prompt_sequences, cot_sequences, prompt_mask, cot_mask)
@@ -1039,6 +1040,34 @@ class GPT2VQVAETrainer:
             prompt_mask = torch.load(os.path.join(data_dir, "prompt_mask.pt"))
             cot_mask = torch.load(os.path.join(data_dir, "cot_mask.pt"))
         
+        print(f"Original data shapes:")
+        print(f"  prompt_sequences: {prompt_sequences.shape}")
+        print(f"  cot_sequences: {cot_sequences.shape}")
+        print(f"  prompt_mask: {prompt_mask.shape}")
+        print(f"  cot_mask: {cot_mask.shape}")
+        
+        # Validate and truncate based on num_thoughts
+        if num_thoughts is not None:
+            current_num_thoughts = cot_sequences.shape[1]  # Should be the second dimension
+            print(f"Current num_thoughts in dataset: {current_num_thoughts}")
+            print(f"Requested num_thoughts: {num_thoughts}")
+            
+            if current_num_thoughts < num_thoughts:
+                raise ValueError(f"Dataset only has {current_num_thoughts} parallel sequences, "
+                               f"but model requires {num_thoughts}. Please regenerate dataset with more sequences.")
+            
+            if current_num_thoughts > num_thoughts:
+                print(f"Truncating dataset from {current_num_thoughts} to {num_thoughts} parallel sequences")
+                # Truncate the middle dimension (num_thoughts)
+                cot_sequences = cot_sequences[:, :num_thoughts, :]
+                cot_mask = cot_mask[:, :num_thoughts, :]
+                
+                print(f"Truncated data shapes:")
+                print(f"  prompt_sequences: {prompt_sequences.shape}")
+                print(f"  cot_sequences: {cot_sequences.shape}")
+                print(f"  prompt_mask: {prompt_mask.shape}")
+                print(f"  cot_mask: {cot_mask.shape}")
+        
         # Limit samples if specified
         if max_samples is not None:
             prompt_sequences = prompt_sequences[:max_samples]
@@ -1046,7 +1075,7 @@ class GPT2VQVAETrainer:
             prompt_mask = prompt_mask[:max_samples]
             cot_mask = cot_mask[:max_samples]
         
-        print(f"Loaded data shapes:")
+        print(f"Final data shapes:")
         print(f"  prompt_sequences: {prompt_sequences.shape}")
         print(f"  cot_sequences: {cot_sequences.shape}")
         print(f"  prompt_mask: {prompt_mask.shape}")
@@ -1063,6 +1092,91 @@ class GPT2VQVAETrainer:
         print(f"Total data memory usage: {total_memory_gb:.2f} GB")
         
         return prompt_sequences, cot_sequences, prompt_mask, cot_mask
+
+def validate_model_data_compatibility(model_config: Dict[str, Any], 
+                                    prompt_sequences: torch.Tensor,
+                                    cot_sequences: torch.Tensor,
+                                    prompt_mask: torch.Tensor,
+                                    cot_mask: torch.Tensor) -> None:
+    """
+    Validate that model configuration is compatible with the loaded data.
+    
+    Args:
+        model_config: Model configuration dictionary
+        prompt_sequences: Prompt sequences tensor
+        cot_sequences: Chain-of-thought sequences tensor
+        prompt_mask: Prompt mask tensor
+        cot_mask: Chain-of-thought mask tensor
+    """
+    print("Validating model-data compatibility...")
+    
+    # Check num_thoughts compatibility
+    num_thoughts = model_config.get('num_thoughts', None)
+    if num_thoughts is not None:
+        data_num_thoughts = cot_sequences.shape[1]
+        if data_num_thoughts != num_thoughts:
+            print(f"⚠️  Warning: Data has {data_num_thoughts} parallel sequences, "
+                  f"but model config specifies {num_thoughts}.")
+            if data_num_thoughts > num_thoughts:
+                print(f"   → Dataset will be truncated to {num_thoughts} sequences during loading.")
+            else:
+                print(f"   → Error: Dataset has insufficient parallel sequences!")
+                raise ValueError(f"Dataset only has {data_num_thoughts} parallel sequences, "
+                               f"but model requires {num_thoughts}.")
+        else:
+            print(f"✅ num_thoughts compatibility: {num_thoughts} sequences")
+    
+    # Check vocabulary size compatibility
+    vocab_size = model_config.get('vocab_size', None)
+    if vocab_size is not None:
+        # Check if any token IDs exceed the vocabulary size
+        max_prompt_token = prompt_sequences.max().item()
+        max_cot_token = cot_sequences.max().item()
+        max_token = max(max_prompt_token, max_cot_token)
+        
+        if max_token >= vocab_size:
+            print(f"⚠️  Warning: Data contains token ID {max_token}, "
+                  f"but model vocab_size is {vocab_size}.")
+        else:
+            print(f"✅ Vocabulary compatibility: max token {max_token} < vocab_size {vocab_size}")
+    
+    # Check sequence length compatibility
+    n_positions = model_config.get('n_positions', None)
+    if n_positions is not None:
+        prompt_len = prompt_sequences.shape[1]
+        cot_len = cot_sequences.shape[2]
+        total_len = prompt_len + cot_len
+        
+        if total_len > n_positions:
+            print(f"⚠️  Warning: Total sequence length {total_len} exceeds model's n_positions {n_positions}.")
+        else:
+            print(f"✅ Sequence length compatibility: {total_len} <= n_positions {n_positions}")
+    
+    # Check tensor shapes consistency
+    batch_size = prompt_sequences.shape[0]
+    expected_shapes = {
+        'prompt_sequences': (batch_size, prompt_sequences.shape[1]),
+        'cot_sequences': (batch_size, cot_sequences.shape[1], cot_sequences.shape[2]),
+        'prompt_mask': (batch_size, prompt_mask.shape[1]),
+        'cot_mask': (batch_size, cot_mask.shape[1], cot_mask.shape[2])
+    }
+    
+    actual_shapes = {
+        'prompt_sequences': prompt_sequences.shape,
+        'cot_sequences': cot_sequences.shape,
+        'prompt_mask': prompt_mask.shape,
+        'cot_mask': cot_mask.shape
+    }
+    
+    print("✅ Tensor shape consistency:")
+    for name, expected_shape in expected_shapes.items():
+        actual_shape = actual_shapes[name]
+        if actual_shape == expected_shape:
+            print(f"   {name}: {actual_shape}")
+        else:
+            print(f"   ⚠️  {name}: expected {expected_shape}, got {actual_shape}")
+    
+    print("✅ Model-data compatibility validation complete!")
 
 def train_gpt2vqvae(prompt_sequences: torch.Tensor,
                     cot_sequences: torch.Tensor,
@@ -1092,6 +1206,15 @@ def train_gpt2vqvae(prompt_sequences: torch.Tensor,
     """
     # Initialize trainer
     trainer = GPT2VQVAETrainer(model_config, training_config)
+    
+    # Validate that num_thoughts in model config matches data
+    num_thoughts = model_config.get('num_thoughts', None)
+    if num_thoughts is not None:
+        data_num_thoughts = cot_sequences.shape[1]
+        if data_num_thoughts != num_thoughts:
+            print(f"Warning: Data has {data_num_thoughts} parallel sequences, "
+                  f"but model config specifies {num_thoughts}. "
+                  f"Consider using load_training_data_memory_efficient() for automatic truncation.")
     
     # Train the model
     trainer.train(prompt_sequences, cot_sequences, prompt_mask, cot_mask, val_split, resume_from)
@@ -1283,6 +1406,8 @@ def main():
                        help='Use memory-efficient data loading (default: True)')
     parser.add_argument('--monitor-gpu-memory', action='store_true', default=True,
                        help='Monitor GPU memory usage using nvidia-ml-py3 (default: True)')
+    parser.add_argument('--num-thoughts', type=int, default=None,
+                       help='Override num_thoughts parameter from config (truncates dataset if needed)')
     
     args = parser.parse_args()
     
@@ -1332,16 +1457,31 @@ def main():
         # Load training data with memory optimizations
         data_dir = training_config.get('data_dir', 'data/GSM8K')
         max_samples = training_config.get('max_samples', None)
+        num_thoughts = model_config.get('num_thoughts', None)  # Extract from model config
+        
+        # Command-line argument takes precedence
+        if args.num_thoughts is not None:
+            num_thoughts = args.num_thoughts
+            print(f"Overriding num_thoughts from config ({model_config.get('num_thoughts', 'not set')}) "
+                  f"to command-line value: {num_thoughts}")
+            # Update model config for consistency
+            model_config['num_thoughts'] = num_thoughts
+        
         print(f"Loading data from: {data_dir}")
+        if num_thoughts is not None:
+            print(f"Using num_thoughts: {num_thoughts}")
         
         # Initialize trainer first to use its memory-efficient loading method
         print("Initializing trainer...")
         trainer = GPT2VQVAETrainer(model_config, training_config, device=device)
         
-        # Load data using memory-efficient method
+        # Load data using memory-efficient method with num_thoughts truncation
         prompt_sequences, cot_sequences, prompt_mask, cot_mask = trainer.load_training_data_memory_efficient(
-            data_dir, max_samples=max_samples
+            data_dir, max_samples=max_samples, num_thoughts=num_thoughts
         )
+        
+        # Validate model-data compatibility
+        validate_model_data_compatibility(model_config, prompt_sequences, cot_sequences, prompt_mask, cot_mask)
         
         # Resume from checkpoint if specified
         if args.resume_from:
