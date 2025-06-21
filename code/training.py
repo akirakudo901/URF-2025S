@@ -50,17 +50,14 @@ class GPUMemoryMonitor:
         self.nvml_available = NVML_AVAILABLE
         
         if self.nvml_available:
-            # try:
-            #     self.handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
-            #     self.device_name = pynvml.nvmlDeviceGetName(self.handle).decode('utf-8')
-            #     print(f"GPU Memory Monitor initialized for: {self.device_name}")
-            # except Exception as e:
-            #     print(f"Warning: Could not initialize NVML for device {device_id}: {e}")
-            #     self.nvml_available = False
-            self.handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
-            self.device_name = pynvml.nvmlDeviceGetName(self.handle)
-            print(f"GPU Memory Monitor initialized for: {self.device_name}")
-    
+            try:
+                self.handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
+                self.device_name = pynvml.nvmlDeviceGetName(self.handle)
+                print(f"GPU Memory Monitor initialized for: {self.device_name}")
+            except Exception as e:
+                print(f"Warning: Could not initialize NVML for device {device_id}: {e}")
+                self.nvml_available = False
+            
     def get_memory_info(self) -> Dict[str, float]:
         """
         Get current GPU memory information.
