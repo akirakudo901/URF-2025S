@@ -1,6 +1,6 @@
 # Author: Akira Kudo
 # Created: 2025/06/12
-# Last Updated: 2025/06/20
+# Last Updated: 2025/06/21
 
 import torch
 import torch.nn as nn
@@ -67,7 +67,9 @@ class VectorQuantizer(nn.Module):
 class GPT2VQVAE(nn.Module):
     def __init__(self, vocab_size, d_model=768, num_embeddings=512, 
                  commitment_cost=0.25, aggregation_hidden_dim=1024, 
-                 num_thoughts=32, n_positions=1024):
+                 num_thoughts=32, n_positions=1024, 
+                 use_pretrained_encoder=True, use_pretrained_decoder=True,
+                 pretrained_model_name="gpt2"):
         """
         GPT2-based VQ-VAE model that uses GPT2 as both encoder and decoder.
         
@@ -79,6 +81,9 @@ class GPT2VQVAE(nn.Module):
             aggregation_hidden_dim (int): Aggregation MLP hidden dimension
             num_thoughts (int): Number of parallel sequences
             n_positions (int): Maximum sequence length for GPT2 (default: 1024)
+            use_pretrained_encoder (bool): Whether to load pretrained weights for encoder
+            use_pretrained_decoder (bool): Whether to load pretrained weights for decoder
+            pretrained_model_name (str): Name of pretrained model to load (default: "gpt2")
         """
         super(GPT2VQVAE, self).__init__()
 
@@ -101,9 +106,33 @@ class GPT2VQVAE(nn.Module):
             is_decoder=True,  # Mark as decoder
         )
         
-        # Initialize encoder and decoder with GPT2
-        self.encoder = GPT2Model(self.encoder_config)
-        self.decoder = GPT2LMHeadModel(self.decoder_config)
+        # Initialize encoder with or without pretrained weights
+        if use_pretrained_encoder:
+            print(f"Loading pretrained {pretrained_model_name} weights for encoder...")
+            self.encoder = GPT2Model.from_pretrained(pretrained_model_name, config=self.encoder_config)
+            # Ensure the encoder uses our config (in case vocab_size differs)
+            if self.encoder.config.vocab_size != vocab_size:
+                print(f"Warning: Pretrained model vocab_size ({self.encoder.config.vocab_size}) "
+                      f"differs from specified vocab_size ({vocab_size}). "
+                      f"Using specified vocab_size.")
+                self.encoder.resize_token_embeddings(vocab_size)
+        else:
+            print("Initializing encoder with random weights...")
+            self.encoder = GPT2Model(self.encoder_config)
+        
+        # Initialize decoder with or without pretrained weights
+        if use_pretrained_decoder:
+            print(f"Loading pretrained {pretrained_model_name} weights for decoder...")
+            self.decoder = GPT2LMHeadModel.from_pretrained(pretrained_model_name, config=self.decoder_config)
+            # Ensure the decoder uses our config
+            if self.decoder.config.vocab_size != vocab_size:
+                print(f"Warning: Pretrained model vocab_size ({self.decoder.config.vocab_size}) "
+                      f"differs from specified vocab_size ({vocab_size}). "
+                      f"Using specified vocab_size.")
+                self.decoder.resize_token_embeddings(vocab_size)
+        else:
+            print("Initializing decoder with random weights...")
+            self.decoder = GPT2LMHeadModel(self.decoder_config)
         
         # Vector Quantizer
         self.vector_quantizer = VectorQuantizer(num_embeddings, d_model, commitment_cost)

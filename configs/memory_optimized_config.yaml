@@ -6,6 +6,9 @@ model_config:
   aggregation_hidden_dim: 1024  # Aggregation MLP hidden dim
   num_thoughts: 32   # Number of parallel sequences
   n_positions: 1024   # Maximum sequence length
+  use_pretrained_encoder: true  # Load pretrained weights for encoder
+  use_pretrained_decoder: true  # and decoder
+  pretrained_model_name: gpt2  # Use GPT2-Small (124M parameters)
 
 training_config:
   learning_rate: 1e-4
@@ -34,4 +37,4 @@ training_config:
   max_samples: null  # Set to a number (e.g., 1000) for debugging
 
 data_config:
-  data_dir: data/GSM8K 
+  data_dir: data/GSM8K

@@ -1202,7 +1202,11 @@ def create_default_config(output_path: str):
             'commitment_cost': 0.25,  # VQ commitment cost
             'aggregation_hidden_dim': 1024,  # Aggregation MLP hidden dim
             'num_thoughts': 32,   # Number of parallel sequences
-            'n_positions': 1024   # Maximum sequence length
+            'n_positions': 1024,   # Maximum sequence length
+            # Pretrained model settings
+            'use_pretrained_encoder': True,  # Load pretrained weights for encoder
+            'use_pretrained_decoder': True,  # and decoder
+            'pretrained_model_name': 'gpt2'  # Use GPT2-Small (124M parameters)
         },
         'training_config': {
             'learning_rate': 1e-4,
@@ -1254,6 +1258,9 @@ def create_default_config(output_path: str):
     print("  - Gradient checkpointing: Enabled")
     print("  - Memory-efficient dataset: Enabled")
     print("  - Reduced batch size: 2 (effective batch size: 8)")
+    print("Pretrained model settings:")
+    print("  - Encoder: GPT2-Small pretrained weights (use_pretrained_encoder: True)")
+    print("  - Decoder: GPT2-Small pretrained weights (use_pretrained_decoder: True)")
     print("You can modify this file and use it for training.")
 
 def main():
