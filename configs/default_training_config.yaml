@@ -32,7 +32,7 @@ training_config:
   # Checkpointing
   save_every: 5
   checkpoint_dir: checkpoints/gpt2vqvae
-  pad_token_id: 0
+  pad_token_id: 50256
   
   # Data splitting
   val_split: 0.1
