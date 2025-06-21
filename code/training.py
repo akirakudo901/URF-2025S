@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, Dataset
-from typing import Tuple, Optional, Dict, Any, List
+from typing import Tuple, Optional, Dict, Any
 import os
 import json
 import matplotlib.pyplot as plt
@@ -16,7 +16,8 @@ import argparse
 import yaml
 import gc
 # import psutil
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler
+from torch.cuda.amp import autocast
 from collections import deque
 
 # GPU memory monitoring
@@ -367,7 +368,7 @@ class GPT2VQVAETrainer:
         
         # Initialize mixed precision training
         if self.use_mixed_precision:
-            self.scaler = GradScaler()
+            self.scaler = GradScaler('cuda')
             print("Mixed precision training enabled")
         else:
             self.scaler = None
@@ -1039,11 +1040,6 @@ class GPT2VQVAETrainer:
             prompt_mask = torch.load(os.path.join(data_dir, "prompt_mask.pt"))
             cot_mask = torch.load(os.path.join(data_dir, "cot_mask.pt"))
         
-        # Log memory after loading data to CPU
-        if self.memory_monitor:
-            self.memory_monitor.log_memory_usage("after_data_loaded_to_cpu")
-            self.memory_monitor.log_pytorch_memory_usage("after_data_loaded_to_cpu")
-        
         # Limit samples if specified
         if max_samples is not None:
             prompt_sequences = prompt_sequences[:max_samples]
@@ -1066,11 +1062,6 @@ class GPT2VQVAETrainer:
         ) / 1e9
         
         print(f"Total data memory usage: {total_memory_gb:.2f} GB")
-        
-        # Log memory after calculating data memory usage
-        if self.memory_monitor:
-            self.memory_monitor.log_memory_usage("after_data_memory_calculation")
-            self.memory_monitor.log_pytorch_memory_usage("after_data_memory_calculation")
         
         return prompt_sequences, cot_sequences, prompt_mask, cot_mask
 
