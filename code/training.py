@@ -1201,7 +1201,7 @@ def create_default_config(output_path: str):
             'num_embeddings': 512,  # VQ codebook size
             'commitment_cost': 0.25,  # VQ commitment cost
             'aggregation_hidden_dim': 1024,  # Aggregation MLP hidden dim
-            'num_thoughts': 32,   # Number of parallel sequences
+            'num_thoughts': 40,   # Number of parallel sequences
             'n_positions': 1024,   # Maximum sequence length
             # Pretrained model settings
             'use_pretrained_encoder': True,  # Load pretrained weights for encoder
