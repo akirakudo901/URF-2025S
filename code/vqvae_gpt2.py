@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import GPT2Model, GPT2LMHeadModel, GPT2Config
-from transformers.cache_utils import DynamicCache
+from transformers.cache_utils import DynamicCache, EncoderDecoderCache
 
 class VectorQuantizer(nn.Module):
     def __init__(self, num_embeddings : int, embedding_dim : int, 
@@ -422,6 +422,10 @@ class GPT2VQVAE(nn.Module):
         cross_attention_mask = cross_attention_mask.unsqueeze(0).unsqueeze(0).expand(
             batch_size * M, -1, K + L, L)
         
+        # Wrap padded_cache in EncoderDecoderCache for cross-attention
+        # GPT2 expects EncoderDecoderCache when encoder_hidden_states are provided
+        encoder_decoder_cache = EncoderDecoderCache(padded_cache, DynamicCache())
+        
         # Get GPT2 decoder outputs with language modeling head using cached prompt activations
         # Only pass COT sequences as input_ids, not the combined sequence
         decoder_outputs = self.decoder(
@@ -429,7 +433,7 @@ class GPT2VQVAE(nn.Module):
             attention_mask=combined_mask,
             encoder_hidden_states=memory,
             encoder_attention_mask=cross_attention_mask,  # Apply cross-attention mask to memory attention
-            past_key_values=padded_cache,  # Use padded prompt cache
+            past_key_values=encoder_decoder_cache,  # Use EncoderDecoderCache for cross-attention
             use_cache=False,
             return_dict=True
         )
