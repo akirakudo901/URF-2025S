@@ -41,6 +41,24 @@ class GPT2VQVAETrainer:
         self.training_config = training_config
         self.device = device
         
+        # Ensure all numeric values are properly typed
+        def ensure_numeric_types(config_dict):
+            """Ensure all numeric values in config are properly typed."""
+            for key, value in config_dict.items():
+                if isinstance(value, str):
+                    try:
+                        if 'e' in value.lower() or '.' in value:
+                            config_dict[key] = float(value)
+                        else:
+                            config_dict[key] = int(value)
+                    except ValueError:
+                        pass  # Keep as string if conversion fails
+                elif isinstance(value, bool):
+                    config_dict[key] = bool(value)
+        
+        ensure_numeric_types(self.model_config)
+        ensure_numeric_types(self.training_config)
+        
         # Initialize model
         self.model = GPT2VQVAE(**model_config).to(device)
         
@@ -714,8 +732,6 @@ def main():
     except FileNotFoundError as e:
         print(f"Error: {e}")
         print("Please check that the configuration file and data files exist.")
-    except ValueError as e:
-        print(f"Configuration error: {e}")
     except Exception as e:
         print(f"Training error: {e}")
         import traceback
