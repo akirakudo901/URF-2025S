@@ -4,7 +4,7 @@ model_config:
   num_embeddings: 512  # VQ codebook size
   commitment_cost: 0.25  # VQ commitment cost
   aggregation_hidden_dim: 1024  # Aggregation MLP hidden dim
-  num_thoughts: 40   # Number of parallel sequences
+  num_thoughts: 8   # Number of parallel sequences
   n_positions: 1024   # Maximum sequence length
   use_pretrained_encoder: true  # Load pretrained weights for encoder
   use_pretrained_decoder: true  # and decoder
