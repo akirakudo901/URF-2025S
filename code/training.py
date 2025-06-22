@@ -657,7 +657,7 @@ class GPT2VQVAETrainer:
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
         # Validate model and training configurations
-        def _check_config_mismatch(self, checkpoint_config, current_config, config_type):
+        def _check_config_mismatch(checkpoint_config, current_config, config_type):
             """Helper function to check and report configuration mismatches."""
             if checkpoint_config != current_config:
                 print(f"Warning: {config_type} configuration mismatch detected!")
@@ -672,11 +672,11 @@ class GPT2VQVAETrainer:
                 print(f"Continuing with current {config_type} configuration...")
 
         if 'model_config' in checkpoint:
-            self._check_config_mismatch(checkpoint['model_config'], self.model_config, "model")
+            _check_config_mismatch(checkpoint['model_config'], self.model_config, "model")
         
         if 'training_config' in checkpoint:
-            self._check_config_mismatch(checkpoint['training_config'], self.training_config, "training")
-        
+            _check_config_mismatch(checkpoint['training_config'], self.training_config, "training")
+    
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
@@ -720,7 +720,12 @@ class GPT2VQVAETrainer:
         # Calculate split sizes
         num_samples = len(dataset)
         val_size = int(num_samples * val_split)
-        train_size = num_samples - val_size
+        train_size = num_samples - val_size    
+
+        if train_size == 0:
+            raise Exception(f"The training dataset has size 0 given : {num_samples} samples, val_split={val_split}.")
+        elif val_size == 0:
+            raise Exception(f"The validation dataset has size 0 given : {num_samples} samples, val_split={val_split}.")
         
         # Use PyTorch's random_split for reproducible train/validation split
         train_dataset, val_dataset = random_split(
@@ -749,7 +754,7 @@ class GPT2VQVAETrainer:
         start_epoch = 0
         if resume_from:
             self.load_checkpoint(resume_from)
-            start_epoch = len(self.train_losses) + 1
+            start_epoch = len(self.train_losses)
         
         # Training loop
         for epoch in range(start_epoch, self.training_config['num_epochs']):
@@ -792,9 +797,10 @@ class GPT2VQVAETrainer:
             is_best = val_metrics['loss'] < self.best_val_loss
             if is_best:
                 self.best_val_loss = val_metrics['loss']
+                self.save_checkpoint(epoch + 1, val_metrics, True)
             
-            if (epoch + 1) % self.training_config.get('save_every', 5) == 0 or is_best:
-                self.save_checkpoint(epoch + 1, val_metrics, is_best)
+            if (epoch + 1) % self.training_config.get('save_every', 5) == 0:
+                self.save_checkpoint(epoch + 1, val_metrics, False)
             
             # Clear cache after each epoch
             if torch.cuda.is_available():
