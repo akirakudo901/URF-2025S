@@ -544,7 +544,7 @@ class GPT2VQVAETrainer:
                 
                 # Forward pass with mixed precision
                 if self.use_mixed_precision:
-                    with autocast():
+                    with autocast('cuda'):
                         output_sequences, output_logits, vq_loss, perplexity = self.model(
                             prompt=prompts,
                             cot_sequences=cots,
