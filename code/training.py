@@ -1,6 +1,6 @@
 # Author: Akira Kudo
 # Created: 2025/06/19
-# Last Updated: 2025/06/21
+# Last Updated: 2025/06/22
 
 import torch
 import torch.nn as nn
@@ -744,16 +744,22 @@ class GPT2VQVAETrainer:
             'perplexities': self.perplexities
         }
         
-        # Save regular checkpoint
-        checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_epoch_{epoch}.pt')
-        torch.save(checkpoint, checkpoint_path)
-        
         # Save best model if this is the best so far
         if is_best:
-            best_path = os.path.join(checkpoint_dir, 'best_model.pt')
+            # Remove any existing best model checkpoints
+            for file in os.listdir(checkpoint_dir):
+                if 'best_model' in file and file.endswith('.pt'):
+                    os.remove(os.path.join(checkpoint_dir, file))
+            
+            best_path = os.path.join(checkpoint_dir, f'best_model_epoch_{epoch}.pt')
             torch.save(checkpoint, best_path)
             self.best_model_path = best_path
-            print(f"New best model saved with validation loss: {metrics['loss']:.4f}")
+            print(f"New best model saved (epoch {epoch}) with validation loss: {metrics['loss']:.4f}")
+        else:
+            # Save regular checkpoint
+            checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_epoch_{epoch}.pt')
+            torch.save(checkpoint, checkpoint_path)
+        
     
     def load_checkpoint(self, checkpoint_path: str):
         """
@@ -1204,6 +1210,8 @@ def train_gpt2vqvae(prompt_sequences: torch.Tensor,
     Returns:
         Trained GPT2VQVAETrainer instance
     """
+    print("Reminder: Pre-existing pt files with 'best_file' in its name placed in 'checkpoint_dir' will be deleted.")
+
     # Initialize trainer
     trainer = GPT2VQVAETrainer(model_config, training_config)
     
