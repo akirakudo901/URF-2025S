@@ -164,91 +164,6 @@ class GPUMemoryMonitor:
         
         return pytorch_mem
 
-class MemoryEfficientDataset(Dataset):
-    """
-    Memory-efficient dataset that loads data on-demand and supports dynamic batching.
-    """
-    
-    def __init__(self, 
-                 prompt_sequences: torch.Tensor,
-                 cot_sequences: torch.Tensor,
-                 prompt_mask: torch.Tensor,
-                 cot_mask: torch.Tensor,
-                 max_memory_gb: float = 4.0):
-        """
-        Initialize memory-efficient dataset.
-        
-        Args:
-            prompt_sequences: Tensor of shape [num_prompts, M, K]
-            cot_sequences: Tensor of shape [num_prompts, M, L]
-            prompt_mask: Tensor of shape [num_prompts, M, K]
-            cot_mask: Tensor of shape [num_prompts, M, L]
-            max_memory_gb: Maximum memory to use for caching (GB)
-        """
-        self.prompt_sequences = prompt_sequences
-        self.cot_sequences = cot_sequences
-        self.prompt_mask = prompt_mask
-        self.cot_mask = cot_mask
-        self.length = len(prompt_sequences)
-        
-        # Calculate memory usage and determine caching strategy
-        self.sample_size_bytes = (
-            prompt_sequences[0].element_size() * prompt_sequences[0].numel() +
-            cot_sequences[0].element_size() * cot_sequences[0].numel() +
-            prompt_mask[0].element_size() * prompt_mask[0].numel() +
-            cot_mask[0].element_size() * cot_mask[0].numel()
-        )
-        
-        max_samples_in_memory = int((max_memory_gb * 1e9) / self.sample_size_bytes)
-        self.cache_size = min(max_samples_in_memory, self.length)
-        
-        # Initialize cache and LRU tracking
-        self.cache = {}
-        self.lru_queue = deque()  # Queue to track access order (most recent at right)
-        
-        print(f"Memory-efficient dataset initialized:")
-        print(f"  Total samples: {self.length}")
-        print(f"  Sample size: {self.sample_size_bytes / 1e6:.2f} MB")
-        print(f"  Cache size: {self.cache_size} samples")
-        print(f"  Cache memory usage: {self.cache_size * self.sample_size_bytes / 1e9:.2f} GB")
-    
-    def __len__(self):
-        return self.length
-    
-    def __getitem__(self, idx):
-        # If item is in cache, move it to the end (most recently used)
-        if idx in self.cache:
-            # Remove from current position and add to end (most recent)
-            self.lru_queue.remove(idx)
-            self.lru_queue.append(idx)
-            return self.cache[idx]
-        
-        # Load data into cache if not present
-        if len(self.cache) < self.cache_size:
-            # Cache has space, add new item
-            self.cache[idx] = (
-                self.prompt_sequences[idx],
-                self.cot_sequences[idx],
-                self.prompt_mask[idx],
-                self.cot_mask[idx]
-            )
-            self.lru_queue.append(idx)  # Add to end (most recent)
-        else:
-            # Cache is full, evict least recently used item (from front of queue)
-            lru_idx = self.lru_queue.popleft()  # Remove least recently used
-            del self.cache[lru_idx]
-            
-            # Add new item
-            self.cache[idx] = (
-                self.prompt_sequences[idx],
-                self.cot_sequences[idx],
-                self.prompt_mask[idx],
-                self.cot_mask[idx]
-            )
-            self.lru_queue.append(idx)  # Add to end (most recent)
-        
-        return self.cache[idx]
-
 def dynamic_batch_sampler(dataset, max_tokens_per_batch: int = 8192):
     """
     Dynamic batch sampler that groups samples by sequence length to minimize padding.
@@ -451,8 +366,7 @@ class GPT2VQVAETrainer:
                           prompt_mask: torch.Tensor,
                           cot_mask: torch.Tensor,
                           batch_size: int,
-                          shuffle: bool = True,
-                          use_memory_efficient: bool = True) -> DataLoader:
+                          shuffle: bool = True) -> DataLoader:
         """
         Create a DataLoader for training/validation with memory optimizations.
         
@@ -463,7 +377,6 @@ class GPT2VQVAETrainer:
             cot_mask: Tensor of shape [num_prompts, M, L]
             batch_size: Batch size for training
             shuffle: Whether to shuffle the data
-            use_memory_efficient: Whether to use memory-efficient dataset
             
         Returns:
             DataLoader for the dataset
@@ -473,24 +386,17 @@ class GPT2VQVAETrainer:
             self.memory_monitor.log_memory_usage("before_dataset_creation")
             self.memory_monitor.log_pytorch_memory_usage("before_dataset_creation")
         
-        if use_memory_efficient:
-            dataset = MemoryEfficientDataset(
-                prompt_sequences, cot_sequences, prompt_mask, cot_mask,
-                max_memory_gb=self.max_memory_gb
-            )
-            
-            # Use dynamic batching if specified
-            if self.training_config.get('use_dynamic_batching', False):
-                max_tokens = self.training_config.get('max_tokens_per_batch', 8192)
-                sampler = torch.utils.data.SequentialSampler(dataset) if not shuffle else torch.utils.data.RandomSampler(dataset)
-                batch_sampler = torch.utils.data.BatchSampler(sampler, batch_size=batch_size, drop_last=False)
-                return DataLoader(dataset, batch_sampler=batch_sampler, num_workers=0)
-            else:
-                return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0)
+        dataset = TensorDataset(prompt_sequences, cot_sequences, prompt_mask, cot_mask)
+        
+        # Use dynamic batching if specified
+        if self.training_config.get('use_dynamic_batching', False):
+            max_tokens = self.training_config.get('max_tokens_per_batch', 8192)
+            sampler = torch.utils.data.SequentialSampler(dataset) if not shuffle else torch.utils.data.RandomSampler(dataset)
+            batch_sampler = torch.utils.data.BatchSampler(sampler, batch_size=batch_size, drop_last=False)
+            return DataLoader(dataset, batch_sampler=batch_sampler, num_workers=0)
         else:
-            dataset = TensorDataset(prompt_sequences, cot_sequences, prompt_mask, cot_mask)
             return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0)
-    
+            
     def train_epoch(self, train_loader: DataLoader) -> Dict[str, float]:
         """
         Train for one epoch with memory optimizations.
@@ -827,15 +733,13 @@ class GPT2VQVAETrainer:
         train_loader = self.create_data_loader(
             train_prompts, train_cots, train_prompt_masks, train_cot_masks,
             batch_size=self.training_config['batch_size'], 
-            shuffle=True,
-            use_memory_efficient=True
+            shuffle=True
         )
         
         val_loader = self.create_data_loader(
             val_prompts, val_cots, val_prompt_masks, val_cot_masks,
             batch_size=self.training_config['batch_size'], 
-            shuffle=False,
-            use_memory_efficient=True
+            shuffle=False
         )
         
         # Resume from checkpoint if specified
