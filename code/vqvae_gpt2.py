@@ -575,7 +575,7 @@ class GPT2VQVAE(nn.Module):
             
         return combined_mask
     
-    def _pad_kv_cache(self, prompt_cache, batch_size, M, K):
+    def _pad_kv_cache(self, prompt_cache, batch_size, M):
         """
         Pad KV cache M times to match COT batch size.
         
@@ -591,8 +591,8 @@ class GPT2VQVAE(nn.Module):
         # Check if it's an EncoderDecoderCache
         if hasattr(prompt_cache, 'self_attention_cache') and hasattr(prompt_cache, 'cross_attention_cache'):
             # It's an EncoderDecoderCache
-            padded_self_cache = self._pad_kv_cache(prompt_cache.self_attention_cache, batch_size, M, K)
-            padded_cross_cache = self._pad_kv_cache(prompt_cache.cross_attention_cache, batch_size, M, K)
+            padded_self_cache = self._pad_kv_cache(prompt_cache.self_attention_cache, batch_size, M)
+            padded_cross_cache = self._pad_kv_cache(prompt_cache.cross_attention_cache, batch_size, M)
             return EncoderDecoderCache(padded_self_cache, padded_cross_cache)
         
         # Check if it's a Cache object (like DynamicCache)
@@ -607,10 +607,10 @@ class GPT2VQVAE(nn.Module):
                 
                 # Expand from [batch_size, num_heads, K, head_dim] to [batch_size * M, num_heads, K, head_dim]
                 padded_key = key_tensor.unsqueeze(1).expand(-1, M, -1, -1, -1)
-                padded_key = padded_key.reshape(batch_size * M, key_tensor.size(1), K, key_tensor.size(-1))
+                padded_key = padded_key.reshape([batch_size * M] + list(key_tensor.size())[1:])
                 
                 padded_value = value_tensor.unsqueeze(1).expand(-1, M, -1, -1, -1)
-                padded_value = padded_value.reshape(batch_size * M, value_tensor.size(1), K, value_tensor.size(-1))
+                padded_value = padded_value.reshape([batch_size * M] + list(key_tensor.size())[1:])
                 
                 # Update the cache with padded tensors
                 padded_cache.update(padded_key, padded_value, layer_idx)
@@ -625,7 +625,7 @@ class GPT2VQVAE(nn.Module):
                 for kv in layer_cache:
                     # Expand from [batch_size, num_heads, K, head_dim] to [batch_size * M, num_heads, K, head_dim]
                     padded_kv = kv.unsqueeze(1).expand(-1, M, -1, -1, -1)
-                    padded_kv = padded_kv.reshape(batch_size * M, kv.size(1), K, kv.size(-1))
+                    padded_kv = padded_kv.reshape([batch_size * M] + list(key_tensor.size())[1:])
                     padded_layer_cache.append(padded_kv)
                 padded_cache.append(tuple(padded_layer_cache))
             
@@ -678,7 +678,7 @@ class GPT2VQVAE(nn.Module):
             cot_mask_flat = None
         
         # Pad prompt cache M times using helper method
-        padded_cache = self._pad_kv_cache(prompt_cache, batch_size, M, K)
+        padded_cache = self._pad_kv_cache(prompt_cache, batch_size, M)
         
         # Step 3: Continue encoding with COT sequences using cached prompt activations
         # Create combined mask using helper method
@@ -777,7 +777,7 @@ class GPT2VQVAE(nn.Module):
             cot_mask_flat = None
         
         # Pad prompt cache M times using helper method
-        padded_cache = self._pad_kv_cache(prompt_cache, batch_size, M, K)
+        padded_cache = self._pad_kv_cache(prompt_cache, batch_size, M)
         
         # Step 3: Continue decoding with COT sequences using cached prompt activations
         # Create combined mask using helper method
@@ -792,13 +792,13 @@ class GPT2VQVAE(nn.Module):
         chain_emb = self.chain_embeddings(chain_indices).unsqueeze(1)  # [batch_size*M, 1, d_model]
         memory = memory + chain_emb  # Add to all positions in the sequence
         
-        # Create cross-attention mask for memory attention: (K+L) x L
-        cross_attention_mask = create_cross_attention_mask(K + L, L, memory.device)
+        # Create cross-attention mask for memory attention: LxL
+        cross_attention_mask = create_cross_attention_mask(L, L, memory.device)
         
         # Expand to match batch and sequence dimensions for GPT2
-        # Shape: [batch_size*M, 1, K+L, L]
+        # Shape: [batch_size*M, 1, L, L]
         cross_attention_mask = cross_attention_mask.unsqueeze(0).unsqueeze(0).expand(
-            batch_size * M, -1, K + L, L)
+            batch_size * M, -1, L, L)
         
         # Get GPT2 decoder outputs with language modeling head using cached prompt activations
         # Only pass COT sequences as input_ids, not the combined sequence
