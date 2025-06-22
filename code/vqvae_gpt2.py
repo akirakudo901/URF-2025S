@@ -140,33 +140,32 @@ class CustomGPT2Model(GPT2Model):
             encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.size()
             encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
             if encoder_attention_mask is None:
-                print("encoder_attention_mask was None!")
                 encoder_attention_mask = torch.ones(encoder_hidden_shape, device=device)
-                print(f"Is it still? : {encoder_attention_mask is None}")
             if _use_sdpa:
                 encoder_attention_mask = _prepare_4d_attention_mask_for_sdpa(
                     mask=encoder_attention_mask, dtype=inputs_embeds.dtype, tgt_len=input_shape[-1]
                 )
-                print("We're in the sdpa zone")
             elif not self._attn_implementation == "flash_attention_2":
-                print("We're in the non-sdpa non-flash attention 2 zone")
                 encoder_attention_mask = self.invert_attention_mask(encoder_attention_mask)
-
-            print(f"Is it None now? : {encoder_attention_mask is None}")
             
             # MODIFICATION COMPARED TO THE BASE CODE - START
+            # * encoder_attention_mask after _prepare_4d_attention_mask_for_sdpa is None
+            #   if an all-one mask was passed to the function.
             
             # Add the extra cross attention mask on top of the encoder_attention_mask
             if extra_cross_attention_mask is not None:
-                # Ensure the extra mask has the right shape and device
-                if extra_cross_attention_mask.device != encoder_attention_mask.device:
-                    extra_cross_attention_mask = extra_cross_attention_mask.to(encoder_attention_mask.device)
-                if extra_cross_attention_mask.dtype != encoder_attention_mask.dtype:
-                    extra_cross_attention_mask = extra_cross_attention_mask.to(encoder_attention_mask.dtype)
+                if encoder_attention_mask is None:
+                    encoder_attention_mask = extra_cross_attention_mask
+                else:
+                    # Ensure the extra mask has the right shape and device
+                    if extra_cross_attention_mask.device != encoder_attention_mask.device:
+                        extra_cross_attention_mask = extra_cross_attention_mask.to(encoder_attention_mask.device)
+                    if extra_cross_attention_mask.dtype != encoder_attention_mask.dtype:
+                        extra_cross_attention_mask = extra_cross_attention_mask.to(encoder_attention_mask.dtype)
                 
-                # Combine the masks: add the extra mask to the encoder attention mask
-                # Both masks use the same convention: 0 for attended positions, negative infinity for masked positions
-                encoder_attention_mask = encoder_attention_mask + extra_cross_attention_mask
+                    # Combine the masks: add the extra mask to the encoder attention mask
+                    # Both masks use the same convention: 0 for attended positions, negative infinity for masked positions
+                    encoder_attention_mask = encoder_attention_mask + extra_cross_attention_mask
 
             # MODIFICATION COMPARED TO THE BASE CODE - END
         else:
