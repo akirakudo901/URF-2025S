@@ -5,7 +5,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset, Dataset
+from torch.utils.data import DataLoader, TensorDataset, random_split
 from typing import Tuple, Optional, Dict, Any
 import os
 import json
@@ -17,7 +17,6 @@ import yaml
 import gc
 # import psutil
 from torch.amp import autocast, GradScaler
-from collections import deque
 
 # GPU memory monitoring
 try:
@@ -258,7 +257,8 @@ class GPT2VQVAETrainer:
             self.memory_monitor.log_pytorch_memory_usage("after_model_weights_loaded")
         
         # Enable gradient checkpointing if specified
-        # if self.use_gradient_checkpointing:
+        if self.use_gradient_checkpointing:
+            print("use_gradient_checkpointing current does nothing.")
         #     self.model.gradient_checkpointing_enable()
         #     print("Gradient checkpointing enabled")
         
@@ -352,42 +352,22 @@ class GPT2VQVAETrainer:
                 
                 print(f"Memory usage ({stage}): {allocated:.2f}GB allocated, {reserved:.2f}GB reserved, {max_allocated:.2f}GB max")
     
-    def log_detailed_memory_usage(self, stage: str):
-        """Log detailed memory usage with both GPU and PyTorch information."""
-        if self.memory_monitor:
-            self.memory_monitor.log_memory_usage(stage)
-            self.memory_monitor.log_pytorch_memory_usage(stage)
-        else:
-            self.log_memory_usage(stage)
     
     def create_data_loader(self, 
-                          prompt_sequences: torch.Tensor,
-                          cot_sequences: torch.Tensor,
-                          prompt_mask: torch.Tensor,
-                          cot_mask: torch.Tensor,
+                          dataset: torch.utils.data.Dataset,
                           batch_size: int,
                           shuffle: bool = True) -> DataLoader:
         """
         Create a DataLoader for training/validation with memory optimizations.
         
         Args:
-            prompt_sequences: Tensor of shape [num_prompts, M, K]
-            cot_sequences: Tensor of shape [num_prompts, M, L]
-            prompt_mask: Tensor of shape [num_prompts, M, K]
-            cot_mask: Tensor of shape [num_prompts, M, L]
+            dataset: PyTorch dataset (e.g., from random_split)
             batch_size: Batch size for training
             shuffle: Whether to shuffle the data
             
         Returns:
             DataLoader for the dataset
         """
-        # Log memory before creating dataset
-        if self.memory_monitor:
-            self.memory_monitor.log_memory_usage("before_dataset_creation")
-            self.memory_monitor.log_pytorch_memory_usage("before_dataset_creation")
-        
-        dataset = TensorDataset(prompt_sequences, cot_sequences, prompt_mask, cot_mask)
-        
         # Use dynamic batching if specified
         if self.training_config.get('use_dynamic_batching', False):
             max_tokens = self.training_config.get('max_tokens_per_batch', 8192)
@@ -676,6 +656,27 @@ class GPT2VQVAETrainer:
         """
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
+        # Validate model and training configurations
+        def _check_config_mismatch(self, checkpoint_config, current_config, config_type):
+            """Helper function to check and report configuration mismatches."""
+            if checkpoint_config != current_config:
+                print(f"Warning: {config_type} configuration mismatch detected!")
+                print(f"Differences between checkpoint and current {config_type} config:")
+                for key in set(checkpoint_config.keys()) | set(current_config.keys()):
+                    if key not in checkpoint_config:
+                        print(f"  {key}: missing in checkpoint, current: {current_config[key]}")
+                    elif key not in current_config:
+                        print(f"  {key}: missing in current, checkpoint: {checkpoint_config[key]}")
+                    elif checkpoint_config[key] != current_config[key]:
+                        print(f"  {key}: checkpoint={checkpoint_config[key]}, current={current_config[key]}")
+                print(f"Continuing with current {config_type} configuration...")
+
+        if 'model_config' in checkpoint:
+            self._check_config_mismatch(checkpoint['model_config'], self.model_config, "model")
+        
+        if 'training_config' in checkpoint:
+            self._check_config_mismatch(checkpoint['training_config'], self.training_config, "training")
+        
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
@@ -688,6 +689,7 @@ class GPT2VQVAETrainer:
         self.perplexities = checkpoint.get('perplexities', [])
         
         print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
+        print("Checkpoint loaded successfully. Configuration validation completed.")
     
     def train(self, 
               prompt_sequences: torch.Tensor,
@@ -695,7 +697,8 @@ class GPT2VQVAETrainer:
               prompt_mask: torch.Tensor,
               cot_mask: torch.Tensor,
               val_split: float = 0.1,
-              resume_from: Optional[str] = None):
+              resume_from: Optional[str] = None,
+              seed: int = 42):
         """
         Train the model with memory optimizations.
         
@@ -706,38 +709,38 @@ class GPT2VQVAETrainer:
             cot_mask: Training CoT masks
             val_split: Fraction of data to use for validation
             resume_from: Path to checkpoint to resume from
+            seed: Random seed for reproducible train/validation split
         """
         # Log initial memory usage
         self.log_memory_usage("training_start")
         
-        # Split data into train and validation
-        num_samples = len(prompt_sequences)
+        # Create dataset and split into train/validation using PyTorch's random_split
+        dataset = TensorDataset(prompt_sequences, cot_sequences, prompt_mask, cot_mask)
+        
+        # Calculate split sizes
+        num_samples = len(dataset)
         val_size = int(num_samples * val_split)
         train_size = num_samples - val_size
         
-        # Create train/val splits
-        train_prompts = prompt_sequences[:train_size]
-        train_cots = cot_sequences[:train_size]
-        train_prompt_masks = prompt_mask[:train_size]
-        train_cot_masks = cot_mask[:train_size]
-        
-        val_prompts = prompt_sequences[train_size:]
-        val_cots = cot_sequences[train_size:]
-        val_prompt_masks = prompt_mask[train_size:]
-        val_cot_masks = cot_mask[train_size:]
+        # Use PyTorch's random_split for reproducible train/validation split
+        train_dataset, val_dataset = random_split(
+            dataset, 
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(seed)  # Use provided seed for reproducibility
+        )
         
         print(f"Training samples: {train_size}")
         print(f"Validation samples: {val_size}")
         
         # Create data loaders with memory optimizations
         train_loader = self.create_data_loader(
-            train_prompts, train_cots, train_prompt_masks, train_cot_masks,
+            train_dataset,
             batch_size=self.training_config['batch_size'], 
             shuffle=True
         )
         
         val_loader = self.create_data_loader(
-            val_prompts, val_cots, val_prompt_masks, val_cot_masks,
+            val_dataset,
             batch_size=self.training_config['batch_size'], 
             shuffle=False
         )
@@ -1088,59 +1091,6 @@ def validate_model_data_compatibility(model_config: Dict[str, Any],
     
     print("✅ Model-data compatibility validation complete!")
 
-def train_gpt2vqvae(prompt_sequences: torch.Tensor,
-                    cot_sequences: torch.Tensor,
-                    prompt_mask: torch.Tensor,
-                    cot_mask: torch.Tensor,
-                    model_config: Dict[str, Any],
-                    training_config: Dict[str, Any],
-                    val_split: float = 0.1,
-                    resume_from: Optional[str] = None,
-                    save_history: bool = True) -> GPT2VQVAETrainer:
-    """
-    Convenience function to train a GPT2VQVAE model.
-    
-    Args:
-        prompt_sequences: Training prompt sequences
-        cot_sequences: Training CoT sequences
-        prompt_mask: Training prompt masks
-        cot_mask: Training CoT masks
-        model_config: Model hyperparameters
-        training_config: Training hyperparameters
-        val_split: Fraction of data to use for validation
-        resume_from: Path to checkpoint to resume from
-        save_history: Whether to save training history plot
-        
-    Returns:
-        Trained GPT2VQVAETrainer instance
-    """
-    print("Reminder: Pre-existing pt files with 'best_file' in its name placed in 'checkpoint_dir' will be deleted.")
-
-    # Initialize trainer
-    trainer = GPT2VQVAETrainer(model_config, training_config)
-    
-    # Validate that num_thoughts in model config matches data
-    num_thoughts = model_config.get('num_thoughts', None)
-    if num_thoughts is not None:
-        data_num_thoughts = cot_sequences.shape[1]
-        if data_num_thoughts != num_thoughts:
-            print(f"Warning: Data has {data_num_thoughts} parallel sequences, "
-                  f"but model config specifies {num_thoughts}. "
-                  f"Consider using load_training_data_memory_efficient() for automatic truncation.")
-    
-    # Train the model
-    trainer.train(prompt_sequences, cot_sequences, prompt_mask, cot_mask, val_split, resume_from)
-    
-    # Save training history
-    if save_history:
-        history_path = os.path.join(
-            training_config.get('checkpoint_dir', 'checkpoints'),
-            'training_history.png'
-        )
-        trainer.plot_training_history(history_path)
-    
-    return trainer
-
 def load_config(config_path: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Load configuration from a YAML or JSON file.
@@ -1179,47 +1129,6 @@ def load_config(config_path: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         raise ValueError(f"Missing required training config fields: {missing_training}")
     
     return model_config, training_config
-
-def load_training_data(data_dir: str) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Load preprocessed training data.
-    
-    Args:
-        data_dir: Directory containing the preprocessed data files
-        
-    Returns:
-        Tuple of (prompt_sequences, cot_sequences, prompt_mask, cot_mask)
-    """
-    required_files = [
-        "prompt_sequences.pt",
-        "cot_sequences_tensor.pt", 
-        "prompt_mask.pt",
-        "cot_mask.pt"
-    ]
-    
-    # Check if all required files exist
-    missing_files = []
-    for file_name in required_files:
-        file_path = os.path.join(data_dir, file_name)
-        if not os.path.exists(file_path):
-            missing_files.append(file_name)
-    
-    if missing_files:
-        raise FileNotFoundError(f"Missing data files in {data_dir}: {missing_files}")
-    
-    # Load the tensors
-    prompt_sequences = torch.load(os.path.join(data_dir, "prompt_sequences.pt"))
-    cot_sequences = torch.load(os.path.join(data_dir, "cot_sequences_tensor.pt"))
-    prompt_mask = torch.load(os.path.join(data_dir, "prompt_mask.pt"))
-    cot_mask = torch.load(os.path.join(data_dir, "cot_mask.pt"))
-    
-    print(f"Loaded data shapes:")
-    print(f"  prompt_sequences: {prompt_sequences.shape}")
-    print(f"  cot_sequences: {cot_sequences.shape}")
-    print(f"  prompt_mask: {prompt_mask.shape}")
-    print(f"  cot_mask: {cot_mask.shape}")
-    
-    return prompt_sequences, cot_sequences, prompt_mask, cot_mask
 
 def create_default_config(output_path: str):
     """
