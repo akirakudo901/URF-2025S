@@ -406,90 +406,23 @@ class GPT2VQVAETrainer:
             prompt_masks = prompt_masks.to(self.device, non_blocking=True)
             cot_masks = cot_masks.to(self.device, non_blocking=True)
             
-            # Forward pass with mixed precision
+            # Forward pass and loss calculation
+            total_loss_batch, vq_loss, perplexity = self._forward_pass(
+                prompts, cots, prompt_masks, cot_masks
+            )
+            
+            # Scale loss and backward pass
+            scaled_loss = total_loss_batch / self.gradient_accumulation_steps
             if self.use_mixed_precision:
-                with autocast('cuda'):
-                # with autocast():
-                    _, output_logits, vq_loss, perplexity = self.model(
-                        prompt=prompts,
-                        cot_sequences=cots,
-                        cot_mask=cot_masks,
-                        prompt_mask=prompt_masks,
-                        inference=False,
-                        quantize_cot_only=self.training_config.get('quantize_cot_only', True)
-                    )
-                    
-                    # Calculate reconstruction loss
-                    logits_flat = output_logits.view(-1, output_logits.size(-1))
-                    targets_flat = cots.view(-1)
-                    mask_flat = cot_masks.view(-1).bool()
-                    
-                    if mask_flat.sum() > 0:
-                        recon_loss = self.criterion(logits_flat[mask_flat], targets_flat[mask_flat])
-                    else:
-                        recon_loss = torch.tensor(0.0, device=self.device)
-                    
-                    # Total loss
-                    total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
-                    
-                    # Scale loss for gradient accumulation
-                    scaled_loss = total_loss_batch / self.gradient_accumulation_steps
-                
-                # Backward pass with gradient scaling
                 self.scaler.scale(scaled_loss).backward()
             else:
-                _, output_logits, vq_loss, perplexity = self.model(
-                    prompt=prompts,
-                    cot_sequences=cots,
-                    cot_mask=cot_masks,
-                    prompt_mask=prompt_masks,
-                    inference=False,
-                    quantize_cot_only=self.training_config.get('quantize_cot_only', True)
-                )
-                
-                # Calculate reconstruction loss
-                logits_flat = output_logits.view(-1, output_logits.size(-1))
-                targets_flat = cots.view(-1)
-                mask_flat = cot_masks.view(-1).bool()
-                
-                if mask_flat.sum() > 0:
-                    recon_loss = self.criterion(logits_flat[mask_flat], targets_flat[mask_flat])
-                else:
-                    recon_loss = torch.tensor(0.0, device=self.device)
-                
-                # Total loss
-                total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
-                
-                # Scale loss for gradient accumulation
-                scaled_loss = total_loss_batch / self.gradient_accumulation_steps
                 scaled_loss.backward()
             
             accumulation_steps += 1
             
             # Update weights every gradient_accumulation_steps
             if accumulation_steps % self.gradient_accumulation_steps == 0:
-                if self.use_mixed_precision:
-                    # Gradient clipping with scaler
-                    if self.training_config.get('gradient_clip', 1.0) > 0:
-                        self.scaler.unscale_(self.optimizer)
-                        torch.nn.utils.clip_grad_norm_(
-                            self.model.parameters(), 
-                            self.training_config['gradient_clip']
-                        )
-                    
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:
-                    # Gradient clipping
-                    if self.training_config.get('gradient_clip', 1.0) > 0:
-                        torch.nn.utils.clip_grad_norm_(
-                            self.model.parameters(), 
-                            self.training_config['gradient_clip']
-                        )
-                    
-                    self.optimizer.step()
-                
-                self.optimizer.zero_grad()
+                self._update_weights()
             
             # Update metrics
             total_loss += total_loss_batch.item()
@@ -512,15 +445,7 @@ class GPT2VQVAETrainer:
                 gc.collect()
         
         # Calculate averages
-        avg_loss = total_loss / num_batches
-        avg_vq_loss = total_vq_loss / num_batches
-        avg_perplexity = total_perplexity / num_batches
-        
-        return {
-            'loss': avg_loss,
-            'vq_loss': avg_vq_loss,
-            'perplexity': avg_perplexity
-        }
+        return self._get_average_metrics(total_loss, total_vq_loss, total_perplexity, num_batches)
     
     def validate(self, val_loader: DataLoader) -> Dict[str, float]:
         """
@@ -546,51 +471,10 @@ class GPT2VQVAETrainer:
                 prompt_masks = prompt_masks.to(self.device, non_blocking=True)
                 cot_masks = cot_masks.to(self.device, non_blocking=True)
                 
-                # Forward pass with mixed precision
-                if self.use_mixed_precision:
-                    with autocast('cuda'):
-                    # with autocast():
-                        output_sequences, output_logits, vq_loss, perplexity = self.model(
-                            prompt=prompts,
-                            cot_sequences=cots,
-                            cot_mask=cot_masks,
-                            prompt_mask=prompt_masks,
-                            inference=False,
-                            quantize_cot_only=self.training_config.get('quantize_cot_only', True)
-                        )
-                        
-                        # Calculate reconstruction loss
-                        logits_flat = output_logits.view(-1, output_logits.size(-1))
-                        targets_flat = cots.view(-1)
-                        mask_flat = cot_masks.view(-1).bool()
-                        
-                        if mask_flat.sum() > 0:
-                            recon_loss = self.criterion(logits_flat[mask_flat], targets_flat[mask_flat])
-                        else:
-                            recon_loss = torch.tensor(0.0, device=self.device)
-                        
-                        total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
-                else:
-                    output_sequences, output_logits, vq_loss, perplexity = self.model(
-                        prompt=prompts,
-                        cot_sequences=cots,
-                        cot_mask=cot_masks,
-                        prompt_mask=prompt_masks,
-                        inference=False,
-                        quantize_cot_only=self.training_config.get('quantize_cot_only', True)
-                    )
-                    
-                    # Calculate reconstruction loss
-                    logits_flat = output_logits.view(-1, output_logits.size(-1))
-                    targets_flat = cots.view(-1)
-                    mask_flat = cot_masks.view(-1).bool()
-                    
-                    if mask_flat.sum() > 0:
-                        recon_loss = self.criterion(logits_flat[mask_flat], targets_flat[mask_flat])
-                    else:
-                        recon_loss = torch.tensor(0.0, device=self.device)
-                    
-                    total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
+                # Forward pass and loss calculation
+                total_loss_batch, vq_loss, perplexity = self._forward_pass(
+                    prompts, cots, prompt_masks, cot_masks
+                )
                 
                 # Update metrics
                 total_loss += total_loss_batch.item()
@@ -599,14 +483,72 @@ class GPT2VQVAETrainer:
                 num_batches += 1
         
         # Calculate averages
-        avg_loss = total_loss / num_batches
-        avg_vq_loss = total_vq_loss / num_batches
-        avg_perplexity = total_perplexity / num_batches
+        return self._get_average_metrics(total_loss, total_vq_loss, total_perplexity, num_batches)
+    
+    def _forward_pass(self, prompts, cots, prompt_masks, cot_masks):
+        """Helper function for forward pass and loss calculation"""
+        def _compute_loss(output_logits, cots, cot_masks, vq_loss):
+            logits_flat = output_logits.reshape(-1, output_logits.size(-1))
+            targets_flat = cots.view(-1)
+            mask_flat = cot_masks.view(-1).bool()
+            
+            recon_loss = torch.tensor(0.0, device=self.device)
+            if mask_flat.sum() > 0:
+                recon_loss = self.criterion(logits_flat[mask_flat], targets_flat[mask_flat])
+            
+            return recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
         
+        if self.use_mixed_precision:
+            with autocast('cuda'):
+                _, output_logits, vq_loss, perplexity = self.model(
+                    prompt=prompts,
+                    cot_sequences=cots,
+                    cot_mask=cot_masks,
+                    prompt_mask=prompt_masks,
+                    inference=False,
+                    quantize_cot_only=self.training_config.get('quantize_cot_only', True)
+                )
+                total_loss_batch = _compute_loss(output_logits, cots, cot_masks, vq_loss)
+        else:
+            _, output_logits, vq_loss, perplexity = self.model(
+                prompt=prompts,
+                cot_sequences=cots,
+                cot_mask=cot_masks,
+                prompt_mask=prompt_masks,
+                inference=False,
+                quantize_cot_only=self.training_config.get('quantize_cot_only', True)
+            )
+            total_loss_batch = _compute_loss(output_logits, cots, cot_masks, vq_loss)
+            
+        return total_loss_batch, vq_loss, perplexity
+    
+    def _update_weights(self):
+        """Helper function for updating weights"""
+        if self.use_mixed_precision:
+            if self.training_config.get('gradient_clip', 1.0) > 0:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    self.training_config['gradient_clip']
+                )
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            if self.training_config.get('gradient_clip', 1.0) > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    self.training_config['gradient_clip']
+                )
+            self.optimizer.step()
+        
+        self.optimizer.zero_grad()
+    
+    def _get_average_metrics(self, total_loss, total_vq_loss, total_perplexity, num_batches):
+        """Helper function for calculating average metrics"""
         return {
-            'loss': avg_loss,
-            'vq_loss': avg_vq_loss,
-            'perplexity': avg_perplexity
+            'loss': total_loss / num_batches,
+            'vq_loss': total_vq_loss / num_batches,
+            'perplexity': total_perplexity / num_batches
         }
     
     def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False):
