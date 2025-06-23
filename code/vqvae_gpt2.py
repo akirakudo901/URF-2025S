@@ -872,29 +872,11 @@ class GPT2VQVAE(nn.Module):
             # TODO IF I FIND THE TIME : USE KV-CACHING TO SPEED UP AUTO-REGRESSIVE GENERATION
             # During inference, generate sequence auto-regressively
             for t in range(L):
-                # Create padded current COT sequences
-                current_cot = torch.zeros((batch_size, M, L), dtype=torch.long, device=cot_sequences.device)
-                if t > 0:
-                    current_cot[:, :, :t] = output_sequences[:, :, :t]
-                
-                # Create padded current COT mask
-                current_cot_mask = None
-                if cot_mask is not None:
-                    current_cot_mask = torch.zeros_like(cot_mask)
-                    if t > 0:
-                        current_cot_mask[:, :, :t] = cot_mask[:, :, :t]
-                    # Set the current position to be attended to (1 for valid, 0 for padding)
-                    current_cot_mask[:, :, t] = 1
-                
-                current_output = self.decode(cot_quantized, prompt, current_cot, prompt_mask, current_cot_mask)
+                current_output = self.decode(cot_quantized, prompt, output_sequences, prompt_mask, cot_mask)
                 
                 # Get next token predictions
-                next_token_logits = current_output[:, :, t, :]  # [batch_size, M, vocab_size]
-                next_tokens = torch.argmax(next_token_logits, dim=-1)  # [batch_size, M]
-                
-                # Store logits + new token for current position
-                output_logits[:, :, t, :] = next_token_logits
-                output_sequences[:, :, t] = next_tokens
+                output_logits[:, :, t, :] = current_output[:, :, t, :]  # [batch_size, M, L, vocab_size]
+                output_sequences[:, :, t] = torch.argmax(output_logits[:, :, t, :], dim=-1)  # [batch_size, M, L]
         
         return output_sequences, output_logits, vq_loss, perplexity
 
