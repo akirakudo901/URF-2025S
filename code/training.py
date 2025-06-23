@@ -1472,8 +1472,22 @@ def main():
         
         # Initialize trainer first to use its memory-efficient loading method
         print("Initializing trainer...")
-        trainer = GPT2VQVAETrainer(model_config, training_config, device=device)
         
+        # If resume_from, initialize weights randomly
+        if args.resume_from:
+            model_config['use_pretrained_encoder'] = False
+            model_config['use_pretrained_decoder'] = False
+            
+            trainer = GPT2VQVAETrainer(model_config, training_config, device=device)
+            
+            # Resume from checkpoint if specified
+            print(f"Resuming from checkpoint: {args.resume_from}")
+            trainer.load_checkpoint(args.resume_from)
+            
+        # Otherwise do as config specifies
+        else:
+            trainer = GPT2VQVAETrainer(model_config, training_config, device=device)
+
         # Load data using memory-efficient method with num_thoughts truncation
         prompt_sequences, cot_sequences, prompt_mask, cot_mask = trainer.load_training_data_memory_efficient(
             data_dir, max_samples=max_samples, num_thoughts=num_thoughts
@@ -1481,11 +1495,6 @@ def main():
         
         # Validate model-data compatibility
         validate_model_data_compatibility(model_config, prompt_sequences, cot_sequences, prompt_mask, cot_mask)
-        
-        # Resume from checkpoint if specified
-        if args.resume_from:
-            print(f"Resuming from checkpoint: {args.resume_from}")
-            trainer.load_checkpoint(args.resume_from)
         
         # Get validation split from config
         val_split = training_config.get('val_split', 0.1)
