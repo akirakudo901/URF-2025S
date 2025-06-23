@@ -1,6 +1,6 @@
 # Author: Akira Kudo
 # Created: 2025/06/12
-# Last Updated: 2025/06/21
+# Last Updated: 2025/06/22
 
 import torch
 import torch.nn as nn
@@ -522,6 +522,11 @@ class GPT2VQVAE(nn.Module):
         self.d_model = d_model
         self.num_thoughts = num_thoughts
         
+        # Store pretrained model information for checkpoint validation
+        self._use_pretrained_encoder = use_pretrained_encoder
+        self._use_pretrained_decoder = use_pretrained_decoder
+        self._pretrained_model_name = pretrained_model_name
+        
     def aggregate(self, memory, mode="linear"):
         """
         Aggregates same-position embeddings from chains sharing the same prompt.
@@ -879,6 +884,60 @@ class GPT2VQVAE(nn.Module):
                 output_sequences[:, :, t] = next_tokens
         
         return output_sequences, output_logits, vq_loss, perplexity
+
+    def load_checkpoint(self, checkpoint_path: str, device: str = None):
+        """
+        Load model checkpoint.
+        
+        Args:
+            checkpoint_path: Path to checkpoint file
+            device: Device to load the checkpoint on (if None, uses model's device)
+        """
+        if device is None:
+            device = next(self.parameters()).device
+        
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        
+        # Validate model and training configurations
+        def _check_config_mismatch(checkpoint_config, current_config, config_type):
+            """Helper function to check and report configuration mismatches."""
+            if checkpoint_config != current_config:
+                print(f"Warning: {config_type} configuration mismatch detected!")
+                print(f"Differences between checkpoint and current {config_type} config:")
+                for key in set(checkpoint_config.keys()) | set(current_config.keys()):
+                    if key not in checkpoint_config:
+                        print(f"  {key}: missing in checkpoint, current: {current_config[key]}")
+                    elif key not in current_config:
+                        print(f"  {key}: missing in current, checkpoint: {checkpoint_config[key]}")
+                    elif checkpoint_config[key] != current_config[key]:
+                        print(f"  {key}: checkpoint={checkpoint_config[key]}, current={current_config[key]}")
+                print(f"Continuing with current {config_type} configuration...")
+        
+        # Get current model configuration
+        current_model_config = {
+            'vocab_size': self.encoder_config.vocab_size,
+            'd_model': self.d_model,
+            'num_embeddings': self.vector_quantizer.num_embeddings,
+            'commitment_cost': self.vector_quantizer.commitment_cost,
+            'aggregation_hidden_dim': self.aggregation_mlp[0].out_features,
+            'num_thoughts': self.num_thoughts,
+            'n_positions': self.encoder_config.n_positions,
+            'use_pretrained_encoder': hasattr(self, '_use_pretrained_encoder'),
+            'use_pretrained_decoder': hasattr(self, '_use_pretrained_decoder'),
+            'pretrained_model_name': getattr(self, '_pretrained_model_name', 'gpt2')
+        }
+        
+        if 'model_config' in checkpoint:
+            _check_config_mismatch(checkpoint['model_config'], current_model_config, "model")
+        
+        if 'training_config' in checkpoint:
+            print("Note: Training configuration found in checkpoint but not validated for model-only loading.")
+        
+        # Load model state dict
+        self.load_state_dict(checkpoint['model_state_dict'])
+        
+        print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
+        print("Checkpoint loaded successfully. Configuration validation completed.")
 
 def create_cross_attention_mask(query_length, key_length, device, dtype=torch.float32):
     """
