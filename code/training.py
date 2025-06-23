@@ -1319,7 +1319,7 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
             try:
                 _, output_logits_tf, vq_loss_tf, perplexity_tf = model(
                     prompt=prompt,
-                    cot_sequences=cot_gt,  # Use ground truth as input
+                    cot_sequences=cot_gt,
                     cot_mask=cot_mask_ex,
                     prompt_mask=prompt_mask_ex,
                     inference=False,  # Teacher forcing
@@ -1342,13 +1342,9 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
             # Generate auto-regressively (inference=True)
             print("\n--- Auto-regressive Generation ---")
             try:
-                # Create dummy COT sequences for auto-regressive generation
-                batch_size, M, L = cot_gt.shape
-                dummy_cot = torch.zeros(batch_size, M, L, dtype=torch.long, device=device)
-                
                 output_sequences_ar, output_logits_ar, vq_loss_ar, perplexity_ar = model(
                     prompt=prompt,
-                    cot_sequences=dummy_cot,  # Start with zeros
+                    cot_sequences=cot_gt,
                     cot_mask=cot_mask_ex,
                     prompt_mask=prompt_mask_ex,
                     inference=True,  # Auto-regressive
