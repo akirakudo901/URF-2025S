@@ -1,6 +1,6 @@
 # Author: Akira Kudo
 # Created: 2025/06/19
-# Last Updated: 2025/06/22
+# Last Updated: 2025/06/23
 
 import torch
 import torch.nn as nn
@@ -1317,7 +1317,7 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
             # Generate with teacher forcing (inference=False)
             print("\n--- Teacher Forcing Generation ---")
             try:
-                output_sequences_tf, output_logits_tf, vq_loss_tf, perplexity_tf = model(
+                _, output_logits_tf, vq_loss_tf, perplexity_tf = model(
                     prompt=prompt,
                     cot_sequences=cot_gt,  # Use ground truth as input
                     cot_mask=cot_mask_ex,
@@ -1326,10 +1326,13 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
                     quantize_cot_only=True
                 )
                 
-                # Decode teacher forcing output for all sequences
+                # Get predicted tokens from logits
+                predicted_tokens = torch.argmax(output_logits_tf, dim=-1)  # [B, M, L]
+                
+                # Decode teacher forcing predictions from logits for all sequences
                 print(f"Teacher Forcing CoT Sequences ({num_thoughts} parallel chains):")
                 for j in range(num_thoughts):
-                    cot_tf_text = decode_tokens(output_sequences_tf[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)
+                    cot_tf_text = decode_tokens(predicted_tokens[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)
                     print(f"  CoT {j+1}: {cot_tf_text}")
                 print(f"VQ Loss: {vq_loss_tf.item():.4f}, Perplexity: {perplexity_tf.item():.2f}")
                 
