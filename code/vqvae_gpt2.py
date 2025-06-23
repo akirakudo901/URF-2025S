@@ -868,7 +868,7 @@ class GPT2VQVAE(nn.Module):
             cot_quantized = quantized[:, K:, :, :]
         
         # Initialize tensor to store generation results and logits
-        output_sequences = torch.empty((batch_size, M, L), dtype=torch.long, device=cot_sequences.device)
+        output_sequences = torch.zeros((batch_size, M, L), dtype=torch.long, device=cot_sequences.device)
         output_logits = torch.empty((batch_size, M, L, self.decoder_config.vocab_size), device=cot_sequences.device)
         
         if not inference:
