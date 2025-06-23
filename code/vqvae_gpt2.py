@@ -770,7 +770,7 @@ class GPT2VQVAE(nn.Module):
         batch_size, K = prompt_sequences.shape
         _, M, L = cot_sequences.shape
         
-        # Reshape memory for decoder: [batch_size, L, M, d_model] -> [batch_size, M, L, d_model]
+        # Reshape memory for decoder
         memory = memory.transpose(1, 2)  # [batch_size, M, L, d_model]
         memory = memory.reshape(batch_size * M, L, -1)  # [batch_size * M, L, d_model]
         
@@ -807,28 +807,24 @@ class GPT2VQVAE(nn.Module):
         # Prepare last prompt token (either from prompt or padding)
         if K > 0:
             last_prompt_token = prompt_sequences[:, K-1:K].unsqueeze(1).expand(-1, M, -1)  # [batch_size, M, 1]
-            # Handle prompt mask
-            if prompt_mask is not None:
-                last_prompt_mask = prompt_mask[:, K-1:K].unsqueeze(1).expand(-1, M, -1)  # [batch_size, M, 1]
-            else:
-                last_prompt_mask = torch.ones(batch_size, M, 1, device=cot_sequences.device)  # [batch_size, M, 1]
         else:
             last_prompt_token = torch.full((batch_size, M, 1), pad_token_id, 
                                          dtype=torch.long, device=cot_sequences.device)  # [batch_size, M, 1]
-            last_prompt_mask = torch.zeros(batch_size, M, 1, device=cot_sequences.device)  # [batch_size, M, 1]
 
-        # Handle COT mask
-        if cot_mask is None:
-            cot_mask = torch.ones(batch_size, M, L, device=cot_sequences.device)  # [batch_size, M, L]
-
-        # Concatenate sequences and masks
+        # Concatenate sequences
         combined_sequences = torch.cat([last_prompt_token, cot_sequences], dim=2)  # [batch_size, M, L+1]
         combined_sequences_flat = combined_sequences.view(batch_size * M, L + 1)  # [batch_size * M, L+1]
         
-        combined_mask = torch.cat([last_prompt_mask, cot_mask], dim=2)  # [batch_size, M, L+1]
-        combined_mask_flat = combined_mask.view(batch_size * M, L + 1)  # [batch_size * M, L+1]
+        # Step 3: Create combined mask using _create_combined_mask for full extent
+        if cot_mask is not None:
+            cot_mask_flat = cot_mask.view(batch_size * M, L)  # [batch_size * M, L]
+        else:
+            cot_mask_flat = None
         
-        # Step 3: Create cross-attention mask for memory attention
+        # Use _create_combined_mask to get the full combined mask (K+L length)
+        full_combined_mask = self._create_combined_mask(prompt_mask, cot_mask_flat, batch_size, M, K, L, cot_sequences.device)
+        
+        # Step 4: Create cross-attention mask for memory attention
         # For each position i in the combined sequence, can attend to memory tokens 0 to i
         cross_attention_mask = create_cross_attention_mask(L+1, L, memory.device)
         
@@ -836,10 +832,10 @@ class GPT2VQVAE(nn.Module):
         cross_attention_mask = cross_attention_mask.unsqueeze(0).unsqueeze(0).expand(
             batch_size * M, -1, -1, -1) # [batch_size*M, 1, L+1, L]
         
-        # Step 4: Compute all logits in one forward pass
+        # Step 5: Compute all logits in one forward pass
         decoder_outputs = self.decoder(
             input_ids=combined_sequences_flat,  # [batch_size * M, L+1]
-            attention_mask=combined_mask_flat,
+            attention_mask=full_combined_mask,
             encoder_hidden_states=memory,  # [batch_size * M, L, d_model]
             extra_cross_attention_mask=cross_attention_mask,  # [batch_size * M, 1, L+1, L]
             past_key_values=padded_cache,  # Use padded EncoderDecoderCache
@@ -892,10 +888,6 @@ class GPT2VQVAE(nn.Module):
         else:                          # if False: [batch_size, K+L, M, d_model] (all positions)
             cot_quantized = quantized[:, K:, :, :]
         
-        # Initialize tensor to store generation results and logits
-        output_sequences = torch.zeros((batch_size, M, L), dtype=torch.long, device=cot_sequences.device)
-        output_logits = torch.empty((batch_size, M, L, self.decoder_config.vocab_size), device=cot_sequences.device)
-        
         if not inference:
             # During training, use teacher forcing with single forward pass to get all logits
             output_logits = self.decode(cot_quantized, prompt, cot_sequences, prompt_mask, cot_mask, pad_token_id) # [batch_size, M, L, vocab_size]
@@ -903,14 +895,13 @@ class GPT2VQVAE(nn.Module):
             # Get the predicted tokens from logits
             output_sequences = torch.argmax(output_logits, dim=-1)
         else:
+            # Initialize tensor to store generation results and logits
+            output_sequences = torch.zeros((batch_size, M, L), dtype=torch.long, device=cot_sequences.device)
+            output_logits = torch.empty((batch_size, M, L, self.decoder_config.vocab_size), device=cot_sequences.device)
+        
             # TODO IF I FIND THE TIME : USE KV-CACHING TO SPEED UP AUTO-REGRESSIVE GENERATION
             # During inference, generate sequence auto-regressively
-            # TODO FIX LATER
             for t in range(L):
-                if t == 0:
-                    # kind of cheating but fixes my mistakes
-                    output_sequences[:, :, t] = cot_sequences[:, :, t]
-                    continue
                 current_output = self.decode(cot_quantized, prompt, output_sequences, prompt_mask, cot_mask, pad_token_id)
                 
                 # Get next token predictions
