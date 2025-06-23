@@ -1439,6 +1439,10 @@ def main():
             else:
                 print("GPU memory monitoring: Disabled (--monitor-gpu-memory=False)")
         
+        data_dir = training_config.get('data_dir', 'data/GSM8K')
+        max_samples = training_config.get('max_samples', None)
+        num_thoughts = model_config.get('num_thoughts', None)  # Extract from model config
+
         # Run demonstration if requested
         if args.demonstrate:
             print(f"\nRunning demonstration with checkpoint: {args.demonstrate}")
@@ -1450,11 +1454,6 @@ def main():
                 device=device
             )
             return  # Exit after demonstration
-        
-        # Load training data with memory optimizations
-        data_dir = training_config.get('data_dir', 'data/GSM8K')
-        max_samples = training_config.get('max_samples', None)
-        num_thoughts = model_config.get('num_thoughts', None)  # Extract from model config
         
         # Command-line argument takes precedence
         if args.num_thoughts is not None:
