@@ -17,6 +17,7 @@ import yaml
 import gc
 # import psutil
 from torch.amp import autocast, GradScaler
+from transformers import GPT2Tokenizer
 
 # GPU memory monitoring
 try:
@@ -1212,6 +1213,159 @@ def create_default_config(output_path: str):
     print("  - Decoder: GPT2-Small pretrained weights (use_pretrained_decoder: True)")
     print("You can modify this file and use it for training.")
 
+def demonstrate_model_from_checkpoint(checkpoint_path: str, 
+                                    model_config: Dict[str, Any],
+                                    data_dir: str,
+                                    num_examples: int = 3,
+                                    device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+    """
+    Demonstrate GPT2VQVAE model generation capabilities from a checkpoint.
+    
+    Args:
+        checkpoint_path: Path to the checkpoint file
+        model_config: Model configuration dictionary
+        data_dir: Directory containing training data
+        num_examples: Number of examples to generate
+        device: Device to run the model on
+    """
+    print(f"Loading model from checkpoint: {checkpoint_path}")
+    
+    # Initialize model
+    model = GPT2VQVAE(**model_config).to(device)
+    
+    # Load checkpoint
+    model.load_checkpoint(checkpoint_path, device=device)
+    model.eval()
+    
+    # Get num_thoughts from model configuration
+    num_thoughts = model_config.get('num_thoughts', 32)
+    print(f"Model configured for {num_thoughts} parallel CoT sequences")
+    
+    # Load tokenizer
+    try:
+        tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+        tokenizer.pad_token = tokenizer.eos_token
+        print("Loaded GPT2 tokenizer")
+    except Exception as e:
+        print(f"Warning: Could not load tokenizer: {e}")
+        tokenizer = None
+    
+    # Load some example data
+    print(f"Loading example data from: {data_dir}")
+    try:
+        # Load a small subset of data for demonstration
+        prompt_sequences = torch.load(os.path.join(data_dir, "prompt_sequences.pt"))[:num_examples]
+        cot_sequences = torch.load(os.path.join(data_dir, "cot_sequences_tensor.pt"))[:num_examples]
+        prompt_mask = torch.load(os.path.join(data_dir, "prompt_mask.pt"))[:num_examples]
+        cot_mask = torch.load(os.path.join(data_dir, "cot_mask.pt"))[:num_examples]
+        
+        print(f"Loaded {len(prompt_sequences)} examples")
+        
+        # Check if data has enough CoT sequences
+        data_num_thoughts = cot_sequences.shape[1]
+        if data_num_thoughts < num_thoughts:
+            print(f"Warning: Data only has {data_num_thoughts} CoT sequences, but model expects {num_thoughts}")
+            print(f"Will use {data_num_thoughts} sequences for demonstration")
+            num_thoughts = data_num_thoughts
+        elif data_num_thoughts > num_thoughts:
+            print(f"Data has {data_num_thoughts} CoT sequences, truncating to {num_thoughts} for model compatibility")
+            cot_sequences = cot_sequences[:, :num_thoughts, :]
+            cot_mask = cot_mask[:, :num_thoughts, :]
+        
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        return
+    
+    # Function to decode tokens to text
+    def decode_tokens(tokens, mask=None):
+        if tokenizer is None:
+            return f"[Tokens: {tokens.tolist()}]"
+        
+        if mask is not None:
+            # Apply mask to remove padding
+            tokens = tokens[mask.bool()]
+        
+        try:
+            return tokenizer.decode(tokens, skip_special_tokens=True)
+        except Exception as e:
+            return f"[Decode error: {e}, tokens: {tokens.tolist()}]"
+    
+    print("\n" + "="*80)
+    print("GPT2VQVAE GENERATION DEMONSTRATION")
+    print("="*80)
+    
+    with torch.no_grad():
+        for i in range(min(num_examples, len(prompt_sequences))):
+            print(f"\n--- Example {i+1} ---")
+            
+            # Prepare single example
+            prompt = prompt_sequences[i:i+1].to(device)  # [1, K]
+            cot_gt = cot_sequences[i:i+1].to(device)     # [1, M, L]
+            prompt_mask_ex = prompt_mask[i:i+1].to(device) if prompt_mask is not None else None
+            cot_mask_ex = cot_mask[i:i+1].to(device) if cot_mask is not None else None
+            
+            # Decode ground truth
+            prompt_text = decode_tokens(prompt[0], prompt_mask_ex[0] if prompt_mask_ex is not None else None)
+            print(f"Prompt: {prompt_text}")
+            
+            # Show all ground truth CoT sequences
+            print(f"\nGround Truth CoT Sequences ({num_thoughts} parallel chains):")
+            for j in range(num_thoughts):
+                cot_gt_text = decode_tokens(cot_gt[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)
+                print(f"  CoT {j+1}: {cot_gt_text}")
+            
+            # Generate with teacher forcing (inference=False)
+            print("\n--- Teacher Forcing Generation ---")
+            try:
+                output_sequences_tf, output_logits_tf, vq_loss_tf, perplexity_tf = model(
+                    prompt=prompt,
+                    cot_sequences=cot_gt,  # Use ground truth as input
+                    cot_mask=cot_mask_ex,
+                    prompt_mask=prompt_mask_ex,
+                    inference=False,  # Teacher forcing
+                    quantize_cot_only=True
+                )
+                
+                # Decode teacher forcing output for all sequences
+                print(f"Teacher Forcing CoT Sequences ({num_thoughts} parallel chains):")
+                for j in range(num_thoughts):
+                    cot_tf_text = decode_tokens(output_sequences_tf[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)
+                    print(f"  CoT {j+1}: {cot_tf_text}")
+                print(f"VQ Loss: {vq_loss_tf.item():.4f}, Perplexity: {perplexity_tf.item():.2f}")
+                
+            except Exception as e:
+                print(f"Teacher forcing generation failed: {e}")
+            
+            # Generate auto-regressively (inference=True)
+            print("\n--- Auto-regressive Generation ---")
+            try:
+                # Create dummy COT sequences for auto-regressive generation
+                batch_size, M, L = cot_gt.shape
+                dummy_cot = torch.zeros(batch_size, M, L, dtype=torch.long, device=device)
+                
+                output_sequences_ar, output_logits_ar, vq_loss_ar, perplexity_ar = model(
+                    prompt=prompt,
+                    cot_sequences=dummy_cot,  # Start with zeros
+                    cot_mask=cot_mask_ex,
+                    prompt_mask=prompt_mask_ex,
+                    inference=True,  # Auto-regressive
+                    quantize_cot_only=True
+                )
+                
+                # Decode auto-regressive output for all sequences
+                print(f"Auto-regressive CoT Sequences ({num_thoughts} parallel chains):")
+                for j in range(num_thoughts):
+                    cot_ar_text = decode_tokens(output_sequences_ar[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)
+                    print(f"  CoT {j+1}: {cot_ar_text}")
+                print(f"VQ Loss: {vq_loss_ar.item():.4f}, Perplexity: {perplexity_ar.item():.2f}")
+                
+            except Exception as e:
+                print(f"Auto-regressive generation failed: {e}")
+            
+            print("\n" + "-"*60)
+    
+    print("\nDemonstration completed!")
+
 def main():
     """
     Main function for command-line training with memory optimizations.
@@ -1235,6 +1389,10 @@ def main():
                        help='Monitor GPU memory usage using nvidia-ml-py3 (default: True)')
     parser.add_argument('--num-thoughts', type=int, default=None,
                        help='Override num_thoughts parameter from config (truncates dataset if needed)')
+    parser.add_argument('--demonstrate', type=str, default=None,
+                       help='Demonstrate model generation from checkpoint (provide checkpoint path)')
+    parser.add_argument('--num-examples', type=int, default=3,
+                       help='Number of examples to generate in demonstration mode')
     
     args = parser.parse_args()
     
@@ -1280,6 +1438,18 @@ def main():
                 print("GPU memory monitoring: Disabled (nvidia-ml-py3 not available)")
             else:
                 print("GPU memory monitoring: Disabled (--monitor-gpu-memory=False)")
+        
+        # Run demonstration if requested
+        if args.demonstrate:
+            print(f"\nRunning demonstration with checkpoint: {args.demonstrate}")
+            demonstrate_model_from_checkpoint(
+                checkpoint_path=args.demonstrate,
+                model_config=model_config,
+                data_dir=data_dir,
+                num_examples=args.num_examples,
+                device=device
+            )
+            return  # Exit after demonstration
         
         # Load training data with memory optimizations
         data_dir = training_config.get('data_dir', 'data/GSM8K')
