@@ -437,7 +437,7 @@ class GPT2VQVAE(nn.Module):
                  commitment_cost=0.25, aggregation_hidden_dim=1024, 
                  num_thoughts=32, n_positions=1024, 
                  use_pretrained_encoder=True, use_pretrained_decoder=True,
-                 pretrained_model_name="gpt2"):
+                 pretrained_model_name="gpt2", n_layer=12, n_head=12, n_inner=None):
         """
         GPT2-based VQ-VAE model that uses GPT2 as both encoder and decoder.
         
@@ -452,6 +452,9 @@ class GPT2VQVAE(nn.Module):
             use_pretrained_encoder (bool): Whether to load pretrained weights for encoder
             use_pretrained_decoder (bool): Whether to load pretrained weights for decoder
             pretrained_model_name (str): Name of pretrained model to load (default: "gpt2")
+            n_layer (int, optional): Number of hidden layers in the Transformer encoder (default: 12)
+            n_head (int, optional): Number of attention heads for each attention layer (default: 12)
+            n_inner (int, optional): Dimensionality of the inner feed-forward layers. None will set it to 4 times n_embd
         """
         super(GPT2VQVAE, self).__init__()
 
@@ -463,6 +466,9 @@ class GPT2VQVAE(nn.Module):
             vocab_size=vocab_size,
             n_embd=d_model,
             n_positions=n_positions,
+            n_layer=n_layer,
+            n_head=n_head,
+            n_inner=n_inner,
         )
         
         # Create separate config for decoder with cross-attention
@@ -472,6 +478,9 @@ class GPT2VQVAE(nn.Module):
             n_positions=n_positions,
             add_cross_attention=True,  # Enable cross-attention for decoder
             is_decoder=True,  # Mark as decoder
+            n_layer=n_layer,
+            n_head=n_head,
+            n_inner=n_inner,
         )
         
         # Initialize encoder with or without pretrained weights
@@ -917,6 +926,9 @@ class GPT2VQVAE(nn.Module):
             'aggregation_hidden_dim': self.aggregation_mlp[0].out_features,
             'num_thoughts': self.num_thoughts,
             'n_positions': self.encoder_config.n_positions,
+            'n_layer': self.encoder_config.n_layer,
+            'n_head': self.encoder_config.n_head,
+            'n_inner': self.encoder_config.n_inner,
             'use_pretrained_encoder': hasattr(self, '_use_pretrained_encoder'),
             'use_pretrained_decoder': hasattr(self, '_use_pretrained_decoder'),
             'pretrained_model_name': getattr(self, '_pretrained_model_name', 'gpt2')
