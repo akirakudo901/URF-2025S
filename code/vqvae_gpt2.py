@@ -771,6 +771,7 @@ class GPT2VQVAE(nn.Module):
         encoder_decoder_cache = EncoderDecoderCache(DynamicCache(), DynamicCache())
         
         # Get GPT2 decoder outputs for prompt with caching
+        # TODO: DO I NEED TO PASS ANYTHING HERE INSTEAD OF JUST NOT PASSING ANYTHING?
         prompt_outputs = self.decoder(
             input_ids=prompt_sequences,
             attention_mask=prompt_mask,
@@ -880,7 +881,12 @@ class GPT2VQVAE(nn.Module):
         else:
             # TODO IF I FIND THE TIME : USE KV-CACHING TO SPEED UP AUTO-REGRESSIVE GENERATION
             # During inference, generate sequence auto-regressively
+            # TODO FIX LATER
             for t in range(L):
+                if t == 0:
+                    # kind of cheating but fixes my mistakes
+                    output_sequences[:, :, t] = cot_sequences[:, :, t]
+                    continue
                 current_output = self.decode(cot_quantized, prompt, output_sequences, prompt_mask, cot_mask)
                 
                 # Get next token predictions
