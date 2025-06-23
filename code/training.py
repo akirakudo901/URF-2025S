@@ -17,6 +17,7 @@ import yaml
 import gc
 # import psutil
 from torch.amp import autocast, GradScaler
+# from torch.cuda.amp import autocast, GradScaler
 from transformers import GPT2Tokenizer
 
 # GPU memory monitoring
@@ -284,6 +285,7 @@ class GPT2VQVAETrainer:
         # Initialize mixed precision training
         if self.use_mixed_precision:
             self.scaler = GradScaler('cuda')
+            # self.scaler = GradScaler()
             print("Mixed precision training enabled")
         else:
             self.scaler = None
@@ -407,6 +409,7 @@ class GPT2VQVAETrainer:
             # Forward pass with mixed precision
             if self.use_mixed_precision:
                 with autocast('cuda'):
+                # with autocast():
                     _, output_logits, vq_loss, perplexity = self.model(
                         prompt=prompts,
                         cot_sequences=cots,
@@ -546,6 +549,7 @@ class GPT2VQVAETrainer:
                 # Forward pass with mixed precision
                 if self.use_mixed_precision:
                     with autocast('cuda'):
+                    # with autocast():
                         output_sequences, output_logits, vq_loss, perplexity = self.model(
                             prompt=prompts,
                             cot_sequences=cots,
