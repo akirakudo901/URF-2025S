@@ -662,6 +662,11 @@ class GPT2VQVAE(nn.Module):
                 
                 # Update the cache with padded tensors
                 padded_cache.update(padded_key, padded_value, layer_idx)
+
+        # in case no cache is being used (e.g. when gradient checkpointing is disabled)
+        elif prompt_cache is None:
+            padded_cache = None
+
         else:
             # It's a legacy tuple format: Tuple[Tuple[torch.Tensor, torch.Tensor]]
             padded_cache = []
