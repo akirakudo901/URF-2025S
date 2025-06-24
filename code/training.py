@@ -847,13 +847,22 @@ class GPT2VQVAETrainer:
         axes[0, 1].legend()
         axes[0, 1].grid(True)
         
-        # Detailed metrics within epochs (middle and bottom rows)
+        # Plot epoch-level perplexity
+        axes[1, 0].plot(self.perplexities, label='Epoch Perplexity', color='orange')
+        axes[1, 0].set_title('Codebook Perplexity (Epoch Level)')
+        axes[1, 0].set_xlabel('Epoch')
+        axes[1, 0].set_ylabel('Perplexity')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True)
+        
+        # Detailed metrics within epochs
         if self.detailed_train_losses:
             # Flatten all detailed metrics for plotting
             all_detailed_losses = []
             all_detailed_vq_losses = []
             all_detailed_perplexities = []
             all_detailed_indices = []
+            epoch_boundaries = []
             
             # Calculate global batch indices
             global_batch_idx = 0
@@ -861,6 +870,9 @@ class GPT2VQVAETrainer:
                 zip(self.detailed_train_losses, self.detailed_vq_losses, 
                     self.detailed_perplexities, self.detailed_batch_indices)
             ):
+                # Mark the start of each epoch
+                epoch_boundaries.append((global_batch_idx, epoch_idx + 1))
+                
                 for batch_idx, (loss, vq_loss, perplexity) in enumerate(
                     zip(epoch_losses, epoch_vq_losses, epoch_perplexities)
                 ):
@@ -871,54 +883,54 @@ class GPT2VQVAETrainer:
                 global_batch_idx += len(epoch_losses)
             
             # Plot detailed training loss
-            axes[1, 0].plot(all_detailed_indices, all_detailed_losses, label='Detailed Train Loss', alpha=0.7)
-            axes[1, 0].set_title('Detailed Training Loss (Within Epochs)')
-            axes[1, 0].set_xlabel('Measurement Index')
-            axes[1, 0].set_ylabel('Loss')
-            axes[1, 0].legend()
-            axes[1, 0].grid(True)
-            
-            # Plot detailed VQ loss
-            axes[1, 1].plot(all_detailed_indices, all_detailed_vq_losses, label='Detailed VQ Loss', color='red', alpha=0.7)
-            axes[1, 1].set_title('Detailed VQ Loss (Within Epochs)')
+            axes[1, 1].plot(all_detailed_indices, all_detailed_losses, label='Detailed Train Loss', alpha=0.7)
+            # Add epoch boundary lines and annotations
+            for boundary, epoch_num in epoch_boundaries:
+                axes[1, 1].axvline(x=boundary, color='gray', linestyle='--', alpha=0.5)
+                axes[1, 1].text(boundary, axes[1, 1].get_ylim()[1], f'Epoch {epoch_num}', 
+                              rotation=90, va='top', ha='right')
+            axes[1, 1].set_title('Detailed Training Loss (Within Epochs)')
             axes[1, 1].set_xlabel('Measurement Index')
-            axes[1, 1].set_ylabel('VQ Loss')
+            axes[1, 1].set_ylabel('Loss')
             axes[1, 1].legend()
             axes[1, 1].grid(True)
             
-            # Plot detailed perplexity
-            axes[2, 0].plot(all_detailed_indices, all_detailed_perplexities, label='Detailed Perplexity', color='green', alpha=0.7)
-            axes[2, 0].set_title('Detailed Codebook Perplexity (Within Epochs)')
+            # Plot detailed VQ loss
+            axes[2, 0].plot(all_detailed_indices, all_detailed_vq_losses, label='Detailed VQ Loss', color='red', alpha=0.7)
+            # Add epoch boundary lines and annotations
+            for boundary, epoch_num in epoch_boundaries:
+                axes[2, 0].axvline(x=boundary, color='gray', linestyle='--', alpha=0.5)
+                axes[2, 0].text(boundary, axes[2, 0].get_ylim()[1], f'Epoch {epoch_num}',
+                              rotation=90, va='top', ha='right')
+            axes[2, 0].set_title('Detailed VQ Loss (Within Epochs)')
             axes[2, 0].set_xlabel('Measurement Index')
-            axes[2, 0].set_ylabel('Perplexity')
+            axes[2, 0].set_ylabel('VQ Loss')
             axes[2, 0].legend()
             axes[2, 0].grid(True)
             
-            # Plot epoch-level perplexity for comparison
-            axes[2, 1].plot(self.perplexities, label='Epoch Perplexity', color='orange')
-            axes[2, 1].set_title('Codebook Perplexity (Epoch Level)')
-            axes[2, 1].set_xlabel('Epoch')
+            # Plot detailed perplexity
+            axes[2, 1].plot(all_detailed_indices, all_detailed_perplexities, label='Detailed Perplexity', color='green', alpha=0.7)
+            # Add epoch boundary lines and annotations
+            for boundary, epoch_num in epoch_boundaries:
+                axes[2, 1].axvline(x=boundary, color='gray', linestyle='--', alpha=0.5)
+                axes[2, 1].text(boundary, axes[2, 1].get_ylim()[1], f'Epoch {epoch_num}',
+                              rotation=90, va='top', ha='right')
+            axes[2, 1].set_title('Detailed Codebook Perplexity (Within Epochs)')
+            axes[2, 1].set_xlabel('Measurement Index')
             axes[2, 1].set_ylabel('Perplexity')
             axes[2, 1].legend()
             axes[2, 1].grid(True)
+            
         else:
             # Fallback to original plots if no detailed data
-            axes[1, 0].text(0.5, 0.5, 'No detailed metrics available', ha='center', va='center', transform=axes[1, 0].transAxes)
-            axes[1, 0].set_title('Detailed Training Loss')
-            
             axes[1, 1].text(0.5, 0.5, 'No detailed metrics available', ha='center', va='center', transform=axes[1, 1].transAxes)
-            axes[1, 1].set_title('Detailed VQ Loss')
+            axes[1, 1].set_title('Detailed Training Loss')
             
             axes[2, 0].text(0.5, 0.5, 'No detailed metrics available', ha='center', va='center', transform=axes[2, 0].transAxes)
-            axes[2, 0].set_title('Detailed Perplexity')
+            axes[2, 0].set_title('Detailed VQ Loss')
             
-            # Perplexity plot (epoch level)
-            axes[2, 1].plot(self.perplexities, label='Perplexity', color='green')
-            axes[2, 1].set_title('Codebook Perplexity (Epoch Level)')
-            axes[2, 1].set_xlabel('Epoch')
-            axes[2, 1].set_ylabel('Perplexity')
-            axes[2, 1].legend()
-            axes[2, 1].grid(True)
+            axes[2, 1].text(0.5, 0.5, 'No detailed metrics available', ha='center', va='center', transform=axes[2, 1].transAxes)
+            axes[2, 1].set_title('Detailed Perplexity')
         
         plt.tight_layout()
         
@@ -1714,10 +1726,7 @@ def main():
         trainer.plot_training_history(history_path)
         trainer.plot_memory_usage(memory_path)
         
-        print("Training completed successfully!")
         print(f"Best model saved to: {trainer.best_model_path}")
-        print(f"Training history saved to: {history_path}")
-        print(f"Memory usage plot saved to: {memory_path}")
         
         # Print final memory statistics
         if trainer.memory_stats:
