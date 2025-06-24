@@ -16,7 +16,8 @@ import argparse
 import yaml
 import gc
 # import psutil
-from torch.amp import autocast, GradScaler
+from torch.amp.autocast_mode import autocast
+from torch.amp.grad_scaler import GradScaler
 # from torch.cuda.amp import autocast, GradScaler
 from transformers import GPT2Tokenizer
 
@@ -303,11 +304,17 @@ class GPT2VQVAETrainer:
         # Loss function
         self.criterion = nn.CrossEntropyLoss(ignore_index=training_config.get('pad_token_id', 50256))
         
-        # Training history
+        # Training history - epoch-level metrics
         self.train_losses = []
         self.val_losses = []
         self.vq_losses = []
         self.perplexities = []
+        
+        # Training history - detailed metrics within epochs
+        self.detailed_train_losses = []  # List of lists: [epoch_1_metrics, epoch_2_metrics, ...]
+        self.detailed_vq_losses = []
+        self.detailed_perplexities = []
+        self.detailed_batch_indices = []  # List of lists: [epoch_1_indices, epoch_2_indices, ...]
         
         # Best model tracking
         self.best_val_loss = float('inf')
@@ -380,15 +387,16 @@ class GPT2VQVAETrainer:
         else:
             return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0)
             
-    def train_epoch(self, train_loader: DataLoader) -> Dict[str, float]:
+    def train_epoch(self, train_loader: DataLoader, num_measurements_per_epoch: int = 100) -> Dict[str, Any]:
         """
         Train for one epoch with memory optimizations.
         
         Args:
             train_loader: Training data loader
+            num_measurements_per_epoch: Number of equally spaced measurements to log during the epoch
             
         Returns:
-            Dictionary containing training metrics
+            Dictionary containing training metrics with both detailed and average metrics
         """
         self.model.train()
         total_loss = 0.0
@@ -396,6 +404,16 @@ class GPT2VQVAETrainer:
         total_perplexity = 0.0
         num_batches = 0
         accumulation_steps = 0
+        
+        # Calculate measurement intervals
+        total_batches = len(train_loader)
+        measurement_interval = max(1, total_batches // num_measurements_per_epoch)
+        
+        # Storage for detailed metrics
+        detailed_losses = []
+        detailed_vq_losses = []
+        detailed_perplexities = []
+        detailed_batch_indices = []
         
         progress_bar = tqdm(train_loader, desc="Training")
         
@@ -413,7 +431,7 @@ class GPT2VQVAETrainer:
             
             # Scale loss and backward pass
             scaled_loss = total_loss_batch / self.gradient_accumulation_steps
-            if self.use_mixed_precision:
+            if self.use_mixed_precision and self.scaler is not None:
                 self.scaler.scale(scaled_loss).backward()
             else:
                 scaled_loss.backward()
@@ -430,12 +448,20 @@ class GPT2VQVAETrainer:
             total_perplexity += perplexity.item()
             num_batches += 1
             
+            # Log detailed metrics at regular intervals
+            if batch_idx % measurement_interval == 0:
+                detailed_losses.append(total_loss_batch.item())
+                detailed_vq_losses.append(vq_loss.item())
+                detailed_perplexities.append(perplexity.item())
+                detailed_batch_indices.append(batch_idx)
+            
             # Update progress bar
             progress_bar.set_postfix({
                 'loss': f"{total_loss_batch.item():.4f}",
                 'vq_loss': f"{vq_loss.item():.4f}",
                 'perplexity': f"{perplexity.item():.2f}",
-                'accum_steps': f"{accumulation_steps}/{self.gradient_accumulation_steps}"
+                'accum_steps': f"{(accumulation_steps % self.gradient_accumulation_steps) + 1}\
+                                 /{self.gradient_accumulation_steps}"
             })
             
             # Clear cache periodically
@@ -445,7 +471,18 @@ class GPT2VQVAETrainer:
                 gc.collect()
         
         # Calculate averages
-        return self._get_average_metrics(total_loss, total_vq_loss, total_perplexity, num_batches)
+        avg_metrics = self._get_average_metrics(total_loss, total_vq_loss, total_perplexity, num_batches)
+        
+        # Return both detailed and average metrics
+        return {
+            'detailed_losses': detailed_losses,
+            'detailed_vq_losses': detailed_vq_losses,
+            'detailed_perplexities': detailed_perplexities,
+            'detailed_batch_indices': detailed_batch_indices,
+            'avg_loss': avg_metrics['loss'],
+            'avg_vq_loss': avg_metrics['vq_loss'],
+            'avg_perplexity': avg_metrics['perplexity']
+        }
     
     def validate(self, val_loader: DataLoader) -> Dict[str, float]:
         """
@@ -524,7 +561,7 @@ class GPT2VQVAETrainer:
     
     def _update_weights(self):
         """Helper function for updating weights"""
-        if self.use_mixed_precision:
+        if self.use_mixed_precision and self.scaler is not None:
             if self.training_config.get('gradient_clip', 1.0) > 0:
                 self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(
@@ -574,7 +611,11 @@ class GPT2VQVAETrainer:
             'train_losses': self.train_losses,
             'val_losses': self.val_losses,
             'vq_losses': self.vq_losses,
-            'perplexities': self.perplexities
+            'perplexities': self.perplexities,
+            'detailed_train_losses': self.detailed_train_losses,
+            'detailed_vq_losses': self.detailed_vq_losses,
+            'detailed_perplexities': self.detailed_perplexities,
+            'detailed_batch_indices': self.detailed_batch_indices
         }
         
         # Save best model if this is the best so far
@@ -635,6 +676,11 @@ class GPT2VQVAETrainer:
         self.vq_losses = checkpoint.get('vq_losses', [])
         self.perplexities = checkpoint.get('perplexities', [])
         
+        self.detailed_train_losses = checkpoint.get('detailed_train_losses', [])
+        self.detailed_vq_losses = checkpoint.get('detailed_vq_losses', [])
+        self.detailed_perplexities = checkpoint.get('detailed_perplexities', [])
+        self.detailed_batch_indices = checkpoint.get('detailed_batch_indices', [])
+        
         print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
         print("Checkpoint loaded successfully. Configuration validation completed.")
     
@@ -645,6 +691,7 @@ class GPT2VQVAETrainer:
               cot_mask: torch.Tensor,
               val_split: float = 0.1,
               resume_from: Optional[str] = None,
+              num_measurements_per_epoch: Optional[int] = None,
               seed: int = 42):
         """
         Train the model with memory optimizations.
@@ -656,6 +703,7 @@ class GPT2VQVAETrainer:
             cot_mask: Training CoT masks
             val_split: Fraction of data to use for validation
             resume_from: Path to checkpoint to resume from
+            num_measurements_per_epoch: Number of metrics saved per epoch
             seed: Random seed for reproducible train/validation split
         """
         # Log initial memory usage
@@ -708,11 +756,17 @@ class GPT2VQVAETrainer:
             print(f"\nEpoch {epoch + 1}/{self.training_config['num_epochs']}")
             print("-" * 50)
             
+            # Calculate number of measurements per epochs
+            if num_measurements_per_epoch is None:
+                total_epochs = self.training_config['num_epochs']
+                num_measurements_per_epoch = max(1, 100 // total_epochs)
+            print(f"Logging {num_measurements_per_epoch} measurements per epoch")
+            
             # Log memory before epoch
             self.log_memory_usage(f"epoch_{epoch+1}_start")
             
             # Train
-            train_metrics = self.train_epoch(train_loader)
+            train_metrics = self.train_epoch(train_loader, num_measurements_per_epoch)
             
             # Log memory after training
             self.log_memory_usage(f"epoch_{epoch+1}_after_train")
@@ -727,17 +781,23 @@ class GPT2VQVAETrainer:
             if self.scheduler:
                 self.scheduler.step()
             
-            # Store metrics
-            self.train_losses.append(train_metrics['loss'])
+            # Store epoch-level metrics
+            self.train_losses.append(train_metrics['avg_loss'])
             self.val_losses.append(val_metrics['loss'])
-            self.vq_losses.append(train_metrics['vq_loss'])
-            self.perplexities.append(train_metrics['perplexity'])
+            self.vq_losses.append(train_metrics['avg_vq_loss'])
+            self.perplexities.append(train_metrics['avg_perplexity'])
+            
+            # Store detailed metrics
+            self.detailed_train_losses.append(train_metrics['detailed_losses'])
+            self.detailed_vq_losses.append(train_metrics['detailed_vq_losses'])
+            self.detailed_perplexities.append(train_metrics['detailed_perplexities'])
+            self.detailed_batch_indices.append(train_metrics['detailed_batch_indices'])
             
             # Print metrics
-            print(f"Train Loss: {train_metrics['loss']:.4f}")
+            print(f"Train Loss: {train_metrics['avg_loss']:.4f}")
             print(f"Val Loss: {val_metrics['loss']:.4f}")
-            print(f"VQ Loss: {train_metrics['vq_loss']:.4f}")
-            print(f"Perplexity: {train_metrics['perplexity']:.2f}")
+            print(f"VQ Loss: {train_metrics['avg_vq_loss']:.4f}")
+            print(f"Perplexity: {train_metrics['avg_perplexity']:.2f}")
             print(f"Learning Rate: {self.optimizer.param_groups[0]['lr']:.6f}")
             
             # Save checkpoint
@@ -761,17 +821,19 @@ class GPT2VQVAETrainer:
     
     def plot_training_history(self, save_path: Optional[str] = None):
         """
-        Plot training history.
+        Plot training history including detailed metrics within epochs.
         
         Args:
             save_path: Path to save the plot
         """
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        # Create a larger figure to accommodate detailed plots
+        fig, axes = plt.subplots(3, 2, figsize=(20, 15))
         
+        # Epoch-level metrics (top row)
         # Loss plot
         axes[0, 0].plot(self.train_losses, label='Train Loss')
         axes[0, 0].plot(self.val_losses, label='Val Loss')
-        axes[0, 0].set_title('Training and Validation Loss')
+        axes[0, 0].set_title('Training and Validation Loss (Epoch Level)')
         axes[0, 0].set_xlabel('Epoch')
         axes[0, 0].set_ylabel('Loss')
         axes[0, 0].legend()
@@ -779,27 +841,84 @@ class GPT2VQVAETrainer:
         
         # VQ Loss plot
         axes[0, 1].plot(self.vq_losses, label='VQ Loss', color='red')
-        axes[0, 1].set_title('Vector Quantization Loss')
+        axes[0, 1].set_title('Vector Quantization Loss (Epoch Level)')
         axes[0, 1].set_xlabel('Epoch')
         axes[0, 1].set_ylabel('VQ Loss')
         axes[0, 1].legend()
         axes[0, 1].grid(True)
         
-        # Perplexity plot
-        axes[1, 0].plot(self.perplexities, label='Perplexity', color='green')
-        axes[1, 0].set_title('Codebook Perplexity')
-        axes[1, 0].set_xlabel('Epoch')
-        axes[1, 0].set_ylabel('Perplexity')
-        axes[1, 0].legend()
-        axes[1, 0].grid(True)
-        
-        # Validation loss only
-        axes[1, 1].plot(self.val_losses, label='Val Loss', color='orange')
-        axes[1, 1].set_title('Validation Loss')
-        axes[1, 1].set_xlabel('Epoch')
-        axes[1, 1].set_ylabel('Loss')
-        axes[1, 1].legend()
-        axes[1, 1].grid(True)
+        # Detailed metrics within epochs (middle and bottom rows)
+        if self.detailed_train_losses:
+            # Flatten all detailed metrics for plotting
+            all_detailed_losses = []
+            all_detailed_vq_losses = []
+            all_detailed_perplexities = []
+            all_detailed_indices = []
+            
+            # Calculate global batch indices
+            global_batch_idx = 0
+            for epoch_idx, (epoch_losses, epoch_vq_losses, epoch_perplexities, epoch_indices) in enumerate(
+                zip(self.detailed_train_losses, self.detailed_vq_losses, 
+                    self.detailed_perplexities, self.detailed_batch_indices)
+            ):
+                for batch_idx, (loss, vq_loss, perplexity) in enumerate(
+                    zip(epoch_losses, epoch_vq_losses, epoch_perplexities)
+                ):
+                    all_detailed_losses.append(loss)
+                    all_detailed_vq_losses.append(vq_loss)
+                    all_detailed_perplexities.append(perplexity)
+                    all_detailed_indices.append(global_batch_idx + batch_idx)
+                global_batch_idx += len(epoch_losses)
+            
+            # Plot detailed training loss
+            axes[1, 0].plot(all_detailed_indices, all_detailed_losses, label='Detailed Train Loss', alpha=0.7)
+            axes[1, 0].set_title('Detailed Training Loss (Within Epochs)')
+            axes[1, 0].set_xlabel('Measurement Index')
+            axes[1, 0].set_ylabel('Loss')
+            axes[1, 0].legend()
+            axes[1, 0].grid(True)
+            
+            # Plot detailed VQ loss
+            axes[1, 1].plot(all_detailed_indices, all_detailed_vq_losses, label='Detailed VQ Loss', color='red', alpha=0.7)
+            axes[1, 1].set_title('Detailed VQ Loss (Within Epochs)')
+            axes[1, 1].set_xlabel('Measurement Index')
+            axes[1, 1].set_ylabel('VQ Loss')
+            axes[1, 1].legend()
+            axes[1, 1].grid(True)
+            
+            # Plot detailed perplexity
+            axes[2, 0].plot(all_detailed_indices, all_detailed_perplexities, label='Detailed Perplexity', color='green', alpha=0.7)
+            axes[2, 0].set_title('Detailed Codebook Perplexity (Within Epochs)')
+            axes[2, 0].set_xlabel('Measurement Index')
+            axes[2, 0].set_ylabel('Perplexity')
+            axes[2, 0].legend()
+            axes[2, 0].grid(True)
+            
+            # Plot epoch-level perplexity for comparison
+            axes[2, 1].plot(self.perplexities, label='Epoch Perplexity', color='orange')
+            axes[2, 1].set_title('Codebook Perplexity (Epoch Level)')
+            axes[2, 1].set_xlabel('Epoch')
+            axes[2, 1].set_ylabel('Perplexity')
+            axes[2, 1].legend()
+            axes[2, 1].grid(True)
+        else:
+            # Fallback to original plots if no detailed data
+            axes[1, 0].text(0.5, 0.5, 'No detailed metrics available', ha='center', va='center', transform=axes[1, 0].transAxes)
+            axes[1, 0].set_title('Detailed Training Loss')
+            
+            axes[1, 1].text(0.5, 0.5, 'No detailed metrics available', ha='center', va='center', transform=axes[1, 1].transAxes)
+            axes[1, 1].set_title('Detailed VQ Loss')
+            
+            axes[2, 0].text(0.5, 0.5, 'No detailed metrics available', ha='center', va='center', transform=axes[2, 0].transAxes)
+            axes[2, 0].set_title('Detailed Perplexity')
+            
+            # Perplexity plot (epoch level)
+            axes[2, 1].plot(self.perplexities, label='Perplexity', color='green')
+            axes[2, 1].set_title('Codebook Perplexity (Epoch Level)')
+            axes[2, 1].set_xlabel('Epoch')
+            axes[2, 1].set_ylabel('Perplexity')
+            axes[2, 1].legend()
+            axes[2, 1].grid(True)
         
         plt.tight_layout()
         
@@ -810,44 +929,90 @@ class GPT2VQVAETrainer:
         plt.show()
     
     def plot_memory_usage(self, save_path: Optional[str] = None):
-        """
-        Plot memory usage throughout training.
-        
-        Args:
-            save_path: Path to save the plot
-        """
+        """Plot memory usage throughout training."""
         if not self.memory_stats:
             print("No memory statistics available")
             return
         
-        fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+        # Check if we have GPU memory stats (indicates memory_monitor was used)
+        has_gpu_stats = 'gpu_total_gb' in self.memory_stats[0]
         
-        # Extract data
-        stages = [stat['stage'] for stat in self.memory_stats]
-        allocated = [stat['allocated_gb'] for stat in self.memory_stats]
-        reserved = [stat['reserved_gb'] for stat in self.memory_stats]
-        max_allocated = [stat['max_allocated_gb'] for stat in self.memory_stats]
-        
-        # Plot allocated vs reserved memory
-        axes[0].plot(range(len(stages)), allocated, label='Allocated', marker='o')
-        axes[0].plot(range(len(stages)), reserved, label='Reserved', marker='s')
-        axes[0].set_title('GPU Memory Usage Throughout Training')
-        axes[0].set_xlabel('Training Stage')
-        axes[0].set_ylabel('Memory (GB)')
-        axes[0].legend()
-        axes[0].grid(True)
-        axes[0].set_xticks(range(len(stages)))
-        axes[0].set_xticklabels(stages, rotation=45, ha='right')
-        
-        # Plot max allocated memory
-        axes[1].plot(range(len(stages)), max_allocated, label='Max Allocated', color='red', marker='^')
-        axes[1].set_title('Maximum GPU Memory Usage')
-        axes[1].set_xlabel('Training Stage')
-        axes[1].set_ylabel('Memory (GB)')
-        axes[1].legend()
-        axes[1].grid(True)
-        axes[1].set_xticks(range(len(stages)))
-        axes[1].set_xticklabels(stages, rotation=45, ha='right')
+        if has_gpu_stats:
+            # Case 1: Both GPU and PyTorch memory tracking
+            fig, axes = plt.subplots(3, 1, figsize=(12, 12))
+            
+            # Extract data
+            stages = [stat['stage'] for stat in self.memory_stats]
+            gpu_used = [stat['gpu_used_gb'] for stat in self.memory_stats]
+            gpu_total = [stat['gpu_total_gb'] for stat in self.memory_stats]
+            gpu_utilization = [stat['gpu_utilization_percent'] for stat in self.memory_stats]
+            pytorch_allocated = [stat['pytorch_allocated_gb'] for stat in self.memory_stats]
+            pytorch_reserved = [stat['pytorch_reserved_gb'] for stat in self.memory_stats]
+            pytorch_max_allocated = [stat['pytorch_max_allocated_gb'] for stat in self.memory_stats]
+            
+            # Plot GPU memory usage
+            axes[0].plot(range(len(stages)), gpu_used, label='GPU Used', marker='o', color='blue')
+            axes[0].plot(range(len(stages)), gpu_total, label='GPU Total', marker='s', color='red', linestyle='--')
+            axes[0].set_title('GPU Memory Usage Throughout Training')
+            axes[0].set_xlabel('Training Stage')
+            axes[0].set_ylabel('Memory (GB)')
+            axes[0].legend()
+            axes[0].grid(True)
+            axes[0].set_xticks(range(len(stages)))
+            axes[0].set_xticklabels(stages, rotation=45, ha='right')
+            
+            # Plot GPU utilization
+            axes[1].plot(range(len(stages)), gpu_utilization, label='GPU Utilization', color='green', marker='^')
+            axes[1].set_title('GPU Memory Utilization')
+            axes[1].set_xlabel('Training Stage')
+            axes[1].set_ylabel('Utilization (%)')
+            axes[1].legend()
+            axes[1].grid(True)
+            axes[1].set_xticks(range(len(stages)))
+            axes[1].set_xticklabels(stages, rotation=45, ha='right')
+            
+            # Plot PyTorch memory usage
+            axes[2].plot(range(len(stages)), pytorch_allocated, label='PyTorch Allocated', marker='o')
+            axes[2].plot(range(len(stages)), pytorch_reserved, label='PyTorch Reserved', marker='s')
+            axes[2].plot(range(len(stages)), pytorch_max_allocated, label='PyTorch Max Allocated', color='red', marker='^')
+            axes[2].set_title('PyTorch Memory Usage')
+            axes[2].set_xlabel('Training Stage')
+            axes[2].set_ylabel('Memory (GB)')
+            axes[2].legend()
+            axes[2].grid(True)
+            axes[2].set_xticks(range(len(stages)))
+            axes[2].set_xticklabels(stages, rotation=45, ha='right')
+            
+        else:
+            # Case 2: Only PyTorch memory tracking (fallback case)
+            fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+            
+            # Extract data
+            stages = [stat['stage'] for stat in self.memory_stats]
+            allocated = [stat['allocated_gb'] for stat in self.memory_stats]
+            reserved = [stat['reserved_gb'] for stat in self.memory_stats]
+            max_allocated = [stat['max_allocated_gb'] for stat in self.memory_stats]
+            
+            # Plot allocated vs reserved memory
+            axes[0].plot(range(len(stages)), allocated, label='Allocated', marker='o')
+            axes[0].plot(range(len(stages)), reserved, label='Reserved', marker='s')
+            axes[0].set_title('PyTorch Memory Usage Throughout Training')
+            axes[0].set_xlabel('Training Stage')
+            axes[0].set_ylabel('Memory (GB)')
+            axes[0].legend()
+            axes[0].grid(True)
+            axes[0].set_xticks(range(len(stages)))
+            axes[0].set_xticklabels(stages, rotation=45, ha='right')
+            
+            # Plot max allocated memory
+            axes[1].plot(range(len(stages)), max_allocated, label='Max Allocated', color='red', marker='^')
+            axes[1].set_title('Maximum PyTorch Memory Usage')
+            axes[1].set_xlabel('Training Stage')
+            axes[1].set_ylabel('Memory (GB)')
+            axes[1].legend()
+            axes[1].grid(True)
+            axes[1].set_xticks(range(len(stages)))
+            axes[1].set_xticklabels(stages, rotation=45, ha='right')
         
         plt.tight_layout()
         
@@ -857,7 +1022,7 @@ class GPT2VQVAETrainer:
         
         plt.show()
 
-    def load_training_data_memory_efficient(self, data_dir: str, max_samples: Optional[int] = None, num_thoughts: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def load_training_data(self, data_dir: str, max_samples: Optional[int] = None, num_thoughts: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Load training data with memory-efficient loading and truncate based on num_thoughts.
         
@@ -912,7 +1077,7 @@ class GPT2VQVAETrainer:
         print(f"  prompt_mask: {prompt_mask.shape}")
         print(f"  cot_mask: {cot_mask.shape}")
         
-        # Validate and truncate based on num_thoughts
+        # Validate and reorganize based on num_thoughts
         if num_thoughts is not None:
             current_num_thoughts = cot_sequences.shape[1]  # Should be the second dimension
             print(f"Current num_thoughts in dataset: {current_num_thoughts}")
@@ -923,16 +1088,43 @@ class GPT2VQVAETrainer:
                                f"but model requires {num_thoughts}. Please regenerate dataset with more sequences.")
             
             if current_num_thoughts > num_thoughts:
-                print(f"Truncating dataset from {current_num_thoughts} to {num_thoughts} parallel sequences")
-                # Truncate the middle dimension (num_thoughts)
-                cot_sequences = cot_sequences[:, :num_thoughts, :]
-                cot_mask = cot_mask[:, :num_thoughts, :]
+                # Calculate how many multiples of num_thoughts can fit within current_num_thoughts
+                num_batches = current_num_thoughts // num_thoughts
+                remainder = current_num_thoughts % num_thoughts
                 
-                print(f"Truncated data shapes:")
+                if remainder > 0:
+                    print(f"Warning: {current_num_thoughts} is not perfectly divisible by {num_thoughts}")
+                    print(f"Will use {num_batches * num_thoughts} sequences (dropping {remainder} sequences)")
+                
+                print(f"Reorganizing dataset: {current_num_thoughts} sequences → {num_batches} batches of {num_thoughts} sequences each")
+                
+                # Calculate new dataset size (each original sample becomes num_batches samples)
+                original_batch_size = prompt_sequences.shape[0]
+                new_batch_size = original_batch_size * num_batches
+                usable_sequences = num_batches * num_thoughts
+                
+                def reorganize_sequence_pair(sequence_1d, sequence_2d):
+                    """Helper to reorganize a pair of prompt/cot sequences or masks"""
+                    # Repeat 1D sequence to [batch_size * num_batches, seq_len] 
+                    sequence_1d = sequence_1d.unsqueeze(1).repeat(1, num_batches, 1).reshape(-1, sequence_1d.size(-1))
+                    
+                    # Reshape 2D sequence to [batch_size * num_batches, num_thoughts, seq_len]
+                    sequence_2d = sequence_2d[:, :usable_sequences, :]  # Remove remainder
+                    sequence_2d = sequence_2d.view(original_batch_size, num_batches, num_thoughts, -1)
+                    sequence_2d = sequence_2d.transpose(1, 2).contiguous().view(new_batch_size, num_thoughts, -1)
+                    
+                    return sequence_1d, sequence_2d
+                
+                # Reorganize sequences and masks
+                prompt_sequences, cot_sequences = reorganize_sequence_pair(prompt_sequences, cot_sequences)
+                prompt_mask, cot_mask = reorganize_sequence_pair(prompt_mask, cot_mask)
+                
+                print(f"Reorganized data shapes:")
                 print(f"  prompt_sequences: {prompt_sequences.shape}")
                 print(f"  cot_sequences: {cot_sequences.shape}")
                 print(f"  prompt_mask: {prompt_mask.shape}")
                 print(f"  cot_mask: {cot_mask.shape}")
+                print(f"  Dataset size increased from {original_batch_size} to {new_batch_size} samples")
         
         # Limit samples if specified
         if max_samples is not None:
@@ -940,7 +1132,6 @@ class GPT2VQVAETrainer:
             cot_sequences = cot_sequences[:max_samples]
             prompt_mask = prompt_mask[:max_samples]
             cot_mask = cot_mask[:max_samples]
-        
         print(f"Final data shapes:")
         print(f"  prompt_sequences: {prompt_sequences.shape}")
         print(f"  cot_sequences: {cot_sequences.shape}")
@@ -1254,14 +1445,7 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
             prompt_text = decode_tokens(prompt[0], prompt_mask_ex[0] if prompt_mask_ex is not None else None)
             print(f"Prompt: {prompt_text}")
             
-            # Show all ground truth CoT sequences
-            print(f"\nGround Truth CoT Sequences ({num_thoughts} parallel chains):")
-            for j in range(num_thoughts):
-                cot_gt_text = decode_tokens(cot_gt[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)
-                print(f"  CoT {j+1}: {cot_gt_text}")
-            
             # Generate with teacher forcing (inference=False)
-            print("\n--- Teacher Forcing Generation ---")
             try:
                 _, output_logits_tf, vq_loss_tf, perplexity_tf = model(
                     prompt=prompt,
@@ -1273,20 +1457,15 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
                 )
                 
                 # Get predicted tokens from logits
-                predicted_tokens = torch.argmax(output_logits_tf, dim=-1)  # [B, M, L]
-                
-                # Decode teacher forcing predictions from logits for all sequences
-                print(f"Teacher Forcing CoT Sequences ({num_thoughts} parallel chains):")
-                for j in range(num_thoughts):
-                    cot_tf_text = decode_tokens(predicted_tokens[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)
-                    print(f"  CoT {j+1}: {cot_tf_text}")
-                print(f"VQ Loss: {vq_loss_tf.item():.4f}, Perplexity: {perplexity_tf.item():.2f}")
+                predicted_tokens_tf = torch.argmax(output_logits_tf, dim=-1)  # [B, M, L]
                 
             except Exception as e:
                 print(f"Teacher forcing generation failed: {e}")
+                predicted_tokens_tf = None
+                vq_loss_tf = None
+                perplexity_tf = None
             
             # Generate auto-regressively (inference=True)
-            print("\n--- Auto-regressive Generation ---")
             try:
                 output_sequences_ar, output_logits_ar, vq_loss_ar, perplexity_ar = model(
                     prompt=prompt,
@@ -1297,17 +1476,93 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
                     quantize_cot_only=True
                 )
                 
-                # Decode auto-regressive output for all sequences
-                print(f"Auto-regressive CoT Sequences ({num_thoughts} parallel chains):")
-                for j in range(num_thoughts):
-                    cot_ar_text = decode_tokens(output_sequences_ar[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)
-                    print(f"  CoT {j+1}: {cot_ar_text}")
-                print(f"VQ Loss: {vq_loss_ar.item():.4f}, Perplexity: {perplexity_ar.item():.2f}")
-                
             except Exception as e:
                 print(f"Auto-regressive generation failed: {e}")
+                output_sequences_ar = None
+                vq_loss_ar = None
+                perplexity_ar = None
             
-            print("\n" + "-"*60)
+            # Display side-by-side comparison for each CoT sequence
+            print(f"\n{'='*120}")
+            print(f"SIDE-BY-SIDE COMPARISON FOR EXAMPLE {i+1}")
+            print(f"{'='*120}")
+            
+            # Print metrics
+            if vq_loss_tf is not None and perplexity_tf is not None:
+                print(f"Teacher Forcing - VQ Loss: {vq_loss_tf.item():.4f}, Perplexity: {perplexity_tf.item():.2f}")
+            if vq_loss_ar is not None and perplexity_ar is not None:
+                print(f"Auto-regressive - VQ Loss: {vq_loss_ar.item():.4f}, Perplexity: {perplexity_ar.item():.2f}")
+            print()
+            
+            # Function to chunk text into 20-word segments
+            def chunk_text(text, chunk_size=20):
+                """Split text into chunks of specified word count and on newlines."""
+                if not text:
+                    return []
+                
+                # Split on newlines first
+                lines = text.split('\n')
+                chunks = []
+                
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    words = line.split()
+                    for i in range(0, len(words), chunk_size):
+                        chunk = ' '.join(words[i:i + chunk_size])
+                        if chunk:
+                            chunks.append(chunk)
+                
+                return chunks
+            
+            # Display each CoT sequence with chunked side-by-side comparison
+            for j in range(num_thoughts):
+                print(f"\n--- CoT {j+1} ---")
+                
+                # Get the three versions of the CoT
+                cot_gt_text = decode_tokens(cot_gt[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)
+                
+                if predicted_tokens_tf is not None:
+                    cot_tf_text = decode_tokens(predicted_tokens_tf[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)
+                else:
+                    cot_tf_text = "FAILED"
+                
+                if output_sequences_ar is not None:
+                    cot_ar_text = decode_tokens(output_sequences_ar[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)
+                else:
+                    cot_ar_text = "FAILED"
+                
+                # Chunk all three texts
+                gt_chunks = chunk_text(cot_gt_text)
+                tf_chunks = chunk_text(cot_tf_text)
+                ar_chunks = chunk_text(cot_ar_text)
+                
+                # Find the maximum number of chunks
+                max_chunks = max(len(gt_chunks), len(tf_chunks), len(ar_chunks))
+                
+                # Display chunks side-by-side
+                for chunk_idx in range(max_chunks):
+                    gt_chunk = gt_chunks[chunk_idx] if chunk_idx < len(gt_chunks) else ""
+                    tf_chunk = tf_chunks[chunk_idx] if chunk_idx < len(tf_chunks) else ""
+                    ar_chunk = ar_chunks[chunk_idx] if chunk_idx < len(ar_chunks) else ""
+                    
+                    # Pad chunks to same length for alignment
+                    max_length = max(len(gt_chunk), len(tf_chunk), len(ar_chunk))
+                    gt_chunk_padded = gt_chunk.ljust(max_length)
+                    tf_chunk_padded = tf_chunk.ljust(max_length)
+                    ar_chunk_padded = ar_chunk.ljust(max_length)
+                    
+                    print(f"Original:        {gt_chunk_padded}")
+                    print(f"Teacher Forced:  {tf_chunk_padded}")
+                    print(f"Auto-regressive: {ar_chunk_padded}")
+                    
+                    # Add separator after each chunk (except the last one)
+                    if chunk_idx < max_chunks - 1:
+                        print("-" * 60)
+            
+            print("\n" + "="*120)
     
     print("\nDemonstration completed!")
 
@@ -1328,8 +1583,6 @@ def main():
                        help='Device to train on (cuda/cpu)')
     parser.add_argument('--max-samples', type=int, default=None,
                        help='Maximum number of samples to load (for debugging/memory constraints)')
-    parser.add_argument('--memory-efficient', action='store_true', default=True,
-                       help='Use memory-efficient data loading (default: True)')
     parser.add_argument('--monitor-gpu-memory', action='store_true', default=True,
                        help='Monitor GPU memory usage using nvidia-ml-py3 (default: True)')
     parser.add_argument('--num-thoughts', type=int, default=None,
@@ -1431,7 +1684,7 @@ def main():
             trainer = GPT2VQVAETrainer(model_config, training_config, device=device)
 
         # Load data using memory-efficient method with num_thoughts truncation
-        prompt_sequences, cot_sequences, prompt_mask, cot_mask = trainer.load_training_data_memory_efficient(
+        prompt_sequences, cot_sequences, prompt_mask, cot_mask = trainer.load_training_data(
             data_dir, max_samples=max_samples, num_thoughts=num_thoughts
         )
         
@@ -1449,7 +1702,8 @@ def main():
             prompt_mask=prompt_mask,
             cot_mask=cot_mask,
             val_split=val_split,
-            resume_from=args.resume_from
+            resume_from=args.resume_from,
+            num_measurements_per_epoch=training_config.get('num_measurements_per_epoch', 20)
         )
         
         # Save training history and memory usage
