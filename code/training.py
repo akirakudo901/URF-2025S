@@ -467,12 +467,12 @@ class GPT2VQVAETrainer:
                 detailed_batch_indices.append(batch_idx)
             
             # Update progress bar
+            acc_step = (accumulation_steps % self.gradient_accumulation_steps) + 1
             progress_bar.set_postfix({
                 'loss': f"{total_loss_batch.item():.4f}",
                 'vq_loss': f"{vq_loss.item():.4f}",
                 'perplexity': f"{perplexity.item():.2f}",
-                'accum_steps': f"{(accumulation_steps % self.gradient_accumulation_steps) + 1}\
-                                 /{self.gradient_accumulation_steps}"
+                'accum_steps': f"{acc_step}/{self.gradient_accumulation_steps}"
             })
             
             # Clear cache periodically
