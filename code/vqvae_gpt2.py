@@ -437,57 +437,89 @@ class GPT2VQVAE(nn.Module):
                  commitment_cost=0.25, aggregation_hidden_dim=1024, 
                  num_thoughts=32, n_positions=1024, 
                  use_pretrained_encoder=True, use_pretrained_decoder=True,
-                 pretrained_model_name="gpt2", n_layer=12, n_head=12, n_inner=None):
+                 pretrained_model_name="gpt2",
+                 # Encoder-specific parameters
+                 encoder_n_layer=12, encoder_n_head=12, encoder_n_inner=None,
+                 encoder_dropout=0.1, encoder_activation_function="gelu",
+                 # Decoder-specific parameters  
+                 decoder_n_layer=12, decoder_n_head=12, decoder_n_inner=None,
+                 decoder_dropout=0.1, decoder_activation_function="gelu"):
         """
         GPT2-based VQ-VAE model that uses GPT2 as both encoder and decoder.
         
         Args:
+            # Shared parameters (must be the same for both encoder and decoder)
             vocab_size (int): Vocabulary size
             d_model (int): Model dimension (default: 768 for GPT2)
+            n_positions (int): Maximum sequence length for GPT2 (default: 1024)
+            
+            # VQ-VAE specific parameters
             num_embeddings (int): VQ codebook size
             commitment_cost (float): VQ commitment cost
             aggregation_hidden_dim (int): Aggregation MLP hidden dimension
             num_thoughts (int): Number of parallel sequences
-            n_positions (int): Maximum sequence length for GPT2 (default: 1024)
+            
+            # Pretrained model settings
             use_pretrained_encoder (bool): Whether to load pretrained weights for encoder
             use_pretrained_decoder (bool): Whether to load pretrained weights for decoder
             pretrained_model_name (str): Name of pretrained model to load (default: "gpt2")
-            n_layer (int, optional): Number of hidden layers in the Transformer encoder (default: 12)
-            n_head (int, optional): Number of attention heads for each attention layer (default: 12)
-            n_inner (int, optional): Dimensionality of the inner feed-forward layers. None will set it to 4 times n_embd
+            
+            # Encoder-specific parameters
+            encoder_n_layer (int): Number of hidden layers in the encoder (default: 12)
+            encoder_n_head (int): Number of attention heads for encoder (default: 12)
+            encoder_n_inner (int): Dimensionality of encoder inner feed-forward layers (default: 4*d_model)
+            encoder_dropout (float): Dropout probability for encoder (default: 0.1)
+            encoder_activation_function (str): Activation function for encoder (default: "gelu")
+            
+            # Decoder-specific parameters
+            decoder_n_layer (int): Number of hidden layers in the decoder (default: 12)
+            decoder_n_head (int): Number of attention heads for decoder (default: 12)
+            decoder_n_inner (int): Dimensionality of decoder inner feed-forward layers (default: 4*d_model)
+            decoder_dropout (float): Dropout probability for decoder (default: 0.1)
+            decoder_activation_function (str): Activation function for decoder (default: "gelu")
         """
         super(GPT2VQVAE, self).__init__()
 
         # TODO ADD INITIALIZATION FOR ENCODER, DECODER AND MLP
         # THOUGHT: COULD ADD output_attentions=True FOR DEBUGGING (E.G. FOR HAND-MADE CROSS-ATTENTION MASK OF DECODER)
         
-        if n_inner == "None": n_inner = None
+        # Handle None values for n_inner parameters
+        if encoder_n_inner == "None": encoder_n_inner = None
+        if decoder_n_inner == "None": decoder_n_inner = None
 
-        # Load GPT2 model and config
+        # Create encoder config with encoder-specific parameters
         self.encoder_config = GPT2Config(
             vocab_size=vocab_size,
             n_embd=d_model,
             n_positions=n_positions,
-            n_layer=n_layer,
-            n_head=n_head,
-            n_inner=n_inner,
+            n_layer=encoder_n_layer,
+            n_head=encoder_n_head,
+            n_inner=encoder_n_inner,
+            resid_pdrop=encoder_dropout,
+            embd_pdrop=encoder_dropout,
+            attn_pdrop=encoder_dropout,
+            activation_function=encoder_activation_function,
         )
         
-        # Create separate config for decoder with cross-attention
+        # Create decoder config with decoder-specific parameters and cross-attention
         self.decoder_config = GPT2Config(
             vocab_size=vocab_size,
             n_embd=d_model,
             n_positions=n_positions,
             add_cross_attention=True,  # Enable cross-attention for decoder
             is_decoder=True,  # Mark as decoder
-            n_layer=n_layer,
-            n_head=n_head,
-            n_inner=n_inner,
+            n_layer=decoder_n_layer,
+            n_head=decoder_n_head,
+            n_inner=decoder_n_inner,
+            resid_pdrop=decoder_dropout,
+            embd_pdrop=decoder_dropout,
+            attn_pdrop=decoder_dropout,
+            activation_function=decoder_activation_function,
         )
         
         # Initialize encoder with or without pretrained weights
         if use_pretrained_encoder:
-            print(f"Loading pretrained {pretrained_model_name} weights for encoder...")
+            print(f"\nLoading pretrained {pretrained_model_name} weights for encoder...")
             self.encoder = GPT2Model.from_pretrained(pretrained_model_name, config=self.encoder_config)
             # Ensure the encoder uses our config (in case vocab_size differs)
             if self.encoder.config.vocab_size != vocab_size:
@@ -496,8 +528,7 @@ class GPT2VQVAE(nn.Module):
                       f"Using specified vocab_size.")
                 self.encoder.resize_token_embeddings(vocab_size)
         else:
-            print("Initializing encoder with random weights...")
-            print(f"DEBUG: REMOVE, self.encoder_config: {self.encoder_config}")
+            print("\nInitializing encoder with random weights...")
             self.encoder = GPT2Model(self.encoder_config)
         
         # Initialize decoder with or without pretrained weights
@@ -538,6 +569,22 @@ class GPT2VQVAE(nn.Module):
         self._use_pretrained_encoder = use_pretrained_encoder
         self._use_pretrained_decoder = use_pretrained_decoder
         self._pretrained_model_name = pretrained_model_name
+        
+        # Store configuration for checkpoint validation
+        self._encoder_config_params = {
+            'n_layer': encoder_n_layer,
+            'n_head': encoder_n_head,
+            'n_inner': encoder_n_inner,
+            'dropout': encoder_dropout,
+            'activation_function': encoder_activation_function,
+        }
+        self._decoder_config_params = {
+            'n_layer': decoder_n_layer,
+            'n_head': decoder_n_head,
+            'n_inner': decoder_n_inner,
+            'dropout': decoder_dropout,
+            'activation_function': decoder_activation_function,
+        }
         
         # Initialize gradient checkpointing as disabled by default
         self._gradient_checkpointing_enabled = False
@@ -985,12 +1032,13 @@ class GPT2VQVAE(nn.Module):
             'aggregation_hidden_dim': self.aggregation_mlp[0].out_features,
             'num_thoughts': self.num_thoughts,
             'n_positions': self.encoder_config.n_positions,
-            'n_layer': self.encoder_config.n_layer,
-            'n_head': self.encoder_config.n_head,
-            'n_inner': self.encoder_config.n_inner,
             'use_pretrained_encoder': hasattr(self, '_use_pretrained_encoder'),
             'use_pretrained_decoder': hasattr(self, '_use_pretrained_decoder'),
-            'pretrained_model_name': getattr(self, '_pretrained_model_name', 'gpt2')
+            'pretrained_model_name': getattr(self, '_pretrained_model_name', 'gpt2'),
+            # Encoder-specific configuration
+            'encoder_config': self._encoder_config_params,
+            # Decoder-specific configuration
+            'decoder_config': self._decoder_config_params,
         }
         
         if 'model_config' in checkpoint:
