@@ -461,6 +461,8 @@ class GPT2VQVAE(nn.Module):
         # TODO ADD INITIALIZATION FOR ENCODER, DECODER AND MLP
         # THOUGHT: COULD ADD output_attentions=True FOR DEBUGGING (E.G. FOR HAND-MADE CROSS-ATTENTION MASK OF DECODER)
         
+        if n_inner == "None": n_inner = None
+
         # Load GPT2 model and config
         self.encoder_config = GPT2Config(
             vocab_size=vocab_size,
@@ -495,6 +497,7 @@ class GPT2VQVAE(nn.Module):
                 self.encoder.resize_token_embeddings(vocab_size)
         else:
             print("Initializing encoder with random weights...")
+            print(f"DEBUG: REMOVE, self.encoder_config: {self.encoder_config}")
             self.encoder = GPT2Model(self.encoder_config)
         
         # Initialize decoder with or without pretrained weights
@@ -535,6 +538,37 @@ class GPT2VQVAE(nn.Module):
         self._use_pretrained_encoder = use_pretrained_encoder
         self._use_pretrained_decoder = use_pretrained_decoder
         self._pretrained_model_name = pretrained_model_name
+        
+        # Initialize gradient checkpointing as disabled by default
+        self._gradient_checkpointing_enabled = False
+        
+    def gradient_checkpointing_enable(self):
+        """Enable gradient checkpointing for memory efficiency."""
+        self._gradient_checkpointing_enabled = True
+        self.encoder.gradient_checkpointing_enable()
+        self.decoder.gradient_checkpointing_enable()
+        print("Gradient checkpointing enabled for GPT2VQVAE")
+        
+    def gradient_checkpointing_disable(self):
+        """Disable gradient checkpointing."""
+        self._gradient_checkpointing_enabled = False
+        self.encoder.gradient_checkpointing_disable()
+        self.decoder.gradient_checkpointing_disable()
+        print("Gradient checkpointing disabled for GPT2VQVAE")
+        
+    def is_gradient_checkpointing_enabled(self):
+        """Check if gradient checkpointing is enabled."""
+        return self._gradient_checkpointing_enabled
+    
+    def get_gradient_checkpointing_status(self):
+        """Get detailed gradient checkpointing status for all components."""
+        return {
+            'model_enabled': self._gradient_checkpointing_enabled,
+            'encoder_enabled': self.encoder.is_gradient_checkpointing,
+            'decoder_enabled': self.decoder.is_gradient_checkpointing,
+            'encoder_training': self.encoder.training,
+            'decoder_training': self.decoder.training
+        }
         
     def aggregate(self, memory, mode="linear"):
         """
@@ -628,7 +662,6 @@ class GPT2VQVAE(nn.Module):
                 
                 # Update the cache with padded tensors
                 padded_cache.update(padded_key, padded_value, layer_idx)
-                
         else:
             # It's a legacy tuple format: Tuple[Tuple[torch.Tensor, torch.Tensor]]
             padded_cache = []

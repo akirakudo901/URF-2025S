@@ -261,9 +261,20 @@ class GPT2VQVAETrainer:
         
         # Enable gradient checkpointing if specified
         if self.use_gradient_checkpointing:
-            print("use_gradient_checkpointing current does nothing.")
-        #     self.model.gradient_checkpointing_enable()
-        #     print("Gradient checkpointing enabled")
+            self.model.gradient_checkpointing_enable()
+            print("Gradient checkpointing enabled")
+        
+            # Log gradient checkpointing status
+            if hasattr(self.model, 'get_gradient_checkpointing_status'):
+                status = self.model.get_gradient_checkpointing_status()
+                print(f"Gradient checkpointing status:")
+                print(f"  Model enabled: {status['model_enabled']}")
+                print(f"  Encoder enabled: {status['encoder_enabled']}")
+                print(f"  Decoder enabled: {status['decoder_enabled']}")
+            elif hasattr(self.model, 'is_gradient_checkpointing_enabled'):
+                print(f"Model gradient checkpointing: {self.model.is_gradient_checkpointing_enabled()}")
+            else:
+                print("Model gradient checkpointing: Not supported by this model")
         
         # Log memory before optimizer initialization
         if self.memory_monitor:
@@ -1323,10 +1334,11 @@ def create_default_config(output_path: str):
             'checkpoint_dir': 'checkpoints/gpt2vqvae',
             'pad_token_id': 50256, # eos_token for GPT2TokenizerFast
             'val_split': 0.1,
+            'num_measurements_per_epoch': 20,  # Number of detailed metrics per epoch
             # Memory optimization settings
             'use_mixed_precision': True,
             'gradient_accumulation_steps': 4,  # Effective batch size = batch_size * gradient_accumulation_steps
-            'use_gradient_checkpointing': True,
+            'use_gradient_checkpointing': True,  # Enable gradient checkpointing for memory efficiency
             'max_memory_gb': 4.0,  # Maximum memory for dataset caching
             'use_dynamic_batching': False,  # Enable for variable sequence lengths
             'max_tokens_per_batch': 8192,  # For dynamic batching
@@ -1357,6 +1369,7 @@ def create_default_config(output_path: str):
     print("  - Gradient checkpointing: Enabled")
     print("  - Memory-efficient dataset: Enabled")
     print("  - Reduced batch size: 2 (effective batch size: 8)")
+    print("  - Detailed metrics logging: 20 measurements per epoch")
     print("Pretrained model settings:")
     print("  - Encoder: GPT2-Small pretrained weights (use_pretrained_encoder: True)")
     print("  - Decoder: GPT2-Small pretrained weights (use_pretrained_decoder: True)")
