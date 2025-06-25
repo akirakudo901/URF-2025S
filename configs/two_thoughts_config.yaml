@@ -1,65 +1,52 @@
-# Default training configuration for GPT2VQVAE
-# This file can be used with: python code/training.py --config configs/default_training_config.yaml
-
 model_config:
-  # Model architecture parameters
   vocab_size: 50257  # GPT2 vocabulary size
   d_model: 768       # GPT2 model dimension
   num_embeddings: 512  # VQ codebook size
   commitment_cost: 0.25  # VQ commitment cost
   aggregation_hidden_dim: 1024  # Aggregation MLP hidden dim
-  num_thoughts: 40   # Number of parallel sequences
-  n_positions: 1024  # Maximum sequence length
+  num_thoughts: 2   # Number of parallel sequences
+  n_positions: 1024   # Maximum sequence length
   use_pretrained_encoder: true  # Load pretrained weights for encoder
   use_pretrained_decoder: true  # and decoder
   pretrained_model_name: gpt2  # Use GPT2-Small (124M parameters)
   # # Encoder-specific configuration (smaller, more efficient)
-  # encoder_n_layer: 6        # Smaller encoder
-  # encoder_n_head: 12
+  # encoder_n_layer: 4        # Smaller encoder
+  # encoder_n_head: 4
   # encoder_n_inner: null     # Will be set to 4*d_model
   # encoder_dropout: 0.1
   # encoder_activation_function: "gelu"
   # # Decoder-specific configuration (larger, more powerful)
-  # decoder_n_layer: 12       # Larger decoder
-  # decoder_n_head: 12
+  # decoder_n_layer: 6        # Medium decoder for 2 thoughts
+  # decoder_n_head: 6
   # decoder_n_inner: null     # Will be set to 4*d_model
   # decoder_dropout: 0.1
   # decoder_activation_function: "gelu"
 
 training_config:
-  # Optimizer parameters
   learning_rate: 1e-4
   weight_decay: 0.01
   beta1: 0.9
   beta2: 0.999
-  
-  # Learning rate scheduler
   use_lr_scheduler: true
   min_lr: 1e-6
-  
-  # Training parameters
-  num_epochs: 50
-  batch_size: 4  # Adjust based on your GPU memory
+  num_epochs: 1
+  batch_size: 32
   gradient_clip: 1.0
   vq_loss_weight: 1.0
   quantize_cot_only: true
-  
-  # Checkpointing
-  save_every: 5
-  checkpoint_dir: checkpoints/gpt2vqvae
+  save_every: 1
+  checkpoint_dir: checkpoints/two_thoughts
   pad_token_id: 50256
-  
-  # Data splitting
   val_split: 0.1
-  num_measurements_per_epoch: 20  # Number of detailed metrics per epoch
+  num_measurements_per_epoch: 10  # Number of detailed metrics per epoch
   
   # Memory optimization settings
   use_mixed_precision: true
-  gradient_accumulation_steps: 4  # Effective batch size = batch_size * gradient_accumulation_steps
-  use_gradient_checkpointing: true  # Enable gradient checkpointing for memory efficiency
+  gradient_accumulation_steps: 1
+  use_gradient_checkpointing: true
   use_dynamic_batching: false  # Enable for variable sequence lengths
-  max_tokens_per_batch: 8192  # For dynamic batching
-  max_samples: null  # Limit samples for debugging (set to number for testing)
+  max_tokens_per_batch: 4096  # Reduced for memory efficiency
+  max_samples: null  # Set to a number (e.g., 1000) for debugging
   
   # Data config
   data_dir: data/GSM8K
