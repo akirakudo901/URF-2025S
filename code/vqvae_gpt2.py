@@ -14,9 +14,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-def compute_perplexity(encodings: torch.Tensor, eps: float = 1e-10) -> torch.Tensor:
+def compute_perplexity(encodings: torch.Tensor, input_type: str, eps: float = 1e-10) -> torch.Tensor:
     """
-    Compute perplexity from encoding probabilities or counts.
+    Compute perplexity from encoding indices or counts.
     
     Perplexity measures the diversity of latent code usage in vector quantization.
     - High perplexity: uniform usage, no learning (all codes used equally)
@@ -24,36 +24,45 @@ def compute_perplexity(encodings: torch.Tensor, eps: float = 1e-10) -> torch.Ten
     - Mid perplexity: good balance of code usage
     
     Args:
-        encodings (torch.Tensor): Either:
-                                 - One-hot encoding tensor of shape [N, num_embeddings] (probabilities)
-                                 - Count tensor of shape [num_embeddings] (counts)
-                                 where N is the number of encoded vectors
+        encodings (torch.Tensor): Input tensor of any shape
+        input_type (str): Type of input - either "indices" or "counts"
         eps (float): Small epsilon value to prevent log(0), defaults to 1e-10
         
     Returns:
         torch.Tensor: Perplexity value (scalar tensor)
         
     Example:
-        >>> # Using probabilities (one-hot encodings)
-        >>> encodings = torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1]])  # 3 vectors, 3 codes
-        >>> perplexity = compute_perplexity(encodings)
-        >>> print(perplexity)  # Should be close to 3.0 (uniform usage)
+        >>> # Using indices directly
+        >>> indices = torch.tensor([0, 1, 2, 1, 2, 0])  # 6 indices
+        >>> perplexity = compute_perplexity(indices, "indices")
+        >>> print(perplexity)  # Perplexity based on index distribution
+        
+        >>> # Using 2D indices (batch format)
+        >>> indices_2d = torch.tensor([[0, 1, 2], [1, 2, 0]])
+        >>> perplexity = compute_perplexity(indices_2d, "indices")
+        >>> print(perplexity)  # Perplexity based on index distribution
         
         >>> # Using counts
         >>> counts = torch.tensor([10, 8, 12])  # Count of each code usage
-        >>> perplexity = compute_perplexity(counts)
+        >>> perplexity = compute_perplexity(counts, "counts")
         >>> print(perplexity)  # Perplexity based on count distribution
     """
-    # Infer input type from tensor shape
-    if encodings.dim() == 2:
-        # 2D tensor: [N, num_embeddings] - treat as probabilities (one-hot encodings)
-        avg_probs = torch.mean(encodings, dim=0)
-    elif encodings.dim() == 1:
-        # 1D tensor: [num_embeddings] - treat as counts
-        total_count = torch.sum(encodings)
-        avg_probs = encodings / total_count
+    encodings_flat = encodings.flatten()
+    
+    if input_type == "indices":
+        if torch.min(encodings_flat) < 0:
+            raise ValueError("Indices cannot be negative")
+        
+        num_embeddings = int(torch.max(encodings_flat).item() + 1)
+        
+        counts = torch.bincount(encodings_flat, minlength=num_embeddings)
+        
+        avg_probs = counts.float() / counts.sum()
+    elif input_type == "counts":  # counts
+        avg_probs = encodings_flat.float() / encodings_flat.sum()
+        
     else:
-        raise ValueError(f"Expected 1D or 2D tensor, got {encodings.dim()}D tensor")
+        raise ValueError(f"input_type must be 'indices' or 'counts', got: {input_type}")
     
     # Compute perplexity: exp(-sum(p * log(p)))
     perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + eps)))
@@ -473,7 +482,7 @@ class VectorQuantizer(nn.Module):
         
         quantized = inputs + (quantized - inputs).detach()  # Straight-through estimator
         # Perplexity: diversity of latent code usage, keep it mid (high=uniform, no learning, low=not used fully)
-        perplexity = compute_perplexity(encodings)
+        perplexity = compute_perplexity(encodings, "counts")
         
         return quantized, loss, perplexity, encoding_indices.view(input_shape[:-1])
 
