@@ -20,6 +20,7 @@ from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
 # from torch.cuda.amp import autocast, GradScaler
 from transformers import GPT2Tokenizer
+import numpy as np
 
 # GPU memory monitoring
 try:
@@ -34,6 +35,17 @@ except ImportError:
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from vqvae_gpt2 import GPT2VQVAE
+
+class TrainingAbortedException(Exception):
+    """
+    Custom exception raised when training is aborted due to perplexity threshold or other conditions.
+    """
+    def __init__(self, reason: str, epoch: int, metrics: Dict[str, Any], final_perplexity: Optional[float] = None):
+        self.reason = reason
+        self.epoch = epoch
+        self.metrics = metrics
+        self.final_perplexity = final_perplexity
+        super().__init__(f"Training aborted at epoch {epoch}: {reason}")
 
 class GPUMemoryMonitor:
     """
@@ -391,19 +403,24 @@ class GPT2VQVAETrainer:
         # Use dynamic batching if specified
         if self.training_config.get('use_dynamic_batching', False):
             max_tokens = self.training_config.get('max_tokens_per_batch', 8192)
-            sampler = torch.utils.data.SequentialSampler(dataset) if not shuffle else torch.utils.data.RandomSampler(dataset)
+            # Create sampler with proper type handling
+            if shuffle:
+                sampler = torch.utils.data.RandomSampler(dataset)  # type: ignore
+            else:
+                sampler = torch.utils.data.SequentialSampler(dataset)  # type: ignore
             batch_sampler = torch.utils.data.BatchSampler(sampler, batch_size=batch_size, drop_last=False)
             return DataLoader(dataset, batch_sampler=batch_sampler, num_workers=0)
         else:
             return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0)
             
-    def train_epoch(self, train_loader: DataLoader, num_measurements_per_epoch: int = 100) -> Dict[str, Any]:
+    def train_epoch(self, train_loader: DataLoader, num_measurements_per_epoch: int, current_epoch: int = 0) -> Dict[str, Any]:
         """
         Train for one epoch with memory optimizations.
         
         Args:
             train_loader: Training data loader
             num_measurements_per_epoch: Number of equally spaced measurements to log during the epoch
+            current_epoch: Current epoch number (for exception handling)
             
         Returns:
             Dictionary containing training metrics with both detailed and average metrics
@@ -424,6 +441,11 @@ class GPT2VQVAETrainer:
         detailed_vq_losses = []
         detailed_perplexities = []
         detailed_batch_indices = []
+
+        # Perplexity threshold monitoring
+        perplexity_threshold = self.training_config.get('perplexity_threshold', 1.5)
+        perplexity_window_size = self.training_config.get('perplexity_window_size', 20)
+        recent_perplexities = []
         
         progress_bar = tqdm(train_loader, desc="Training")
         
@@ -435,7 +457,7 @@ class GPT2VQVAETrainer:
             cot_masks = cot_masks.to(self.device, non_blocking=True)
             
             # Forward pass and loss calculation
-            total_loss_batch, vq_loss, perplexity = self._forward_pass(
+            total_loss_batch, vq_loss, perplexity, indices = self._forward_pass(
                 prompts, cots, prompt_masks, cot_masks
             )
             
@@ -458,6 +480,40 @@ class GPT2VQVAETrainer:
             total_perplexity += perplexity.item()
             num_batches += 1
             
+            # Update perplexity monitoring
+            recent_perplexities.append(perplexity.item())
+            if len(recent_perplexities) > perplexity_window_size:
+                recent_perplexities.pop(0)
+            
+            # Check perplexity threshold
+            if len(recent_perplexities) >= perplexity_window_size:
+                avg_perplexity = sum(recent_perplexities) / len(recent_perplexities)
+                if avg_perplexity < perplexity_threshold:
+                    print(f"\n🎯 Perplexity threshold reached! Average perplexity over last {perplexity_window_size} steps: {avg_perplexity:.4f} < {perplexity_threshold}")
+                    print(f"Training aborted.")
+                    
+                    # Calculate final metrics
+                    final_metrics = {
+                        'detailed_losses': detailed_losses,
+                        'detailed_vq_losses': detailed_vq_losses,
+                        'detailed_perplexities': detailed_perplexities,
+                        'detailed_batch_indices': detailed_batch_indices,
+                        'avg_loss': total_loss / num_batches,
+                        'avg_vq_loss': total_vq_loss / num_batches,
+                        'avg_perplexity': total_perplexity / num_batches,
+                        'aborted': True,
+                        'abort_reason': f'perplexity_threshold_{perplexity_threshold}',
+                        'final_avg_perplexity': avg_perplexity
+                    }
+                    
+                    # Raise exception with all the necessary information
+                    raise TrainingAbortedException(
+                        reason=f'perplexity_threshold_{perplexity_threshold}',
+                        epoch=current_epoch + 1,  # Current epoch number
+                        metrics=final_metrics,
+                        final_perplexity=avg_perplexity
+                    )
+            
             # Log detailed metrics at regular intervals
             if batch_idx % measurement_interval == 0:
                 detailed_losses.append(total_loss_batch.item())
@@ -467,10 +523,12 @@ class GPT2VQVAETrainer:
             
             # Update progress bar
             acc_step = (accumulation_steps % self.gradient_accumulation_steps) + 1
+            current_avg_perplexity = sum(recent_perplexities) / len(recent_perplexities) if recent_perplexities else 0
             progress_bar.set_postfix({
                 'loss': f"{total_loss_batch.item():.4f}",
                 'vq_loss': f"{vq_loss.item():.4f}",
                 'perplexity': f"{perplexity.item():.2f}",
+                'avg_perplexity': f"{current_avg_perplexity:.2f}",
                 'accum_steps': f"{acc_step}/{self.gradient_accumulation_steps}"
             })
             
@@ -491,7 +549,8 @@ class GPT2VQVAETrainer:
             'detailed_batch_indices': detailed_batch_indices,
             'avg_loss': avg_metrics['loss'],
             'avg_vq_loss': avg_metrics['vq_loss'],
-            'avg_perplexity': avg_metrics['perplexity']
+            'avg_perplexity': avg_metrics['perplexity'],
+            'aborted': False
         }
     
     def validate(self, val_loader: DataLoader) -> Dict[str, float]:
@@ -519,7 +578,7 @@ class GPT2VQVAETrainer:
                 cot_masks = cot_masks.to(self.device, non_blocking=True)
                 
                 # Forward pass and loss calculation
-                total_loss_batch, vq_loss, perplexity = self._forward_pass(
+                total_loss_batch, vq_loss, perplexity, indices = self._forward_pass(
                     prompts, cots, prompt_masks, cot_masks
                 )
                 
@@ -547,7 +606,7 @@ class GPT2VQVAETrainer:
         
         if self.use_mixed_precision:
             with autocast('cuda'):
-                _, output_logits, vq_loss, perplexity = self.model(
+                _, output_logits, vq_loss, perplexity, indices = self.model(
                     prompt=prompts,
                     cot_sequences=cots,
                     cot_mask=cot_masks,
@@ -557,7 +616,7 @@ class GPT2VQVAETrainer:
                 )
                 total_loss_batch = _compute_loss(output_logits, cots, cot_masks, vq_loss)
         else:
-            _, output_logits, vq_loss, perplexity = self.model(
+            _, output_logits, vq_loss, perplexity, indices = self.model(
                 prompt=prompts,
                 cot_sequences=cots,
                 cot_mask=cot_masks,
@@ -567,7 +626,7 @@ class GPT2VQVAETrainer:
             )
             total_loss_batch = _compute_loss(output_logits, cots, cot_masks, vq_loss)
             
-        return total_loss_batch, vq_loss, perplexity
+        return total_loss_batch, vq_loss, perplexity, indices
     
     def _update_weights(self):
         """Helper function for updating weights"""
@@ -598,7 +657,7 @@ class GPT2VQVAETrainer:
             'perplexity': total_perplexity / num_batches
         }
     
-    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False):
+    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None):
         """
         Save model checkpoint.
         
@@ -606,6 +665,7 @@ class GPT2VQVAETrainer:
             epoch: Current epoch number
             metrics: Current metrics
             is_best: Whether this is the best model so far
+            checkpoint_path: Path to save the checkpoint (optional)
         """
         checkpoint_dir = self.training_config.get('checkpoint_dir', 'checkpoints')
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -641,9 +701,10 @@ class GPT2VQVAETrainer:
             print(f"New best model saved (epoch {epoch}) with validation loss: {metrics['loss']:.4f}")
         else:
             # Save regular checkpoint
-            checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_epoch_{epoch}.pt')
+            if checkpoint_path is None:
+                checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_epoch_{epoch}.pt')
             torch.save(checkpoint, checkpoint_path)
-        
+            print(f"Checkpoint saved to: {checkpoint_path}")
     
     def load_checkpoint(self, checkpoint_path: str):
         """
@@ -732,6 +793,16 @@ class GPT2VQVAETrainer:
         elif val_size == 0:
             raise Exception(f"The validation dataset has size 0 given : {num_samples} samples, val_split={val_split}.")
         
+        if num_measurements_per_epoch is None:
+            num_measurements_per_epoch = self.training_config.get("num_measurements_per_epoch", 25)
+            print(f"Logging {num_measurements_per_epoch} measurements per epoch as per training config (or if not given, default)")
+        else:
+            print(f"Logging {num_measurements_per_epoch} measurements per epoch as given as parameter")
+        
+        # Ensure num_measurements_per_epoch is an integer for type checking
+        assert num_measurements_per_epoch is not None
+        num_measurements_per_epoch = int(num_measurements_per_epoch)
+        
         # Use PyTorch's random_split for reproducible train/validation split
         train_dataset, val_dataset = random_split(
             dataset, 
@@ -762,67 +833,144 @@ class GPT2VQVAETrainer:
             start_epoch = len(self.train_losses)
         
         # Training loop
-        for epoch in range(start_epoch, self.training_config['num_epochs']):
-            print(f"\nEpoch {epoch + 1}/{self.training_config['num_epochs']}")
-            print("-" * 50)
+        try:
+            for epoch in range(start_epoch, self.training_config['num_epochs']):
+                print(f"\nEpoch {epoch + 1}/{self.training_config['num_epochs']}")
+                print("-" * 50)
+                
+                # Log memory before epoch
+                self.log_memory_usage(f"epoch_{epoch+1}_start")
+                
+                # Train with resume support
+                train_metrics = self.train_epoch(
+                    train_loader,
+                    num_measurements_per_epoch,  # This is guaranteed to be int from earlier logic
+                    epoch
+                )
+                
+                # Log memory after training
+                self.log_memory_usage(f"epoch_{epoch+1}_after_train")
+                
+                # Validate
+                val_metrics = self.validate(val_loader)
+                
+                # Log memory after validation
+                self.log_memory_usage(f"epoch_{epoch+1}_after_val")
+                
+                # Update learning rate
+                if self.scheduler:
+                    self.scheduler.step()
+                
+                # Store epoch-level metrics
+                self.train_losses.append(train_metrics['avg_loss'])
+                self.val_losses.append(val_metrics['loss'])
+                self.vq_losses.append(train_metrics['avg_vq_loss'])
+                self.perplexities.append(train_metrics['avg_perplexity'])
+                
+                # Store detailed metrics
+                self.detailed_train_losses.append(train_metrics['detailed_losses'])
+                self.detailed_vq_losses.append(train_metrics['detailed_vq_losses'])
+                self.detailed_perplexities.append(train_metrics['detailed_perplexities'])
+                self.detailed_batch_indices.append(train_metrics['detailed_batch_indices'])
+                
+                # Print metrics
+                print(f"Train Loss: {train_metrics['avg_loss']:.4f}")
+                print(f"Val Loss: {val_metrics['loss']:.4f}")
+                print(f"VQ Loss: {train_metrics['avg_vq_loss']:.4f}")
+                print(f"Perplexity: {train_metrics['avg_perplexity']:.2f}")
+                print(f"Learning Rate: {self.optimizer.param_groups[0]['lr']:.6f}")
+                
+                # Save checkpoint
+                is_best = val_metrics['loss'] < self.best_val_loss
+                if is_best:
+                    self.best_val_loss = val_metrics['loss']
+                    self.save_checkpoint(epoch + 1, val_metrics, True)
+                
+                if (epoch + 1) % self.training_config.get('save_every', 5) == 0:
+                    self.save_checkpoint(epoch + 1, val_metrics, False)
+                
+                # Clear cache after each epoch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
+        
+        except TrainingAbortedException as e:
+            # Handle aborted training
+            print(f"\n🛑 Training aborted: {e.reason}")
+            if e.final_perplexity is not None:
+                print(f"Final average perplexity: {e.final_perplexity:.4f}")
             
-            # Calculate number of measurements per epochs
-            if num_measurements_per_epoch is None:
-                total_epochs = self.training_config['num_epochs']
-                num_measurements_per_epoch = max(1, 100 // total_epochs)
-            print(f"Logging {num_measurements_per_epoch} measurements per epoch")
+            # Store the current epoch's metrics even though training was aborted
+            self.train_losses.append(e.metrics['avg_loss'])
+            self.vq_losses.append(e.metrics['avg_vq_loss'])
+            self.perplexities.append(e.metrics['avg_perplexity'])
             
-            # Log memory before epoch
-            self.log_memory_usage(f"epoch_{epoch+1}_start")
+            # Add a dummy validation loss for plotting purposes (use training loss as proxy)
+            self.val_losses.append(e.metrics['avg_loss'])
             
-            # Train
-            train_metrics = self.train_epoch(train_loader, num_measurements_per_epoch)
+            # Store detailed metrics from the aborted epoch
+            self.detailed_train_losses.append(e.metrics['detailed_losses'])
+            self.detailed_vq_losses.append(e.metrics['detailed_vq_losses'])
+            self.detailed_perplexities.append(e.metrics['detailed_perplexities'])
+            self.detailed_batch_indices.append(e.metrics['detailed_batch_indices'])
             
-            # Log memory after training
-            self.log_memory_usage(f"epoch_{epoch+1}_after_train")
+            # Create a dummy validation metrics for checkpoint saving
+            # Use the training metrics as a proxy since we didn't complete validation
+            dummy_val_metrics = {
+                'loss': e.metrics['avg_loss'],  # Use training loss as proxy
+                'vq_loss': e.metrics['avg_vq_loss'],
+                'perplexity': e.metrics['avg_perplexity']
+            }
             
-            # Validate
-            val_metrics = self.validate(val_loader)
+            # Save checkpoint for the aborted training
+            checkpoint_dir = self.training_config.get('checkpoint_dir', 'checkpoints')
+            os.makedirs(checkpoint_dir, exist_ok=True)
             
-            # Log memory after validation
-            self.log_memory_usage(f"epoch_{epoch+1}_after_val")
+            # Get minimum batches threshold for saving checkpoint
+            minimum_batches = self.training_config.get('minimum_batches_for_checkpoint', 200)
             
-            # Update learning rate
-            if self.scheduler:
-                self.scheduler.step()
+            # Calculate total batches trained (detailed_losses contains one entry per measurement interval)
+            total_batches_trained = len(e.metrics['detailed_losses'])
+            # Estimate total batches based on measurements and measurement frequency
+            total_batches_trained = total_batches_trained * num_measurements_per_epoch
             
-            # Store epoch-level metrics
-            self.train_losses.append(train_metrics['avg_loss'])
-            self.val_losses.append(val_metrics['loss'])
-            self.vq_losses.append(train_metrics['avg_vq_loss'])
-            self.perplexities.append(train_metrics['avg_perplexity'])
+            # Save as a special "aborted" checkpoint if we've trained enough batches
+            if total_batches_trained >= minimum_batches:
+                aborted_checkpoint_path = os.path.join(checkpoint_dir, f'aborted_training_epoch_{e.epoch}.pt')
+                self.save_checkpoint(e.epoch, dummy_val_metrics, is_best=False, checkpoint_path=aborted_checkpoint_path)
+                print(f"Aborted training checkpoint saved (trained {total_batches_trained} batches, threshold: {minimum_batches})")
+
+                # Also save as best model if it's better than previous best
+                if e.metrics['avg_loss'] < self.best_val_loss:
+                    self.best_val_loss = e.metrics['avg_loss']
+                    best_aborted_path = os.path.join(checkpoint_dir, f'best_model_aborted_epoch_{e.epoch}.pt')
+                    self.save_checkpoint(e.epoch, dummy_val_metrics, is_best=True, checkpoint_path=best_aborted_path)
+                    print(f"New best model (from aborted training) saved to: {best_aborted_path}")
+            else:
+                print(f"Skipping checkpoint save - only trained {total_batches_trained} batches, need at least {minimum_batches}")
             
-            # Store detailed metrics
-            self.detailed_train_losses.append(train_metrics['detailed_losses'])
-            self.detailed_vq_losses.append(train_metrics['detailed_vq_losses'])
-            self.detailed_perplexities.append(train_metrics['detailed_perplexities'])
-            self.detailed_batch_indices.append(train_metrics['detailed_batch_indices'])
             
-            # Print metrics
-            print(f"Train Loss: {train_metrics['avg_loss']:.4f}")
-            print(f"Val Loss: {val_metrics['loss']:.4f}")
-            print(f"VQ Loss: {train_metrics['avg_vq_loss']:.4f}")
-            print(f"Perplexity: {train_metrics['avg_perplexity']:.2f}")
-            print(f"Learning Rate: {self.optimizer.param_groups[0]['lr']:.6f}")
             
-            # Save checkpoint
-            is_best = val_metrics['loss'] < self.best_val_loss
-            if is_best:
-                self.best_val_loss = val_metrics['loss']
-                self.save_checkpoint(epoch + 1, val_metrics, True)
+            # Save training history and memory usage plots for aborted training
+            history_path = os.path.join(checkpoint_dir, f'training_history_aborted_epoch_{e.epoch}.png')
+            memory_path = os.path.join(checkpoint_dir, f'memory_usage_aborted_epoch_{e.epoch}.png')
             
-            if (epoch + 1) % self.training_config.get('save_every', 5) == 0:
-                self.save_checkpoint(epoch + 1, val_metrics, False)
+            self.plot_training_history(history_path)
+            self.plot_memory_usage(memory_path)
             
-            # Clear cache after each epoch
+            # Log final memory usage for aborted training
+            self.log_memory_usage("training_aborted_end")
+            
+            print(f"\nTraining aborted! Best validation loss so far: {self.best_val_loss:.4f}")
+            print(f"Training completed at epoch {e.epoch} due to perplexity threshold.")
+            
+            # Clear cache after aborted training
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             gc.collect()
+            
+            # Re-raise the exception to be caught by the main function
+            raise
         
         # Log final memory usage
         self.log_memory_usage("training_end")
@@ -1353,6 +1501,11 @@ def create_default_config(output_path: str):
             'use_dynamic_batching': False,  # Enable for variable sequence lengths
             'max_tokens_per_batch': 8192,  # For dynamic batching
             'max_samples': None,  # Limit samples for debugging (set to number for testing)
+            # Perplexity threshold settings
+            'perplexity_threshold': 1.5,  # Training aborts when 20-step average perplexity goes below this value
+            'perplexity_window_size': 20,  # Number of steps to average for perplexity threshold check
+            # Checkpoint settings
+            'minimum_batches_for_checkpoint': 200,  # Minimum number of batches trained before saving aborted checkpoint
             # Data config
             'data_dir': 'data/GSM8K'
         }
@@ -1379,6 +1532,8 @@ def create_default_config(output_path: str):
     print("  - Memory-efficient dataset: Enabled")
     print("  - Reduced batch size: 2 (effective batch size: 8)")
     print("  - Detailed metrics logging: 20 measurements per epoch")
+    print("  - Perplexity threshold monitoring: 1.5 (aborts training when 20-step average < 1.5)")
+    print("  - Minimum batches for checkpoint: 200 (only save aborted checkpoints if trained enough)")
     print("Pretrained model settings:")
     print("  - Encoder: GPT2-Small pretrained weights (use_pretrained_encoder: True)")
     print("  - Decoder: GPT2-Small pretrained weights (use_pretrained_decoder: True)")
@@ -1408,9 +1563,14 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
     model.load_checkpoint(checkpoint_path, device=device)
     model.eval()
     
-    # Get num_thoughts from model configuration
+    # Get num_embeddings and num_thoughts from model configuration
+    num_embeddings = model_config.get('num_embeddings', 512)
     num_thoughts = model_config.get('num_thoughts', 32)
-    print(f"Model configured for {num_thoughts} parallel CoT sequences")
+    print(f"Model configured for {num_thoughts} parallel CoT sequences and {num_embeddings} embeddings")
+    
+    # Initialize accumulators for indices counts
+    all_indices_tf = []
+    all_indices_ar = []
     
     # Load tokenizer
     try:
@@ -1481,7 +1641,7 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
             
             # Generate with teacher forcing (inference=False)
             try:
-                _, output_logits_tf, vq_loss_tf, perplexity_tf = model(
+                _, output_logits_tf, vq_loss_tf, perplexity_tf, indices_tf = model(
                     prompt=prompt,
                     cot_sequences=cot_gt,
                     cot_mask=cot_mask_ex,
@@ -1493,15 +1653,20 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
                 # Get predicted tokens from logits
                 predicted_tokens_tf = torch.argmax(output_logits_tf, dim=-1)  # [B, M, L]
                 
+                # Accumulate indices for teacher forcing
+                if indices_tf is not None:
+                    all_indices_tf.append(indices_tf.flatten())
+                
             except Exception as e:
                 print(f"Teacher forcing generation failed: {e}")
                 predicted_tokens_tf = None
                 vq_loss_tf = None
                 perplexity_tf = None
+                indices_tf = None
             
             # Generate auto-regressively (inference=True)
             try:
-                output_sequences_ar, output_logits_ar, vq_loss_ar, perplexity_ar = model(
+                output_sequences_ar, output_logits_ar, vq_loss_ar, perplexity_ar, indices_ar = model(
                     prompt=prompt,
                     cot_sequences=cot_gt,
                     cot_mask=cot_mask_ex,
@@ -1510,11 +1675,16 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
                     quantize_cot_only=True
                 )
                 
+                # Accumulate indices for auto-regressive
+                if indices_ar is not None:
+                    all_indices_ar.append(indices_ar.flatten())
+                
             except Exception as e:
                 print(f"Auto-regressive generation failed: {e}")
                 output_sequences_ar = None
                 vq_loss_ar = None
                 perplexity_ar = None
+                indices_ar = None
             
             # Display side-by-side comparison for each CoT sequence
             print(f"\n{'='*120}")
@@ -1524,8 +1694,15 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
             # Print metrics
             if vq_loss_tf is not None and perplexity_tf is not None:
                 print(f"Teacher Forcing - VQ Loss: {vq_loss_tf.item():.4f}, Perplexity: {perplexity_tf.item():.2f}")
+                if indices_tf is not None:
+                    unique_indices = torch.unique(indices_tf).numel()
+                    print(f"  Codebook usage: {unique_indices} unique indices out of {indices_tf.numel()} total")
+                    
             if vq_loss_ar is not None and perplexity_ar is not None:
                 print(f"Auto-regressive - VQ Loss: {vq_loss_ar.item():.4f}, Perplexity: {perplexity_ar.item():.2f}")
+                if indices_ar is not None:
+                    unique_indices = torch.unique(indices_ar).numel()
+                    print(f"  Codebook usage: {unique_indices} unique indices out of {indices_ar.numel()} total")
             print()
             
             # Function to chunk text into 20-word segments
@@ -1598,13 +1775,144 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
             
             print("\n" + "="*120)
     
+    # Create comprehensive heatmaps from accumulated indices
+    print(f"\n{'='*80}")
+    print("GENERATING COMPREHENSIVE CODEBOOK USAGE HEATMAPS")
+    print(f"{'='*80}")
+    
+    # Combine all accumulated indices
+    if all_indices_tf:
+        combined_indices_tf = torch.cat(all_indices_tf, dim=0)
+        print(f"Teacher Forcing - Total indices: {combined_indices_tf.numel()}")
+        print(f"Teacher Forcing - Unique indices: {torch.unique(combined_indices_tf).numel()}")
+        
+        # Create comprehensive heatmap for teacher forcing
+        heatmap_path_tf = os.path.join(os.path.dirname(checkpoint_path), "codebook_usage_tf_comprehensive.png")
+        create_codebook_usage_heatmap(
+            combined_indices_tf, 
+            num_embeddings=num_embeddings,
+            title=f"Teacher Forcing Codebook Usage - All {num_examples} Examples",
+            save_path=heatmap_path_tf
+        )
+    
+    if all_indices_ar:
+        combined_indices_ar = torch.cat(all_indices_ar, dim=0)
+        print(f"Auto-regressive - Total indices: {combined_indices_ar.numel()}")
+        print(f"Auto-regressive - Unique indices: {torch.unique(combined_indices_ar).numel()}")
+        
+        # Create comprehensive heatmap for auto-regressive
+        heatmap_path_ar = os.path.join(os.path.dirname(checkpoint_path), "codebook_usage_ar_comprehensive.png")
+        create_codebook_usage_heatmap(
+            combined_indices_ar, 
+            num_embeddings=num_embeddings,
+            title=f"Auto-regressive Codebook Usage - All {num_examples} Examples",
+            save_path=heatmap_path_ar
+        )
+    
     print("\nDemonstration completed!")
+
+def create_codebook_usage_heatmap(indices: torch.Tensor, 
+                                 num_embeddings: int,
+                                 title: str = "Codebook Usage Heatmap",
+                                 save_path: Optional[str] = None,
+                                 figsize: Tuple[int, int] = (12, 8),
+                                 cmap: str = 'viridis',
+                                 show_counts: bool = True) -> None:
+    """
+    Create and optionally save a heatmap showing codebook usage from indices.
+    
+    Args:
+        indices (torch.Tensor): Tensor of codebook indices [batch_size, sequence_length] or flattened
+        num_embeddings (int): Total number of embeddings in the codebook
+        title (str): Title for the heatmap
+        save_path (Optional[str]): Path to save the heatmap image (if None, only displays)
+        figsize (Tuple[int, int]): Figure size (width, height)
+        cmap (str): Colormap for the heatmap
+        show_counts (bool): Whether to show count values on the heatmap
+        
+    Example:
+        >>> indices = torch.tensor([[0, 1, 2], [1, 2, 0], [2, 0, 1]])
+        >>> create_codebook_usage_heatmap(indices, num_embeddings=3, save_path="heatmap.png")
+    """
+    # Flatten indices if needed
+    if indices.dim() > 1:
+        indices_flat = indices.flatten()
+    else:
+        indices_flat = indices
+    
+    # Count occurrences of each index
+    counts = torch.zeros(num_embeddings, dtype=torch.long)
+    for idx in indices_flat:
+        if 0 <= idx < num_embeddings:
+            counts[idx] += 1
+    
+    # Convert to numpy for plotting
+    counts_np = counts.numpy()
+    
+    # Create the heatmap
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Create a 2D array for the heatmap (reshape to make it more visually appealing)
+    # Try to make it roughly square-ish
+    cols = int(np.ceil(np.sqrt(num_embeddings)))
+    rows = int(np.ceil(num_embeddings / cols))
+    
+    # Pad with zeros if needed
+    padded_size = rows * cols
+    counts_padded = np.zeros(padded_size)
+    counts_padded[:num_embeddings] = counts_np
+    
+    # Reshape to 2D
+    heatmap_data = counts_padded.reshape(rows, cols)
+    
+    # Create the heatmap
+    im = ax.imshow(heatmap_data, cmap=cmap, aspect='auto')
+    
+    # Add colorbar
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label('Usage Count', rotation=270, labelpad=15)
+    
+    # Set title and labels
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_xlabel('Column', fontsize=12)
+    ax.set_ylabel('Row', fontsize=12)
+    
+    # Add count annotations if requested
+    if show_counts:
+        for i in range(rows):
+            for j in range(cols):
+                idx = i * cols + j
+                if idx < num_embeddings:
+                    count = int(heatmap_data[i, j])
+                    # Choose text color based on background brightness
+                    text_color = 'white' if count > np.max(heatmap_data) / 2 else 'black'
+                    ax.text(j, i, str(count), ha='center', va='center', 
+                           color=text_color, fontweight='bold')
+    
+    # Add statistics text
+    total_usage = counts_np.sum()
+    unique_usage = (counts_np > 0).sum()
+    usage_percentage = (unique_usage / num_embeddings) * 100
+    
+    stats_text = f'Total usage: {total_usage}\nUnique codes: {unique_usage}/{num_embeddings} ({usage_percentage:.1f}%)'
+    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=10,
+            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    plt.tight_layout()
+    
+    # Save if path is provided
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Codebook usage heatmap saved to: {save_path}")
+    
+    # Show the plot
+    plt.show()
 
 def main():
     """
     Main function for command-line training with memory optimizations.
     """
-    parser = argparse.ArgumentParser(description='Train GPT2VQVAE model with memory optimizations')
+    parser = argparse.ArgumentParser(description='Train GPT2VQVAE model with memory optimizations and perplexity threshold monitoring')
     parser.add_argument('--config', '-c', type=str, required=True,
                        help='Path to configuration file (YAML or JSON)')
     parser.add_argument('--data-dir', type=str, default=None,
@@ -1625,6 +1933,20 @@ def main():
                        help='Demonstrate model generation from checkpoint (provide checkpoint path)')
     parser.add_argument('--num-examples', type=int, default=3,
                        help='Number of examples to generate in demonstration mode')
+    parser.add_argument('--perplexity-threshold', type=float, default=1.5,
+                       help='Training will abort when 20-step average perplexity goes below this value (default: 1.5)')
+    parser.add_argument('--perplexity-window-size', type=int, default=20,
+                       help='Number of steps to average for perplexity threshold check (default: 20)')
+    parser.add_argument('--checkpoint-dir', type=str, default=None,
+                       help='Override checkpoint directory from config')
+    parser.add_argument('--lr', type=float, default=None,
+                       help='Override learning rate from config')
+    parser.add_argument('--min-lr', type=float, default=None,
+                       help='Override minimum learning rate from config')
+    parser.add_argument('--vq-loss-weight', type=float, default=None,
+                       help='Override VQ loss weight from config')
+    parser.add_argument('--minimum-batches-for-checkpoint', type=int, default=None,
+                       help='Override minimum batches required to save aborted checkpoint (default: 200)')
     
     args = parser.parse_args()
     
@@ -1647,10 +1969,41 @@ def main():
         # Override data directory if specified
         if args.data_dir:
             training_config['data_dir'] = args.data_dir
+            print(f"Overriding data_dir from config to: {args.data_dir}")
         
         # Override max samples if specified
         if args.max_samples:
             training_config['max_samples'] = args.max_samples
+            print(f"Overriding max_samples from config to: {args.max_samples}")
+        
+        # Override perplexity threshold if specified
+        training_config['perplexity_threshold'] = args.perplexity_threshold
+        training_config['perplexity_window_size'] = args.perplexity_window_size
+        
+        # Override checkpoint directory if specified
+        if args.checkpoint_dir:
+            training_config['checkpoint_dir'] = args.checkpoint_dir
+            print(f"Overriding checkpoint_dir from config to: {args.checkpoint_dir}")
+        
+        # Override learning rate if specified
+        if args.lr:
+            training_config['learning_rate'] = args.lr
+            print(f"Overriding learning_rate from config to: {args.lr}")
+        
+        # Override minimum learning rate if specified
+        if args.min_lr:
+            training_config['min_lr'] = args.min_lr
+            print(f"Overriding min_lr from config to: {args.min_lr}")
+        
+        # Override VQ loss weight if specified
+        if args.vq_loss_weight:
+            training_config['vq_loss_weight'] = args.vq_loss_weight
+            print(f"Overriding vq_loss_weight from config to: {args.vq_loss_weight}")
+        
+        # Override minimum batches for checkpoint if specified
+        if args.minimum_batches_for_checkpoint:
+            training_config['minimum_batches_for_checkpoint'] = args.minimum_batches_for_checkpoint
+            print(f"Overriding minimum_batches_for_checkpoint from config to: {args.minimum_batches_for_checkpoint}")
         
         # Set device
         if args.device:
@@ -1730,6 +2083,8 @@ def main():
         
         # Start training
         print("Starting training...")
+        print(f"Perplexity threshold monitoring: {training_config.get('perplexity_threshold', 1.5)} (window size: {training_config.get('perplexity_window_size', 20)})")
+        print(f"Minimum batches for aborted checkpoint: {training_config.get('minimum_batches_for_checkpoint', 200)}")
         trainer.train(
             prompt_sequences=prompt_sequences,
             cot_sequences=cot_sequences,
@@ -1751,6 +2106,19 @@ def main():
         print(f"Best model saved to: {trainer.best_model_path}")
         
         # Print final memory statistics
+        if trainer.memory_stats:
+            final_memory = trainer.memory_stats[-1]
+            if 'pytorch_allocated_gb' in final_memory:
+                print(f"Final memory usage: {final_memory['pytorch_allocated_gb']:.2f}GB allocated, {final_memory['pytorch_max_allocated_gb']:.2f}GB max")
+            else:
+                print(f"Final memory usage: {final_memory['allocated_gb']:.2f}GB allocated, {final_memory['max_allocated_gb']:.2f}GB max")
+        
+    except TrainingAbortedException as e:
+        # Handle training abortion gracefully
+        print(f"\n✅ Training completed successfully (aborted due to {e.reason})")
+        print(f"Training stopped at epoch {e.epoch} with final perplexity: {e.final_perplexity:.4f}")
+        
+        # Print final memory statistics for aborted training
         if trainer.memory_stats:
             final_memory = trainer.memory_stats[-1]
             if 'pytorch_allocated_gb' in final_memory:
