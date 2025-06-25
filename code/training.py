@@ -226,7 +226,6 @@ class GPT2VQVAETrainer:
         self.use_mixed_precision = training_config.get('use_mixed_precision', True)
         self.gradient_accumulation_steps = training_config.get('gradient_accumulation_steps', 1)
         self.use_gradient_checkpointing = training_config.get('use_gradient_checkpointing', True)
-        self.max_memory_gb = training_config.get('max_memory_gb', 4.0)
         
         # Ensure all numeric values are properly typed
         def ensure_numeric_types(config_dict):
@@ -1316,7 +1315,19 @@ def create_default_config(output_path: str):
             # Pretrained model settings
             'use_pretrained_encoder': True,  # Load pretrained weights for encoder
             'use_pretrained_decoder': True,  # and decoder
-            'pretrained_model_name': 'gpt2'  # Use GPT2-Small (124M parameters)
+            'pretrained_model_name': 'gpt2',  # Use GPT2-Small (124M parameters)
+            # Encoder-specific configuration (smaller, more efficient)
+            "encoder_n_layer": 6,        # Smaller encoder
+            "encoder_n_head": 12,
+            "encoder_n_inner": None,     # Will be set to 4*d_model
+            "encoder_dropout": 0.1,
+            "encoder_activation_function": "gelu",
+            # Decoder-specific configuration (larger, more powerful)
+            "decoder_n_layer": 12,       # Larger decoder
+            "decoder_n_head": 12,
+            "decoder_n_inner": None,     # Will be set to 4*d_model
+            "decoder_dropout": 0.1,
+            "decoder_activation_function": "gelu"
         },
         'training_config': {
             'learning_rate': 1e-4,
@@ -1339,12 +1350,10 @@ def create_default_config(output_path: str):
             'use_mixed_precision': True,
             'gradient_accumulation_steps': 4,  # Effective batch size = batch_size * gradient_accumulation_steps
             'use_gradient_checkpointing': True,  # Enable gradient checkpointing for memory efficiency
-            'max_memory_gb': 4.0,  # Maximum memory for dataset caching
             'use_dynamic_batching': False,  # Enable for variable sequence lengths
             'max_tokens_per_batch': 8192,  # For dynamic batching
-            'max_samples': None  # Limit samples for debugging (set to number for testing)
-        },
-        'data_config': {
+            'max_samples': None,  # Limit samples for debugging (set to number for testing)
+            # Data config
             'data_dir': 'data/GSM8K'
         }
     }
