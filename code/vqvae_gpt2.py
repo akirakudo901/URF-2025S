@@ -438,12 +438,14 @@ class GPT2VQVAE(nn.Module):
                  num_thoughts=32, n_positions=1024, 
                  use_pretrained_encoder=True, use_pretrained_decoder=True,
                  pretrained_model_name="gpt2",
-                 # Encoder-specific parameters
-                 encoder_n_layer=12, encoder_n_head=12, encoder_n_inner=None,
-                 encoder_dropout=0.1, encoder_activation_function="gelu",
-                 # Decoder-specific parameters  
-                 decoder_n_layer=12, decoder_n_head=12, decoder_n_inner=None,
-                 decoder_dropout=0.1, decoder_activation_function="gelu"):
+                 # Unified parameters (applied to both encoder and decoder if specified)
+                 n_layer=12, n_head=12, n_inner=None, dropout=0.1, activation_function="gelu",
+                 # Encoder-specific parameters (take precedence over unified if specified)
+                 encoder_n_layer=None, encoder_n_head=None, encoder_n_inner=None,
+                 encoder_dropout=None, encoder_activation_function=None,
+                 # Decoder-specific parameters (take precedence over unified if specified)
+                 decoder_n_layer=None, decoder_n_head=None, decoder_n_inner=None,
+                 decoder_dropout=None, decoder_activation_function=None):
         """
         GPT2-based VQ-VAE model that uses GPT2 as both encoder and decoder.
         
@@ -464,41 +466,61 @@ class GPT2VQVAE(nn.Module):
             use_pretrained_decoder (bool): Whether to load pretrained weights for decoder
             pretrained_model_name (str): Name of pretrained model to load (default: "gpt2")
             
-            # Encoder-specific parameters
-            encoder_n_layer (int): Number of hidden layers in the encoder (default: 12)
-            encoder_n_head (int): Number of attention heads for encoder (default: 12)
-            encoder_n_inner (int): Dimensionality of encoder inner feed-forward layers (default: 4*d_model)
-            encoder_dropout (float): Dropout probability for encoder (default: 0.1)
-            encoder_activation_function (str): Activation function for encoder (default: "gelu")
+            # Unified parameters (applied to both encoder and decoder)
+            n_layer (int): Number of hidden layers for both encoder and decoder (default: 12)
+            n_head (int): Number of attention heads for both encoder and decoder (default: 12)
+            n_inner (int, optional): Dimensionality of inner feed-forward layers for both encoder and decoder
+            dropout (float): Dropout probability for both encoder and decoder (default: 0.1)
+            activation_function (str): Activation function for both encoder and decoder (default: "gelu")
             
-            # Decoder-specific parameters
-            decoder_n_layer (int): Number of hidden layers in the decoder (default: 12)
-            decoder_n_head (int): Number of attention heads for decoder (default: 12)
-            decoder_n_inner (int): Dimensionality of decoder inner feed-forward layers (default: 4*d_model)
-            decoder_dropout (float): Dropout probability for decoder (default: 0.1)
-            decoder_activation_function (str): Activation function for decoder (default: "gelu")
+            # Encoder-specific parameters (take precedence over unified if specified)
+            encoder_n_layer (int, optional): Number of hidden layers in the encoder
+            encoder_n_head (int, optional): Number of attention heads for encoder
+            encoder_n_inner (int, optional): Dimensionality of encoder inner feed-forward layers
+            encoder_dropout (float, optional): Dropout probability for encoder
+            encoder_activation_function (str, optional): Activation function for encoder
+            
+            # Decoder-specific parameters (take precedence over unified if specified)
+            decoder_n_layer (int, optional): Number of hidden layers in the decoder
+            decoder_n_head (int, optional): Number of attention heads for decoder
+            decoder_n_inner (int, optional): Dimensionality of decoder inner feed-forward layers
+            decoder_dropout (float, optional): Dropout probability for decoder
+            decoder_activation_function (str, optional): Activation function for decoder
         """
         super(GPT2VQVAE, self).__init__()
 
         # TODO ADD INITIALIZATION FOR ENCODER, DECODER AND MLP
         # THOUGHT: COULD ADD output_attentions=True FOR DEBUGGING (E.G. FOR HAND-MADE CROSS-ATTENTION MASK OF DECODER)
         
+        # Apply unified parameters as defaults, then override with specific parameters if provided
+        final_encoder_n_layer = encoder_n_layer if encoder_n_layer is not None else n_layer
+        final_encoder_n_head = encoder_n_head if encoder_n_head is not None else n_head
+        final_encoder_n_inner = encoder_n_inner if encoder_n_inner is not None else n_inner
+        final_encoder_dropout = encoder_dropout if encoder_dropout is not None else dropout
+        final_encoder_activation_function = encoder_activation_function if encoder_activation_function is not None else activation_function
+        
+        final_decoder_n_layer = decoder_n_layer if decoder_n_layer is not None else n_layer
+        final_decoder_n_head = decoder_n_head if decoder_n_head is not None else n_head
+        final_decoder_n_inner = decoder_n_inner if decoder_n_inner is not None else n_inner
+        final_decoder_dropout = decoder_dropout if decoder_dropout is not None else dropout
+        final_decoder_activation_function = decoder_activation_function if decoder_activation_function is not None else activation_function
+        
         # Handle None values for n_inner parameters
-        if encoder_n_inner == "None": encoder_n_inner = None
-        if decoder_n_inner == "None": decoder_n_inner = None
+        if final_encoder_n_inner == "None": final_encoder_n_inner = None
+        if final_decoder_n_inner == "None": final_decoder_n_inner = None
 
         # Create encoder config with encoder-specific parameters
         self.encoder_config = GPT2Config(
             vocab_size=vocab_size,
             n_embd=d_model,
             n_positions=n_positions,
-            n_layer=encoder_n_layer,
-            n_head=encoder_n_head,
-            n_inner=encoder_n_inner,
-            resid_pdrop=encoder_dropout,
-            embd_pdrop=encoder_dropout,
-            attn_pdrop=encoder_dropout,
-            activation_function=encoder_activation_function,
+            n_layer=final_encoder_n_layer,
+            n_head=final_encoder_n_head,
+            n_inner=final_encoder_n_inner,
+            resid_pdrop=final_encoder_dropout,
+            embd_pdrop=final_encoder_dropout,
+            attn_pdrop=final_encoder_dropout,
+            activation_function=final_encoder_activation_function,
         )
         
         # Create decoder config with decoder-specific parameters and cross-attention
@@ -508,13 +530,13 @@ class GPT2VQVAE(nn.Module):
             n_positions=n_positions,
             add_cross_attention=True,  # Enable cross-attention for decoder
             is_decoder=True,  # Mark as decoder
-            n_layer=decoder_n_layer,
-            n_head=decoder_n_head,
-            n_inner=decoder_n_inner,
-            resid_pdrop=decoder_dropout,
-            embd_pdrop=decoder_dropout,
-            attn_pdrop=decoder_dropout,
-            activation_function=decoder_activation_function,
+            n_layer=final_decoder_n_layer,
+            n_head=final_decoder_n_head,
+            n_inner=final_decoder_n_inner,
+            resid_pdrop=final_decoder_dropout,
+            embd_pdrop=final_decoder_dropout,
+            attn_pdrop=final_decoder_dropout,
+            activation_function=final_decoder_activation_function,
         )
         
         # Initialize encoder with or without pretrained weights
@@ -572,23 +594,22 @@ class GPT2VQVAE(nn.Module):
         
         # Store configuration for checkpoint validation
         self._encoder_config_params = {
-            'n_layer': encoder_n_layer,
-            'n_head': encoder_n_head,
-            'n_inner': encoder_n_inner,
-            'dropout': encoder_dropout,
-            'activation_function': encoder_activation_function,
+            'n_layer': final_encoder_n_layer,
+            'n_head': final_encoder_n_head,
+            'n_inner': final_encoder_n_inner,
+            'dropout': final_encoder_dropout,
+            'activation_function': final_encoder_activation_function,
         }
         self._decoder_config_params = {
-            'n_layer': decoder_n_layer,
-            'n_head': decoder_n_head,
-            'n_inner': decoder_n_inner,
-            'dropout': decoder_dropout,
-            'activation_function': decoder_activation_function,
+            'n_layer': final_decoder_n_layer,
+            'n_head': final_decoder_n_head,
+            'n_inner': final_decoder_n_inner,
+            'dropout': final_decoder_dropout,
+            'activation_function': final_decoder_activation_function,
         }
         
         # Initialize gradient checkpointing as disabled by default
         self._gradient_checkpointing_enabled = False
-        
     def gradient_checkpointing_enable(self):
         """Enable gradient checkpointing for memory efficiency."""
         self._gradient_checkpointing_enabled = True
