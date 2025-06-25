@@ -6,10 +6,11 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, random_split
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional, Dict, Any, List
 import os
 import json
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # For 3D plotting
 from tqdm import tqdm
 # import wandb  # Optional: for experiment tracking
 import argparse
@@ -34,7 +35,7 @@ except ImportError:
 # Import the GPT2VQVAE model
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from vqvae_gpt2 import GPT2VQVAE
+from vqvae_gpt2 import GPT2VQVAE, compute_perplexity
 
 class TrainingAbortedException(Exception):
     """
@@ -344,6 +345,21 @@ class GPT2VQVAETrainer:
         
         # Memory monitoring
         self.memory_stats = []
+        
+        # Initialize gradient checkpointing as disabled by default
+        self._gradient_checkpointing_enabled = False
+        
+        # Codebook usage tracking
+        self.codebook_tracking_enabled = self.training_config.get('codebook_tracking_enabled', False)
+        self.codebook_sample_size = self.training_config.get('codebook_sample_size', 100)
+        self.codebook_history = []  # List of count tensors over time
+        self.codebook_perplexities = []  # List of perplexities over time
+        self.codebook_measurement_points = []  # List of measurement point indices
+        
+        if self.codebook_tracking_enabled:
+            print(f"Codebook usage tracking enabled with sample size: {self.codebook_sample_size}")
+        else:
+            print("Codebook usage tracking disabled (set codebook_tracking_enabled=True in config to enable)")
     
     def log_memory_usage(self, stage: str):
         """Log current memory usage using the GPU memory monitor."""
@@ -384,6 +400,80 @@ class GPT2VQVAETrainer:
                 
                 print(f"Memory usage ({stage}): {allocated:.2f}GB allocated, {reserved:.2f}GB reserved, {max_allocated:.2f}GB max")
     
+    def track_codebook_usage(self, dataset: Any, measurement_point: int) -> None:
+        """
+        Track codebook usage by sampling from dataset and computing statistics.
+        
+        Args:
+            dataset: Dataset to sample from
+            measurement_point: Current measurement point index
+        """
+        if not self.codebook_tracking_enabled:
+            return
+        
+        try:
+            # Sample and compute codebook usage
+            counts, perplexity = sample_and_compute_codebook_usage(
+                self.model, 
+                dataset, 
+                self.codebook_sample_size, 
+                self.device
+            )
+            
+            # Store results
+            self.codebook_history.append(counts)
+            self.codebook_perplexities.append(perplexity)
+            self.codebook_measurement_points.append(measurement_point)
+            
+            # Print current statistics
+            unique_codes = (counts > 0).sum().item()
+            total_usage = counts.sum().item()
+            print(f"Codebook tracking (point {measurement_point}): "
+                  f"Unique codes: {unique_codes}/{self.model.vector_quantizer.num_embeddings} "
+                  f"({unique_codes/self.model.vector_quantizer.num_embeddings*100:.1f}%), "
+                  f"Perplexity: {perplexity:.2f}")
+            
+        except Exception as e:
+            print(f"Warning: Failed to track codebook usage: {e}")
+
+    def save_codebook_tracking_plots(self, save_dir: str, epoch: int) -> None:
+        """
+        Save codebook tracking visualizations.
+        
+        Args:
+            save_dir: Directory to save plots
+            epoch: Current epoch number
+        """
+        if not self.codebook_tracking_enabled or not self.codebook_history:
+            return
+        
+        try:
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # Save current heatmap
+            current_counts = self.codebook_history[-1]
+            heatmap_path = os.path.join(save_dir, f"codebook_usage_epoch_{epoch}.png")
+            create_codebook_usage_heatmap(
+                current_counts,
+                num_embeddings=self.model.vector_quantizer.num_embeddings,
+                title=f"Codebook Usage - Epoch {epoch}",
+                save_path=heatmap_path
+            )
+            
+            # Save timeline plot
+            timeline_path = os.path.join(save_dir, f"codebook_usage_timeline_epoch_{epoch}.png")
+            create_codebook_usage_timeline_plot(
+                self.codebook_history,
+                num_embeddings=self.model.vector_quantizer.num_embeddings,
+                measurement_points=self.codebook_measurement_points,
+                title=f"Codebook Usage Over Time - Up to Epoch {epoch}",
+                save_path=timeline_path
+            )
+            
+            print(f"Codebook tracking plots saved to {save_dir}")
+            
+        except Exception as e:
+            print(f"Warning: Failed to save codebook tracking plots: {e}")
     
     def create_data_loader(self, 
                           dataset: torch.utils.data.Dataset,
@@ -520,6 +610,14 @@ class GPT2VQVAETrainer:
                 detailed_vq_losses.append(vq_loss.item())
                 detailed_perplexities.append(perplexity.item())
                 detailed_batch_indices.append(batch_idx)
+                
+                # Track codebook usage at measurement intervals
+                if self.codebook_tracking_enabled:
+                    # Get the dataset from the data loader
+                    dataset: Any = train_loader.dataset
+                    if hasattr(dataset, 'dataset'):  # Handle SubsetRandomSampler case
+                        dataset = dataset.dataset
+                    self.track_codebook_usage(dataset, batch_idx)
             
             # Update progress bar
             acc_step = (accumulation_steps % self.gradient_accumulation_steps) + 1
@@ -889,6 +987,12 @@ class GPT2VQVAETrainer:
                 if (epoch + 1) % self.training_config.get('save_every', 5) == 0:
                     self.save_checkpoint(epoch + 1, val_metrics, False)
                 
+                # Save codebook tracking plots
+                if self.codebook_tracking_enabled:
+                    checkpoint_dir = self.training_config.get('checkpoint_dir', 'checkpoints')
+                    codebook_dir = os.path.join(checkpoint_dir, 'codebook_tracking')
+                    self.save_codebook_tracking_plots(codebook_dir, epoch + 1)
+                
                 # Clear cache after each epoch
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -957,6 +1061,11 @@ class GPT2VQVAETrainer:
             
             self.plot_training_history(history_path)
             self.plot_memory_usage(memory_path)
+            
+            # Save codebook tracking plots for aborted training
+            if self.codebook_tracking_enabled:
+                codebook_dir = os.path.join(checkpoint_dir, 'codebook_tracking')
+                self.save_codebook_tracking_plots(codebook_dir, e.epoch)
             
             # Log final memory usage for aborted training
             self.log_memory_usage("training_aborted_end")
@@ -1840,14 +1949,8 @@ def create_codebook_usage_heatmap(indices: torch.Tensor,
     else:
         indices_flat = indices
     
-    # Count occurrences of each index
-    counts = torch.zeros(num_embeddings, dtype=torch.long)
-    for idx in indices_flat:
-        if 0 <= idx < num_embeddings:
-            counts[idx] += 1
-    
-    # Convert to numpy for plotting
-    counts_np = counts.numpy()
+    # Count occurrences of each index using bincount
+    counts_np = torch.bincount(indices_flat[indices_flat < num_embeddings], minlength=num_embeddings).numpy()
     
     # Create the heatmap
     fig, ax = plt.subplots(figsize=figsize)
@@ -1907,6 +2010,147 @@ def create_codebook_usage_heatmap(indices: torch.Tensor,
     
     # Show the plot
     plt.show()
+
+def create_codebook_usage_timeline_plot(codebook_history: List[torch.Tensor], 
+                                      num_embeddings: int,
+                                      measurement_points: List[int],
+                                      title: str = "Codebook Usage Over Time",
+                                      save_path: Optional[str] = None,
+                                      figsize: Tuple[int, int] = (15, 10)) -> None:
+    """
+    Create a 3D visualization showing codebook usage distribution over time.
+    
+    Args:
+        codebook_history: List of count tensors, one per measurement point
+        num_embeddings: Total number of embeddings in the codebook
+        measurement_points: List of measurement point indices (e.g., batch numbers)
+        title: Title for the plot
+        save_path: Optional path to save the plot
+        figsize: Figure size (width, height)
+    """
+    if not codebook_history:
+        print("Warning: No codebook history to plot")
+        return
+    
+    # Convert to numpy arrays
+    history_np = [counts.numpy() for counts in codebook_history]
+    
+    # Create 3D plot
+    fig = plt.figure(figsize=figsize)
+    ax: Any = fig.add_subplot(111, projection='3d')  # Type annotation for 3D axes
+    
+    # Create meshgrid for 3D surface
+    x = np.arange(num_embeddings)  # Codebook indices
+    y = np.array(measurement_points)  # Time points
+    X, Y = np.meshgrid(x, y)
+    
+    # Create Z matrix (usage counts over time)
+    Z = np.array(history_np)
+    
+    # Create 3D surface plot
+    surf = ax.plot_surface(X, Y, Z, cmap='viridis', alpha=0.8)
+    
+    # Add colorbar
+    fig.colorbar(surf, ax=ax, shrink=0.5, aspect=5)
+    
+    # Set labels and title
+    ax.set_xlabel('Codebook Index')
+    ax.set_ylabel('Measurement Point')
+    ax.set_zlabel('Usage Count')
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    
+    # Add statistics text
+    total_measurements = len(codebook_history)
+    avg_unique_codes = np.mean([(counts > 0).sum() for counts in history_np])
+    stats_text = f'Total measurements: {total_measurements}\nAvg unique codes: {avg_unique_codes:.1f}'
+    ax.text2D(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=10,
+              verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    plt.tight_layout()
+    
+    # Save if path is provided
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Codebook usage timeline plot saved to: {save_path}")
+    
+    plt.show()
+
+def sample_and_compute_codebook_usage(model: GPT2VQVAE,
+                                    dataset: TensorDataset,  # More specific type
+                                    sample_size: int = 10,
+                                    device: str = "cuda") -> Tuple[torch.Tensor, float]:
+    """
+    Randomly sample examples from dataset and compute codebook usage statistics.
+    
+    Args:
+        model: The VQ-VAE model
+        dataset: Dataset to sample from
+        sample_size: Number of examples to sample
+        device: Device to run computation on
+        
+    Returns:
+        Tuple of (indices_tensor, perplexity)
+    """
+    model.eval()
+    
+    # Randomly sample indices
+    total_samples = len(dataset)
+    if sample_size > total_samples:
+        sample_size = total_samples
+        print(f"Warning: Requested sample_size {sample_size} exceeds dataset size {total_samples}")
+    
+    sample_indices = torch.randperm(total_samples)[:sample_size]
+    
+    # Collect all indices from sampled examples
+    all_indices = []
+    
+    with torch.no_grad():
+        for idx in sample_indices:
+            prompts, cots, prompt_masks, cot_masks = dataset[idx]
+            
+            # Move to device
+            prompts = prompts.unsqueeze(0).to(device)  # Add batch dimension
+            cots = cots.unsqueeze(0).to(device)
+            prompt_masks = prompt_masks.unsqueeze(0).to(device) if prompt_masks is not None else None
+            cot_masks = cot_masks.unsqueeze(0).to(device) if cot_masks is not None else None
+            
+            # Forward pass to get indices
+            try:
+                _, _, _, _, indices = model(
+                    prompt=prompts,
+                    cot_sequences=cots,
+                    cot_mask=cot_masks,
+                    prompt_mask=prompt_masks,
+                    inference=False,
+                    quantize_cot_only=True
+                )
+                
+                if indices is not None:
+                    all_indices.append(indices.flatten())
+                    
+            except Exception as e:
+                print(f"Warning: Failed to compute indices for sample {idx}: {e}")
+                continue
+    
+    if not all_indices:
+        print("Warning: No valid indices computed from samples")
+        return torch.zeros(model.vector_quantizer.num_embeddings, dtype=torch.long), 0.0
+    
+    # Combine all indices
+    combined_indices = torch.cat(all_indices, dim=0)
+    
+    # Compute usage counts using numpy's bincount
+    counts = torch.from_numpy(
+        np.bincount(
+            combined_indices.cpu().numpy(),
+            minlength=model.vector_quantizer.num_embeddings
+        )
+    ).long()
+    
+    # Compute perplexity from counts
+    perplexity = compute_perplexity(counts, "counts")
+    
+    return counts, perplexity.item()
 
 def main():
     """
