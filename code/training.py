@@ -2192,6 +2192,8 @@ def main():
                        help='Override VQ loss weight from config')
     parser.add_argument('--minimum-batches-for-checkpoint', type=int, default=None,
                        help='Override minimum batches required to save aborted checkpoint (default: 200)')
+    parser.add_argument('--batch-size', type=int, default=None,
+                       help='Override batch size from config')
     
     args = parser.parse_args()
     
@@ -2254,6 +2256,11 @@ def main():
         if args.minimum_batches_for_checkpoint:
             training_config['minimum_batches_for_checkpoint'] = args.minimum_batches_for_checkpoint
             print(f"Overriding minimum_batches_for_checkpoint from config to: {args.minimum_batches_for_checkpoint}")
+        
+        # Override batch size if specified
+        if args.batch_size:
+            training_config['batch_size'] = args.batch_size
+            print(f"Overriding batch_size from config to: {args.batch_size}")
         
         # Set device
         if args.device:
@@ -2375,6 +2382,16 @@ def main():
                 print(f"Final memory usage: {final_memory['pytorch_allocated_gb']:.2f}GB allocated, {final_memory['pytorch_max_allocated_gb']:.2f}GB max")
             else:
                 print(f"Final memory usage: {final_memory['allocated_gb']:.2f}GB allocated, {final_memory['max_allocated_gb']:.2f}GB max")
+    
+    except torch.OutOfMemoryError as e:
+        # Training failed due to OOM - clear any existing cache
+        print("*"*60)
+        print("Training halted due to OOM error: clearing cache & collecting garbage.")
+        print("*"*60)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+        raise
         
     except FileNotFoundError as e:
         print(f"Error: {e}")
