@@ -47,7 +47,7 @@ def compute_perplexity(encodings: torch.Tensor, input_type: str, eps: float = 1e
         >>> perplexity = compute_perplexity(counts, "counts")
         >>> print(perplexity)  # Perplexity based on count distribution
     """
-    encodings_flat = encodings.flatten()
+    encodings_flat = encodings.flatten().to(torch.int32)
     
     if input_type == "indices":
         if torch.min(encodings_flat) < 0:
@@ -482,7 +482,7 @@ class VectorQuantizer(nn.Module):
         
         quantized = inputs + (quantized - inputs).detach()  # Straight-through estimator
         # Perplexity: diversity of latent code usage, keep it mid (high=uniform, no learning, low=not used fully)
-        perplexity = compute_perplexity(encodings, "counts")
+        perplexity = compute_perplexity(encoding_indices, "indices")
         
         return quantized, loss, perplexity, encoding_indices.view(input_shape[:-1])
 
@@ -780,7 +780,7 @@ class GPT2VQVAE(nn.Module):
                 padded_key = padded_key.reshape([batch_size * M] + list(key_tensor.size())[1:])
                 
                 padded_value = value_tensor.unsqueeze(1).expand(-1, M, -1, -1, -1)
-                padded_value = padded_value.reshape([batch_size * M] + list(key_tensor.size())[1:])
+                padded_value = padded_value.reshape([batch_size * M] + list(value_tensor.size())[1:])
                 
                 # Update the cache with padded tensors
                 padded_cache.update(padded_key, padded_value, layer_idx)
@@ -799,7 +799,7 @@ class GPT2VQVAE(nn.Module):
                 for kv in layer_cache:
                     # Expand from [batch_size, num_heads, K, head_dim] to [batch_size * M, num_heads, K, head_dim]
                     padded_kv = kv.unsqueeze(1).expand(-1, M, -1, -1, -1)
-                    padded_kv = padded_kv.reshape([batch_size * M] + list(key_tensor.size())[1:])
+                    padded_kv = padded_kv.reshape([batch_size * M] + list(kv.size())[1:])
                     padded_layer_cache.append(padded_kv)
                 padded_cache.append(tuple(padded_layer_cache))
             
@@ -811,7 +811,7 @@ class GPT2VQVAE(nn.Module):
     def encode(self, prompt_sequences, cot_sequences, prompt_mask=None, cot_mask=None, 
                aggregate_mode="linear", quantize_cot_only=True):
         """
-        Encodes prompt sequences first with caching, then processes COT sequences with padded prompt activations.
+        Encodes prompt sequences and COT sequences, with or without caching based on gradient checkpointing status.
         
         Args:
             prompt_sequences (torch.Tensor): Prompt sequences [batch_size, K]
@@ -828,69 +828,110 @@ class GPT2VQVAE(nn.Module):
         batch_size, K = prompt_sequences.shape
         _, M, L = cot_sequences.shape
         
-        # Step 1: Encode prompt sequences with caching
+        # Check if gradient checkpointing is enabled to determine caching strategy
+        use_caching = not self.is_gradient_checkpointing_enabled()
         
-        # Get GPT2 encoder outputs for prompt with caching
-        prompt_outputs = self.encoder(
-            input_ids=prompt_sequences,
-            attention_mask=prompt_mask,
-            past_key_values=DynamicCache(),
-            use_cache=True,
-            return_dict=True
-        )
-        
-        # Extract prompt activations and cache
-        prompt_activations = prompt_outputs.last_hidden_state  # [batch_size, K, d_model]
-        prompt_cache = prompt_outputs.past_key_values
-        
-        # Step 2: Process COT sequences with padded prompt cache
-        # Reshape COT sequences to [batch_size * M, L]
-        cot_flat = cot_sequences.view(batch_size * M, L)  # [batch_size * M, L]
-        if cot_mask is not None:
-            cot_mask_flat = cot_mask.view(batch_size * M, L)  # [batch_size * M, L]
-        else:
-            cot_mask_flat = None
-        
-        # Pad prompt cache M times using helper method
-        padded_cache = self._pad_kv_cache(prompt_cache, batch_size, M)
-        
-        # Step 3: Continue encoding with COT sequences using cached prompt activations
-        # Create combined mask using helper method
-        combined_mask = self._create_combined_mask(prompt_mask, cot_mask_flat, batch_size, M, K, L, cot_flat.device)
-        
-        # Continue encoding with cached activations - only pass COT sequences as input_ids
-        cot_outputs = self.encoder(
-            input_ids=cot_flat,  # Only COT sequences, not combined input
-            attention_mask=combined_mask,
-            past_key_values=padded_cache,  # Use padded prompt cache
-            use_cache=False,
-            return_dict=True
-        )
-        
-        # Get COT hidden states (only the newly computed activations)
-        cot_memory = cot_outputs.last_hidden_state  # [batch_size * M, L, d_model]
-        
-        if quantize_cot_only:
-            # Only use COT activations, no need to concatenate with prompt
-            # Reshape to group tokens at same positions across sequences
-            cot_memory = cot_memory.view(batch_size, M, L, -1)
-            memory = cot_memory.transpose(1, 2)  # [batch_size, L, M, d_model]
-        else:
-            # Pad prompt activations M times to match COT batch size
-            # [batch_size, K, d_model] -> [batch_size * M, K, d_model]
-            padded_prompt_activations = prompt_activations.unsqueeze(1).expand(-1, M, -1, -1)
-            padded_prompt_activations = padded_prompt_activations.reshape(batch_size * M, K, -1)
+        if use_caching:
+            # CACHING APPROACH: Encode prompt first, then COT with cached activations
             
-            # Concatenate prompt activations with COT activations to get full sequence
-            # padded_prompt_activations: [batch_size * M, K, d_model]
-            # cot_memory: [batch_size * M, L, d_model]
-            full_memory = torch.cat([padded_prompt_activations, cot_memory], dim=1)  # [batch_size * M, K + L, d_model]
+            # Step 1: Encode prompt sequences with caching
+            prompt_outputs = self.encoder(
+                input_ids=prompt_sequences,
+                attention_mask=prompt_mask,
+                past_key_values=DynamicCache(),
+                use_cache=True,
+                return_dict=True
+            )
             
-            # Reshape to group tokens at same positions across sequences
-            full_memory = full_memory.view(batch_size, M, K + L, -1)
-            memory = full_memory.transpose(1, 2)  # [batch_size, K + L, M, d_model]
+            # Extract prompt activations and cache
+            prompt_activations = prompt_outputs.last_hidden_state  # [batch_size, K, d_model]
+            prompt_cache = prompt_outputs.past_key_values
+            
+            # Step 2: Process COT sequences with padded prompt cache
+            cot_flat = cot_sequences.view(batch_size * M, L)  # [batch_size * M, L]
+            if cot_mask is not None:
+                cot_mask_flat = cot_mask.view(batch_size * M, L)  # [batch_size * M, L]
+            else:
+                cot_mask_flat = None
+            
+            # Pad prompt cache M times using helper method
+            padded_cache = self._pad_kv_cache(prompt_cache, batch_size, M)
+            
+            # Step 3: Continue encoding with COT sequences using cached prompt activations
+            combined_mask = self._create_combined_mask(prompt_mask, cot_mask_flat, batch_size, M, K, L, cot_flat.device)
+            
+            # Continue encoding with cached activations - only pass COT sequences as input_ids
+            cot_outputs = self.encoder(
+                input_ids=cot_flat,  # Only COT sequences, not combined input
+                attention_mask=combined_mask,
+                past_key_values=padded_cache,  # Use padded prompt cache
+                use_cache=False,
+                return_dict=True
+            )
+            
+            # Get COT hidden states (only the newly computed activations)
+            cot_memory = cot_outputs.last_hidden_state  # [batch_size * M, L, d_model]
+            
+            if quantize_cot_only:
+                # Only use COT activations, no need to concatenate with prompt
+                cot_memory = cot_memory.view(batch_size, M, L, -1)
+                memory = cot_memory.transpose(1, 2)  # [batch_size, L, M, d_model]
+            else:
+                # Pad prompt activations M times to match COT batch size
+                padded_prompt_activations = prompt_activations.unsqueeze(1).expand(-1, M, -1, -1)
+                padded_prompt_activations = padded_prompt_activations.reshape(batch_size * M, K, -1)
+                
+                # Concatenate prompt activations with COT activations to get full sequence
+                full_memory = torch.cat([padded_prompt_activations, cot_memory], dim=1)  # [batch_size * M, K + L, d_model]
+                
+                # Reshape to group tokens at same positions across sequences
+                full_memory = full_memory.view(batch_size, M, K + L, -1)
+                memory = full_memory.transpose(1, 2)  # [batch_size, K + L, M, d_model]
+        
+        else:
+            # NON-CACHING APPROACH: Process full sequence in one pass
+            # Reshape COT sequences to [batch_size * M, L]
+            cot_flat = cot_sequences.view(batch_size * M, L)  # [batch_size * M, L]
+            
+            # Pad prompt sequences M times to match COT batch size
+            padded_prompt = prompt_sequences.unsqueeze(1).expand(-1, M, -1)
+            padded_prompt = padded_prompt.reshape(batch_size * M, K)
+            
+            # Concatenate prompt and COT sequences
+            full_sequences = torch.cat([padded_prompt, cot_flat], dim=1)  # [batch_size * M, K + L]
+            
+            # Create combined attention mask using helper method
+            if cot_mask is not None:
+                cot_mask_flat = cot_mask.view(batch_size * M, L)  # [batch_size * M, L]
+            else:
+                cot_mask_flat = None
+            
+            combined_mask = self._create_combined_mask(prompt_mask, cot_mask_flat, batch_size, M, K, L, cot_flat.device)
+            
+            # Encode full sequence in one pass
+            full_outputs = self.encoder(
+                input_ids=full_sequences,
+                attention_mask=combined_mask,
+                use_cache=False,  # No caching when gradient checkpointing is enabled
+                return_dict=True
+            )
+            
+            # Extract hidden states
+            full_memory = full_outputs.last_hidden_state  # [batch_size * M, K + L, d_model]
+            
+            if quantize_cot_only:
+                # Only use COT activations (positions K to K+L-1)
+                cot_memory = full_memory[:, K:, :]  # [batch_size * M, L, d_model]
+                # Reshape to group tokens at same positions across sequences
+                cot_memory = cot_memory.view(batch_size, M, L, -1)
+                memory = cot_memory.transpose(1, 2)  # [batch_size, L, M, d_model]
+            else:
+                # Use all activations
+                # Reshape to group tokens at same positions across sequences
+                full_memory = full_memory.view(batch_size, M, K + L, -1)
+                memory = full_memory.transpose(1, 2)  # [batch_size, K + L, M, d_model]
 
-        # Reshape for aggregation
+        # COMMON PROCESSING: Reshape for aggregation
         memory = memory.reshape(-1, M, memory.size(-1))  # [batch_size*L or batch_size*(K+L), M, d_model]
 
         # Aggregate the memory content per-prompt into single chains 
@@ -900,7 +941,6 @@ class GPT2VQVAE(nn.Module):
         quantized, vq_loss, perplexity, indices = self.vector_quantizer(aggregated) # [batch_size*L or batch_size*(K+L), d_model]
         
         # Tile back to obtain the same shape and amount of info
-        # Expand vs repeat: more memory efficient + no in-place change
         quantized = quantized.unsqueeze(1).expand(-1, M, -1)  # [batch_size*(L or K+L), M, d_model]
         
         # Reshape back using the appropriate length
@@ -908,13 +948,10 @@ class GPT2VQVAE(nn.Module):
         indices = indices.view(batch_size, -1)
         
         return quantized, vq_loss, perplexity, indices
-        
+
     def decode(self, memory, prompt_sequences, cot_sequences, prompt_mask=None, cot_mask=None, pad_token_id=0):
         """
-        Decodes using GPT2 decoder:
-        1. Pre-compute KV cache for prompt tokens except the last one
-        2. Pad the last prompt token M times and concatenate with COT sequences
-        3. Compute all logits in one forward pass
+        Decodes using GPT2 decoder with or without caching based on gradient checkpointing status.
         
         Args:
             memory (torch.Tensor): Encoded memory [batch_size, L, M, d_model]
@@ -939,79 +976,126 @@ class GPT2VQVAE(nn.Module):
         chain_emb = self.chain_embeddings(chain_indices).unsqueeze(1)  # [batch_size*M, 1, d_model]
         memory = memory + chain_emb  # Add to all positions in the sequence
         
-        # Step 1: Pre-compute KV cache for prompt tokens except the last one
-        if K > 1:
-            # Process prompt tokens 0 to K-2 (excluding the last one)
-            prompt_except_last = prompt_sequences[:, :K-1]  # [batch_size, K-1]
-            prompt_mask_except_last = prompt_mask[:, :K-1] if prompt_mask is not None else None # [batch_size, K-1]
+        # Check if gradient checkpointing is enabled to determine caching strategy
+        use_caching = not self.is_gradient_checkpointing_enabled()
+        
+        if use_caching:
+            # CACHING APPROACH: Pre-compute KV cache for prompt tokens except the last one
             
-            # Get GPT2 decoder outputs for prompt except last token with caching
-            prompt_outputs = self.decoder(
-                input_ids=prompt_except_last,
-                attention_mask=prompt_mask_except_last,
-                past_key_values=EncoderDecoderCache(DynamicCache(), DynamicCache()), # for cross-attention
-                use_cache=True,
+            # Step 1: Pre-compute KV cache for prompt tokens except the last one
+            if K > 1:
+                # Process prompt tokens 0 to K-2 (excluding the last one)
+                prompt_except_last = prompt_sequences[:, :K-1]  # [batch_size, K-1]
+                prompt_mask_except_last = prompt_mask[:, :K-1] if prompt_mask is not None else None # [batch_size, K-1]
+                
+                # Get GPT2 decoder outputs for prompt except last token with caching
+                prompt_outputs = self.decoder(
+                    input_ids=prompt_except_last,
+                    attention_mask=prompt_mask_except_last,
+                    past_key_values=EncoderDecoderCache(DynamicCache(), DynamicCache()), # for cross-attention
+                    use_cache=True,
+                    return_dict=True
+                )
+                
+                # Extract prompt cache
+                prompt_cache = prompt_outputs.past_key_values
+            else:
+                # If K=1, start with empty cache
+                prompt_cache = EncoderDecoderCache(DynamicCache(), DynamicCache())
+            
+            # Pad prompt cache M times using helper method
+            padded_cache = self._pad_kv_cache(prompt_cache, batch_size, M)
+            
+            # Step 2: Pad the last prompt token M times and concatenate with COT sequences
+            # Prepare last prompt token (either from prompt or padding)
+            if K > 0:
+                last_prompt_token = prompt_sequences[:, K-1:K].unsqueeze(1).expand(-1, M, -1)  # [batch_size, M, 1]
+            else:
+                last_prompt_token = torch.full((batch_size, M, 1), pad_token_id, 
+                                             dtype=torch.long, device=cot_sequences.device)  # [batch_size, M, 1]
+
+            # Concatenate sequences
+            combined_sequences = torch.cat([last_prompt_token, cot_sequences], dim=2)  # [batch_size, M, L+1]
+            combined_sequences_flat = combined_sequences.view(batch_size * M, L + 1)  # [batch_size * M, L+1]
+            
+            # Step 3: Create combined mask using _create_combined_mask for full extent
+            if cot_mask is not None:
+                cot_mask_flat = cot_mask.view(batch_size * M, L)  # [batch_size * M, L]
+            else:
+                cot_mask_flat = None
+            
+            # Use _create_combined_mask to get the full combined mask (K+L length)
+            full_combined_mask = self._create_combined_mask(prompt_mask, cot_mask_flat, batch_size, M, K, L, cot_sequences.device)
+            
+            # Step 4: Create cross-attention mask for memory attention
+            # For each position i in the combined sequence, can attend to memory tokens 0 to i
+            cross_attention_mask = create_cross_attention_mask(L+1, L, memory.device)
+            
+            # Expand to match batch and sequence dimensions for GPT2 
+            cross_attention_mask = cross_attention_mask.unsqueeze(0).unsqueeze(0).expand(
+                batch_size * M, -1, -1, -1) # [batch_size*M, 1, L+1, L]
+            
+            # Step 5: Compute all logits in one forward pass
+            decoder_outputs = self.decoder(
+                input_ids=combined_sequences_flat,  # [batch_size * M, L+1]
+                attention_mask=full_combined_mask,
+                encoder_hidden_states=memory,  # [batch_size * M, L, d_model]
+                extra_cross_attention_mask=cross_attention_mask,  # [batch_size * M, 1, L+1, L]
+                past_key_values=padded_cache,  # Use padded EncoderDecoderCache
+                use_cache=False,
                 return_dict=True
             )
             
-            # Extract prompt cache
-            prompt_cache = prompt_outputs.past_key_values
+            # Get all logits
+            all_logits = decoder_outputs.logits  # [batch_size * M, L+1, vocab_size]
+            
+            # Extract only the COT logits (discard last position that predicts beyond COT length)
+            cot_logits = all_logits[:, :-1, :]  # [batch_size * M, L, vocab_size]
+            
         else:
-            # If K=1, start with empty cache
-            prompt_cache = EncoderDecoderCache(DynamicCache(), DynamicCache())
-        
-        # Pad prompt cache M times using helper method
-        padded_cache = self._pad_kv_cache(prompt_cache, batch_size, M)
-        
-        # Step 2: Pad the last prompt token M times and concatenate with COT sequences
-        # Prepare last prompt token (either from prompt or padding)
-        if K > 0:
-            last_prompt_token = prompt_sequences[:, K-1:K].unsqueeze(1).expand(-1, M, -1)  # [batch_size, M, 1]
-        else:
-            last_prompt_token = torch.full((batch_size, M, 1), pad_token_id, 
+            # Pad prompt sequences M times to match COT batch size
+            if K > 0:
+                padded_prompt = prompt_sequences.unsqueeze(1).expand(-1, M, -1)  # [batch_size, M, K]
+            else:
+                padded_prompt = torch.full((batch_size, M, 1), pad_token_id, 
                                          dtype=torch.long, device=cot_sequences.device)  # [batch_size, M, 1]
 
-        # Concatenate sequences
-        combined_sequences = torch.cat([last_prompt_token, cot_sequences], dim=2)  # [batch_size, M, L+1]
-        combined_sequences_flat = combined_sequences.view(batch_size * M, L + 1)  # [batch_size * M, L+1]
+            # Concatenate prompt and COT sequences
+            combined_sequences = torch.cat([padded_prompt, cot_sequences], dim=2)  # [batch_size, M, K + L]
+            combined_sequences_flat = combined_sequences.view(batch_size * M, K + L)  # [batch_size * M, K + L]
+            
+            # Create combined attention mask using helper method
+            if cot_mask is not None:
+                cot_mask_flat = cot_mask.view(batch_size * M, L)  # [batch_size * M, L]
+            else:
+                cot_mask_flat = None
+            
+            combined_mask = self._create_combined_mask(prompt_mask, cot_mask_flat, batch_size, M, K, L, cot_sequences.device)
+            
+            # Create cross-attention mask for memory attention
+            cross_attention_mask = create_cross_attention_mask(K + L, L, memory.device)
+            cross_attention_mask = cross_attention_mask.unsqueeze(0).unsqueeze(0).expand(
+                batch_size * M, -1, -1, -1) # [batch_size*M, 1, K+L, L]
+            
+            # Decode full sequence in one pass
+            decoder_outputs = self.decoder(
+                input_ids=combined_sequences_flat,  # [batch_size * M, K + L]
+                attention_mask=combined_mask,
+                encoder_hidden_states=memory,  # [batch_size * M, L, d_model]
+                extra_cross_attention_mask=cross_attention_mask,  # [batch_size * M, 1, K+L, L]
+                use_cache=False,  # No caching when gradient checkpointing is enabled
+                return_dict=True
+            )
+            
+            # Get all logits
+            all_logits = decoder_outputs.logits  # [batch_size * M, K + L, vocab_size]
+            
+            # Extract only the COT logits (positions K-1 to K+L-2)
+            cot_logits = all_logits[:, K-1:-1, :]  # [batch_size * M, L, vocab_size]
         
-        # Step 3: Create combined mask using _create_combined_mask for full extent
-        if cot_mask is not None:
-            cot_mask_flat = cot_mask.view(batch_size * M, L)  # [batch_size * M, L]
-        else:
-            cot_mask_flat = None
-        
-        # Use _create_combined_mask to get the full combined mask (K+L length)
-        full_combined_mask = self._create_combined_mask(prompt_mask, cot_mask_flat, batch_size, M, K, L, cot_sequences.device)
-        
-        # Step 4: Create cross-attention mask for memory attention
-        # For each position i in the combined sequence, can attend to memory tokens 0 to i
-        cross_attention_mask = create_cross_attention_mask(L+1, L, memory.device)
-        
-        # Expand to match batch and sequence dimensions for GPT2 
-        cross_attention_mask = cross_attention_mask.unsqueeze(0).unsqueeze(0).expand(
-            batch_size * M, -1, -1, -1) # [batch_size*M, 1, L+1, L]
-        
-        # Step 5: Compute all logits in one forward pass
-        decoder_outputs = self.decoder(
-            input_ids=combined_sequences_flat,  # [batch_size * M, L+1]
-            attention_mask=full_combined_mask,
-            encoder_hidden_states=memory,  # [batch_size * M, L, d_model]
-            extra_cross_attention_mask=cross_attention_mask,  # [batch_size * M, 1, L+1, L]
-            past_key_values=padded_cache,  # Use padded EncoderDecoderCache
-            use_cache=False,
-            return_dict=True
-        )
-        
-        # Get all logits
-        all_logits = decoder_outputs.logits  # [batch_size * M, L+1, vocab_size]
-        
-        # Extract only the COT logits (discard last position that predicts beyond COT length)
-        cot_logits = all_logits[:, :-1, :]  # [batch_size * M, L, vocab_size]
-        
-        # Reshape back to [batch_size, M, L, vocab_size]
+        # COMMON PROCESSING: Reshape back to [batch_size, M, L, vocab_size]
         return cot_logits.view(batch_size, M, L, -1)
-        
+
     def forward(self, prompt, cot_sequences, cot_mask=None, prompt_mask=None, inference=False, quantize_cot_only=True, pad_token_id=50256):
         """
         Forward pass through the model.
