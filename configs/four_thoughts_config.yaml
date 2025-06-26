@@ -4,7 +4,7 @@ model_config:
   num_embeddings: 512  # VQ codebook size
   commitment_cost: 0.25  # VQ commitment cost
   aggregation_hidden_dim: 1024  # Aggregation MLP hidden dim
-  num_thoughts: 2   # Number of parallel sequences
+  num_thoughts: 4   # Number of parallel sequences
   n_positions: 1024   # Maximum sequence length
   use_pretrained_encoder: true  # Load pretrained weights for encoder
   use_pretrained_decoder: true  # and decoder
@@ -30,12 +30,12 @@ training_config:
   use_lr_scheduler: true
   min_lr: 1e-6
   num_epochs: 5
-  batch_size: 64
+  batch_size: 32
   gradient_clip: 1.0
   vq_loss_weight: 0.5
   quantize_cot_only: true
   save_every: 1
-  checkpoint_dir: checkpoints/two_thoughts
+  checkpoint_dir: checkpoints/four_thoughts
   pad_token_id: 50256
   val_split: 0.1
 
@@ -58,4 +58,4 @@ training_config:
   max_samples: null  # Set to a number (e.g., 1000) for debugging
   
   # Data config
-  data_dir: data/GSM8K/128_128/batch_2
+  data_dir: data/GSM8K/128_128/batch_4

@@ -1,0 +1,63 @@
+# Example configuration with separate encoder and decoder architectures
+# This allows different model sizes and configurations for each component
+
+model_config:
+  # Shared parameters (must be the same for both encoder and decoder)
+  vocab_size: 50257
+  d_model: 768
+  n_positions: 1024
+  
+  # VQ-VAE specific parameters
+  num_embeddings: 512
+  commitment_cost: 0.25
+  aggregation_hidden_dim: 1024
+  num_thoughts: 32
+  
+  # Pretrained model settings
+  use_pretrained_encoder: false
+  use_pretrained_decoder: true
+  pretrained_model_name: "gpt2"
+  
+  # Encoder-specific configuration (smaller, more efficient)
+  encoder_n_layer: 6        # Smaller encoder
+  encoder_n_head: 12
+  encoder_n_inner: null     # Will be set to 4*d_model
+  encoder_dropout: 0.1
+  encoder_activation_function: "gelu"
+  
+  # Decoder-specific configuration (larger, more powerful)
+  decoder_n_layer: 12       # Larger decoder
+  decoder_n_head: 12
+  decoder_n_inner: null     # Will be set to 4*d_model
+  decoder_dropout: 0.1
+  decoder_activation_function: "gelu"
+
+training_config:
+  # General training settings
+  learning_rate: 1e-4
+  weight_decay: 0.01
+  beta1: 0.9
+  beta2: 0.999
+  use_lr_scheduler: true
+  min_lr: 1e-6
+  num_epochs: 5
+  batch_size: 32
+  gradient_clip: 1.0
+  vq_loss_weight: 1.0
+  quantize_cot_only: true
+  save_every: 2
+  checkpoint_dir: checkpoints/separate_encoder_decoder
+  pad_token_id: 50256
+  val_split: 0.1
+  num_measurements_per_epoch: 15  # Number of detailed metrics per epoch
+  
+  # Memory optimizations
+  use_mixed_precision: true
+  gradient_accumulation_steps: 4
+  use_gradient_checkpointing: true
+  use_dynamic_batching: false  # Enable for variable sequence lengths
+  max_tokens_per_batch: 8192  # For dynamic batching
+  max_samples: null  # Limit samples for debugging (set to number for testing)
+  
+  # Data config
+  data_dir: data/GSM8K

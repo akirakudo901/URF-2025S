@@ -1,0 +1,67 @@
+# Uses a small encoder and the GPT2 decoder, training the former from scratch to ensure diversity in code
+
+model_config:
+  vocab_size: 50257  # GPT2 vocabulary size
+  d_model: 768       # GPT2 model dimension
+  num_embeddings: 128  # VQ codebook size
+  commitment_cost: 0.25  # VQ commitment cost
+  aggregation_hidden_dim: 768  # Aggregation MLP hidden dim
+  num_thoughts: 1   # Number of parallel sequences
+  n_positions: 1024   # Maximum sequence length
+  use_pretrained_encoder: false  # Load pretrained weights for encoder
+  use_pretrained_decoder: true  # and decoder
+  pretrained_model_name: gpt2  # Use GPT2-Small (124M parameters)
+  # Encoder-specific configuration (smaller, more efficient)
+  encoder_n_layer: 4        # Smaller encoder
+  encoder_n_head: 2
+  encoder_n_inner: null     # Will be set to 4*d_model
+  encoder_dropout: 0.1
+  encoder_activation_function: "gelu"
+  # Decoder-specific configuration (larger, more powerful)
+  decoder_n_layer: 12
+  decoder_n_head: 12
+  decoder_n_inner: null     # Will be set to 4*d_model
+  decoder_dropout: 0.1
+  decoder_activation_function: "gelu"
+  # Can also specify at once if needed like below
+  # n_layer: 4
+  # n_head: 2
+  # n_inner: None
+
+training_config:
+  learning_rate: 1e-5
+  weight_decay: 0.01
+  beta1: 0.9
+  beta2: 0.999
+  use_lr_scheduler: true
+  min_lr: 1e-7
+  num_epochs: 5
+  batch_size: 160
+  gradient_clip: 1.0
+  vq_loss_weight: 1.0
+  quantize_cot_only: true
+  save_every: 1
+  checkpoint_dir: checkpoints/small_enc_GPT2_dec_one_thought
+  pad_token_id: 50256
+  val_split: 0.1
+
+  # Training abort settings
+  num_measurements_per_epoch: 40  # Number of detailed metrics per epoch
+  perplexity_threshold: 5
+  minimum_batches_for_checkpoint: 200
+  perplexity-window-size: 20
+
+  # Codebook tracking settings
+  codebook_sample_size: 100
+  codebook_tracking_enabled: true
+  
+  # Memory optimization settings
+  use_mixed_precision: true
+  gradient_accumulation_steps: 8  # Effective batch size = batch_size * gradient_accumulation_steps
+  use_gradient_checkpointing: true  # Enable gradient checkpointing for memory efficiency
+  use_dynamic_batching: false  # Enable for variable sequence lengths
+  max_tokens_per_batch: 4096  # Reduced for memory efficiency
+  max_samples: null  # Set to a number (e.g., 1000) for debugging
+  
+  # Data config
+  data_dir: data/GSM8K/128_128/batch_1

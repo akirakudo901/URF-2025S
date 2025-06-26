@@ -61,5 +61,9 @@ training_config:
   max_tokens_per_batch: 8192  # For dynamic batching
   max_samples: null  # Limit samples for debugging (set to number for testing)
   
+  # Perplexity threshold settings
+  perplexity_threshold: 1.5  # Training aborts when 20-step average perplexity goes below this value
+  perplexity_window_size: 20  # Number of steps to average for perplexity threshold check
+  
   # Data config
   data_dir: data/GSM8K
