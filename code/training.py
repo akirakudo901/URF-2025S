@@ -350,7 +350,7 @@ class GPT2VQVAETrainer:
         self._gradient_checkpointing_enabled = False
         
         # Codebook usage tracking
-        self.codebook_tracking_enabled = self.training_config.get('codebook_tracking_enabled', False)
+        self.codebook_tracking_enabled = self.training_config.get('codebook_tracking_enabled', True)
         self.codebook_sample_size = self.training_config.get('codebook_sample_size', 100)
         self.codebook_history = []  # List of count tensors over time
         self.codebook_perplexities = []  # List of perplexities over time
@@ -428,7 +428,7 @@ class GPT2VQVAETrainer:
             # Print current statistics
             unique_codes = (counts > 0).sum().item()
             total_usage = counts.sum().item()
-            print(f"Codebook tracking (point {measurement_point}): "
+            print(f"\nCodebook tracking (point {measurement_point}): "
                   f"Unique codes: {unique_codes}/{self.model.vector_quantizer.num_embeddings} "
                   f"({unique_codes/self.model.vector_quantizer.num_embeddings*100:.1f}%), "
                   f"Perplexity: {perplexity:.2f}")
@@ -1950,7 +1950,8 @@ def create_codebook_usage_heatmap(indices: torch.Tensor,
         indices_flat = indices
     
     # Count occurrences of each index using bincount
-    counts_np = torch.bincount(indices_flat[indices_flat < num_embeddings], minlength=num_embeddings).numpy()
+    counts_np = torch.bincount(indices_flat[indices_flat < num_embeddings], 
+                               minlength=num_embeddings).cpu().numpy()
     
     # Create the heatmap
     fig, ax = plt.subplots(figsize=figsize)
@@ -2177,9 +2178,9 @@ def main():
                        help='Demonstrate model generation from checkpoint (provide checkpoint path)')
     parser.add_argument('--num-examples', type=int, default=3,
                        help='Number of examples to generate in demonstration mode')
-    parser.add_argument('--perplexity-threshold', type=float, default=1.5,
+    parser.add_argument('--perplexity-threshold', type=float, default=None,
                        help='Training will abort when 20-step average perplexity goes below this value (default: 1.5)')
-    parser.add_argument('--perplexity-window-size', type=int, default=20,
+    parser.add_argument('--perplexity-window-size', type=int, default=None,
                        help='Number of steps to average for perplexity threshold check (default: 20)')
     parser.add_argument('--checkpoint-dir', type=str, default=None,
                        help='Override checkpoint directory from config')
@@ -2221,8 +2222,13 @@ def main():
             print(f"Overriding max_samples from config to: {args.max_samples}")
         
         # Override perplexity threshold if specified
-        training_config['perplexity_threshold'] = args.perplexity_threshold
-        training_config['perplexity_window_size'] = args.perplexity_window_size
+        if args.perplexity_threshold:
+            training_config['perplexity_threshold'] = args.perplexity_threshold
+            print(f"Overriding perplexity_threshold from config to: {args.perplexity_threshold}")
+        
+        if args.perplexity_window_size:
+            training_config['perplexity_window_size'] = args.perplexity_window_size
+            print(f"Overriding perplexity_window_size from config to: {args.perplexity_window_size}")
         
         # Override checkpoint directory if specified
         if args.checkpoint_dir:
