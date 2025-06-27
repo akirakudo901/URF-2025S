@@ -36,6 +36,7 @@ except ImportError:
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from vqvae_gpt2 import GPT2VQVAE, compute_perplexity
+from vqvae_gpt2_simple import SimpleGPT2VQVAE
 
 class TrainingAbortedException(Exception):
     """
@@ -417,7 +418,8 @@ class GPT2VQVAETrainer:
                 self.model, 
                 dataset, 
                 self.codebook_sample_size, 
-                self.device
+                self.device,
+                use_vq=self.training_config.get('use_vq', True)
             )
             
             # Store results
@@ -1652,7 +1654,8 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
                                     model_config: Dict[str, Any],
                                     data_dir: str,
                                     num_examples: int = 3,
-                                    device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+                                    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+                                    use_vq: bool = True):
     """
     Demonstrate GPT2VQVAE model generation capabilities from a checkpoint.
     
@@ -1662,6 +1665,7 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
         data_dir: Directory containing training data
         num_examples: Number of examples to generate
         device: Device to run the model on
+        use_vq: Whether to use vector quantization (for SimpleGPT2VQVAE)
     """
     print(f"Loading model from checkpoint: {checkpoint_path}")
     
@@ -1750,14 +1754,27 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
             
             # Generate with teacher forcing (inference=False)
             try:
-                _, output_logits_tf, vq_loss_tf, perplexity_tf, indices_tf = model(
-                    prompt=prompt,
-                    cot_sequences=cot_gt,
-                    cot_mask=cot_mask_ex,
-                    prompt_mask=prompt_mask_ex,
-                    inference=False,  # Teacher forcing
-                    quantize_cot_only=True
-                )
+                # Check if model is SimpleGPT2VQVAE and pass use_vq parameter
+                if model.__class__.__name__ == 'SimpleGPT2VQVAE':
+                    _, output_logits_tf, vq_loss_tf, perplexity_tf, indices_tf = model(
+                        prompt=prompt,
+                        cot_sequences=cot_gt,
+                        cot_mask=cot_mask_ex,
+                        prompt_mask=prompt_mask_ex,
+                        inference=False,  # Teacher forcing
+                        quantize_cot_only=True,
+                        use_vq=use_vq
+                    )
+                else:
+                    # Fallback for other model types (GPT2VQVAE, etc.)
+                    _, output_logits_tf, vq_loss_tf, perplexity_tf, indices_tf = model(
+                        prompt=prompt,
+                        cot_sequences=cot_gt,
+                        cot_mask=cot_mask_ex,
+                        prompt_mask=prompt_mask_ex,
+                        inference=False,  # Teacher forcing
+                        quantize_cot_only=True
+                    )
                 
                 # Get predicted tokens from logits
                 predicted_tokens_tf = torch.argmax(output_logits_tf, dim=-1)  # [B, M, L]
@@ -1775,14 +1792,27 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
             
             # Generate auto-regressively (inference=True)
             try:
-                output_sequences_ar, output_logits_ar, vq_loss_ar, perplexity_ar, indices_ar = model(
-                    prompt=prompt,
-                    cot_sequences=cot_gt,
-                    cot_mask=cot_mask_ex,
-                    prompt_mask=prompt_mask_ex,
-                    inference=True,  # Auto-regressive
-                    quantize_cot_only=True
-                )
+                # Check if model is SimpleGPT2VQVAE and pass use_vq parameter
+                if model.__class__.__name__ == 'SimpleGPT2VQVAE':
+                    output_sequences_ar, output_logits_ar, vq_loss_ar, perplexity_ar, indices_ar = model(
+                        prompt=prompt,
+                        cot_sequences=cot_gt,
+                        cot_mask=cot_mask_ex,
+                        prompt_mask=prompt_mask_ex,
+                        inference=True,  # Auto-regressive
+                        quantize_cot_only=True,
+                        use_vq=use_vq
+                    )
+                else:
+                    # Fallback for other model types (GPT2VQVAE, etc.)
+                    output_sequences_ar, output_logits_ar, vq_loss_ar, perplexity_ar, indices_ar = model(
+                        prompt=prompt,
+                        cot_sequences=cot_gt,
+                        cot_mask=cot_mask_ex,
+                        prompt_mask=prompt_mask_ex,
+                        inference=True,  # Auto-regressive
+                        quantize_cot_only=True
+                    )
                 
                 # Accumulate indices for auto-regressive
                 if indices_ar is not None:
@@ -2079,7 +2109,8 @@ def create_codebook_usage_timeline_plot(codebook_history: List[torch.Tensor],
 def sample_and_compute_codebook_usage(model: GPT2VQVAE,
                                     dataset: TensorDataset,  # More specific type
                                     sample_size: int = 10,
-                                    device: str = "cuda") -> Tuple[torch.Tensor, float]:
+                                    device: str = "cuda",
+                                    use_vq: bool = True) -> Tuple[torch.Tensor, float]:
     """
     Randomly sample examples from dataset and compute codebook usage statistics.
     
@@ -2088,6 +2119,7 @@ def sample_and_compute_codebook_usage(model: GPT2VQVAE,
         dataset: Dataset to sample from
         sample_size: Number of examples to sample
         device: Device to run computation on
+        use_vq: Whether to use vector quantization (for SimpleGPT2VQVAE)
         
     Returns:
         Tuple of (indices_tensor, perplexity)
@@ -2117,14 +2149,27 @@ def sample_and_compute_codebook_usage(model: GPT2VQVAE,
             
             # Forward pass to get indices
             try:
-                _, _, _, _, indices = model(
-                    prompt=prompts,
-                    cot_sequences=cots,
-                    cot_mask=cot_masks,
-                    prompt_mask=prompt_masks,
-                    inference=False,
-                    quantize_cot_only=True
-                )
+                # Check if model is SimpleGPT2VQVAE and pass use_vq parameter
+                if model.__class__.__name__ == 'SimpleGPT2VQVAE':
+                    _, _, _, _, indices = model(
+                        prompt=prompts,
+                        cot_sequences=cots,
+                        cot_mask=cot_masks,
+                        prompt_mask=prompt_masks,
+                        inference=False,
+                        quantize_cot_only=True,
+                        use_vq=use_vq
+                    )
+                else:
+                    # Fallback for other model types (GPT2VQVAE, etc.)
+                    _, _, _, _, indices = model(
+                        prompt=prompts,
+                        cot_sequences=cots,
+                        cot_mask=cot_masks,
+                        prompt_mask=prompt_masks,
+                        inference=False,
+                        quantize_cot_only=True
+                    )
                 
                 if indices is not None:
                     all_indices.append(indices.flatten())
@@ -2194,6 +2239,12 @@ def main():
                        help='Override minimum batches required to save aborted checkpoint (default: 200)')
     parser.add_argument('--batch-size', type=int, default=None,
                        help='Override batch size from config')
+    parser.add_argument('--simple', action='store_true', default=False,
+                       help='Use SimpleGPT2VQVAETrainer and SimpleGPT2VQVAE model (default: False)')
+    parser.add_argument('--use-vq', action='store_true', default=None,
+                       help='Enable vector quantization (default: True for SimpleGPT2VQVAE, True for GPT2VQVAE)')
+    parser.add_argument('--no-vq', action='store_true', default=False,
+                       help='Disable vector quantization (passes encoder outputs directly to decoder)')
     
     args = parser.parse_args()
     
@@ -2262,6 +2313,18 @@ def main():
             training_config['batch_size'] = args.batch_size
             print(f"Overriding batch_size from config to: {args.batch_size}")
         
+        # Handle use_vq argument
+        if args.no_vq:
+            training_config['use_vq'] = False
+            print("Disabling vector quantization (--no-vq flag)")
+        elif args.use_vq is not None:
+            training_config['use_vq'] = args.use_vq
+            print(f"Setting use_vq to: {args.use_vq}")
+        else:
+            # Default behavior: use_vq=True for both models
+            training_config['use_vq'] = True
+            print("Using default use_vq=True")
+        
         # Set device
         if args.device:
             device = args.device
@@ -2293,7 +2356,8 @@ def main():
                 model_config=model_config,
                 data_dir=data_dir,
                 num_examples=args.num_examples,
-                device=device
+                device=device,
+                use_vq=training_config.get('use_vq', True)
             )
             return  # Exit after demonstration
         
@@ -2316,16 +2380,17 @@ def main():
         if args.resume_from:
             model_config['use_pretrained_encoder'] = False
             model_config['use_pretrained_decoder'] = False
-            
-            trainer = GPT2VQVAETrainer(model_config, training_config, device=device)
-            
-            # Resume from checkpoint if specified
+            if args.simple:
+                trainer = SimpleGPT2VQVAETrainer(model_config, training_config, device=device)
+            else:
+                trainer = GPT2VQVAETrainer(model_config, training_config, device=device)
             print(f"Resuming from checkpoint: {args.resume_from}")
             trainer.load_checkpoint(args.resume_from)
-            
-        # Otherwise do as config specifies
         else:
-            trainer = GPT2VQVAETrainer(model_config, training_config, device=device)
+            if args.simple:
+                trainer = SimpleGPT2VQVAETrainer(model_config, training_config, device=device)
+            else:
+                trainer = GPT2VQVAETrainer(model_config, training_config, device=device)
 
         # Load data using memory-efficient method with num_thoughts truncation
         prompt_sequences, cot_sequences, prompt_mask, cot_mask = trainer.load_training_data(
@@ -2400,6 +2465,81 @@ def main():
         print(f"Training error: {e}")
         import traceback
         traceback.print_exc()
+
+class SimpleGPT2VQVAETrainer(GPT2VQVAETrainer):
+    """
+    Trainer for SimpleGPT2VQVAE, inherits from GPT2VQVAETrainer but uses SimpleGPT2VQVAE as the model.
+    """
+    def __init__(self, model_config: Dict[str, Any], training_config: Dict[str, Any], device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+        super().__init__(model_config, training_config, device)
+        # Replace the model with SimpleGPT2VQVAE
+        self.model = SimpleGPT2VQVAE(**model_config).to(device)
+        # Re-initialize optimizer and scheduler for the new model
+        self.optimizer = optim.AdamW(
+            self.model.parameters(),
+            lr=training_config['learning_rate'],
+            weight_decay=training_config.get('weight_decay', 0.01),
+            betas=(training_config.get('beta1', 0.9), training_config.get('beta2', 0.999))
+        )
+        if training_config.get('use_lr_scheduler', True):
+            self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer,
+                T_max=training_config['num_epochs'],
+                eta_min=training_config.get('min_lr', 1e-6)
+            )
+        else:
+            self.scheduler = None
+        if self.use_gradient_checkpointing:
+            self.model.gradient_checkpointing_enable()
+            print("Gradient checkpointing enabled for SimpleGPT2VQVAE")
+        print("SimpleGPT2VQVAE trainer initialized successfully.")
+    
+    def _forward_pass(self, prompts, cots, prompt_masks, cot_masks):
+        """Helper function for forward pass and loss calculation with use_vq parameter"""
+        # remove cot's & mask's second dimension if it's there
+        if cots.ndim == 3:
+            cots = torch.squeeze(cots, 1)
+            cot_masks = torch.squeeze(cot_masks, 1)
+
+        def _compute_loss(output_logits, cots, cot_masks, vq_loss):
+            logits_flat = output_logits.reshape(-1, output_logits.size(-1))
+            targets_flat = cots.view(-1)
+            mask_flat = cot_masks.view(-1).bool()
+            
+            recon_loss = torch.tensor(0.0, device=self.device)
+            if mask_flat.sum() > 0:
+                recon_loss = self.criterion(logits_flat[mask_flat], targets_flat[mask_flat])
+            
+            return recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
+        
+        # Get use_vq from training config
+        use_vq = self.training_config.get('use_vq', True)
+        
+        if self.use_mixed_precision:
+            with autocast('cuda'):
+                _, output_logits, vq_loss, perplexity, indices = self.model(
+                    prompt=prompts,
+                    cot_sequences=cots,
+                    cot_mask=cot_masks,
+                    prompt_mask=prompt_masks,
+                    inference=False,
+                    quantize_cot_only=self.training_config.get('quantize_cot_only', True),
+                    use_vq=use_vq
+                )
+                total_loss_batch = _compute_loss(output_logits, cots, cot_masks, vq_loss)
+        else:
+            _, output_logits, vq_loss, perplexity, indices = self.model(
+                prompt=prompts,
+                cot_sequences=cots,
+                cot_mask=cot_masks,
+                prompt_mask=prompt_masks,
+                inference=False,
+                quantize_cot_only=self.training_config.get('quantize_cot_only', True),
+                use_vq=use_vq
+            )
+            total_loss_batch = _compute_loss(output_logits, cots, cot_masks, vq_loss)
+            
+        return total_loss_batch, vq_loss, perplexity, indices
 
 if __name__ == "__main__":
     # Run main function for command-line training
