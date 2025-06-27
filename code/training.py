@@ -693,17 +693,6 @@ class GPT2VQVAETrainer:
     
     def _forward_pass(self, prompts, cots, prompt_masks, cot_masks):
         """Helper function for forward pass and loss calculation"""
-        def _compute_loss(output_logits, cots, cot_masks, vq_loss):
-            logits_flat = output_logits.reshape(-1, output_logits.size(-1))
-            targets_flat = cots.view(-1)
-            mask_flat = cot_masks.view(-1).bool()
-            
-            recon_loss = torch.tensor(0.0, device=self.device)
-            if mask_flat.sum() > 0:
-                recon_loss = self.criterion(logits_flat[mask_flat], targets_flat[mask_flat])
-            
-            return recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
-        
         if self.use_mixed_precision:
             with autocast('cuda'):
                 _, output_logits, vq_loss, perplexity, indices = self.model(
@@ -714,7 +703,8 @@ class GPT2VQVAETrainer:
                     inference=False,
                     quantize_cot_only=self.training_config.get('quantize_cot_only', True)
                 )
-                total_loss_batch = _compute_loss(output_logits, cots, cot_masks, vq_loss)
+                recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
+                total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
         else:
             _, output_logits, vq_loss, perplexity, indices = self.model(
                 prompt=prompts,
@@ -724,7 +714,8 @@ class GPT2VQVAETrainer:
                 inference=False,
                 quantize_cot_only=self.training_config.get('quantize_cot_only', True)
             )
-            total_loss_batch = _compute_loss(output_logits, cots, cot_masks, vq_loss)
+            recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
+            total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
             
         return total_loss_batch, vq_loss, perplexity, indices
     
@@ -1650,6 +1641,37 @@ def create_default_config(output_path: str):
     print("  - Decoder: GPT2-Small pretrained weights (use_pretrained_decoder: True)")
     print("You can modify this file and use it for training.")
 
+def compute_reconstruction_loss(output_logits: torch.Tensor, 
+                              target_sequences: torch.Tensor, 
+                              target_mask: torch.Tensor,
+                              pad_token_id: int = 50256) -> torch.Tensor:
+    """
+    Compute reconstruction loss between predicted logits and target sequences.
+    
+    Args:
+        output_logits: Predicted logits [batch_size, M, L, vocab_size]
+        target_sequences: Target sequences [batch_size, M, L]
+        target_mask: Target mask [batch_size, M, L]
+        pad_token_id: Token ID for padding (to ignore in loss computation)
+        
+    Returns:
+        torch.Tensor: Reconstruction loss only
+    """
+    # Flatten all dimensions except vocab_size
+    logits_flat = output_logits.reshape(-1, output_logits.size(-1))
+    targets_flat = target_sequences.view(-1)
+    mask_flat = target_mask.view(-1).bool()
+    
+    # Create loss function
+    criterion = nn.CrossEntropyLoss(ignore_index=pad_token_id)
+    
+    # Compute reconstruction loss
+    recon_loss = torch.tensor(0.0, device=output_logits.device)
+    if mask_flat.sum() > 0:
+        recon_loss = criterion(logits_flat[mask_flat], targets_flat[mask_flat])
+    
+    return recon_loss
+
 def demonstrate_model_from_checkpoint(checkpoint_path: str, 
                                     model_config: Dict[str, Any],
                                     data_dir: str,
@@ -1754,27 +1776,22 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
             
             # Generate with teacher forcing (inference=False)
             try:
-                # Check if model is SimpleGPT2VQVAE and pass use_vq parameter
+                # Prepare base model inputs
+                model_inputs = {
+                    'prompt': prompt,
+                    'cot_sequences': cot_gt, 
+                    'cot_mask': cot_mask_ex,
+                    'prompt_mask': prompt_mask_ex,
+                    'inference': False,  # Teacher forcing
+                    'quantize_cot_only': True
+                }
+
+                # Add use_vq parameter for SimpleGPT2VQVAE
                 if model.__class__.__name__ == 'SimpleGPT2VQVAE':
-                    _, output_logits_tf, vq_loss_tf, perplexity_tf, indices_tf = model(
-                        prompt=prompt,
-                        cot_sequences=cot_gt,
-                        cot_mask=cot_mask_ex,
-                        prompt_mask=prompt_mask_ex,
-                        inference=False,  # Teacher forcing
-                        quantize_cot_only=True,
-                        use_vq=use_vq
-                    )
-                else:
-                    # Fallback for other model types (GPT2VQVAE, etc.)
-                    _, output_logits_tf, vq_loss_tf, perplexity_tf, indices_tf = model(
-                        prompt=prompt,
-                        cot_sequences=cot_gt,
-                        cot_mask=cot_mask_ex,
-                        prompt_mask=prompt_mask_ex,
-                        inference=False,  # Teacher forcing
-                        quantize_cot_only=True
-                    )
+                    model_inputs['use_vq'] = use_vq
+
+                # Run model with prepared inputs
+                _, output_logits_tf, vq_loss_tf, perplexity_tf, indices_tf = model(**model_inputs)
                 
                 # Get predicted tokens from logits
                 predicted_tokens_tf = torch.argmax(output_logits_tf, dim=-1)  # [B, M, L]
@@ -1792,27 +1809,22 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
             
             # Generate auto-regressively (inference=True)
             try:
-                # Check if model is SimpleGPT2VQVAE and pass use_vq parameter
+                # Prepare model inputs
+                model_inputs = {
+                    'prompt': prompt,
+                    'cot_sequences': cot_gt,
+                    'cot_mask': cot_mask_ex,
+                    'prompt_mask': prompt_mask_ex,
+                    'inference': True,  # Auto-regressive
+                    'quantize_cot_only': True
+                }
+                
+                # Add use_vq parameter for SimpleGPT2VQVAE
                 if model.__class__.__name__ == 'SimpleGPT2VQVAE':
-                    output_sequences_ar, output_logits_ar, vq_loss_ar, perplexity_ar, indices_ar = model(
-                        prompt=prompt,
-                        cot_sequences=cot_gt,
-                        cot_mask=cot_mask_ex,
-                        prompt_mask=prompt_mask_ex,
-                        inference=True,  # Auto-regressive
-                        quantize_cot_only=True,
-                        use_vq=use_vq
-                    )
-                else:
-                    # Fallback for other model types (GPT2VQVAE, etc.)
-                    output_sequences_ar, output_logits_ar, vq_loss_ar, perplexity_ar, indices_ar = model(
-                        prompt=prompt,
-                        cot_sequences=cot_gt,
-                        cot_mask=cot_mask_ex,
-                        prompt_mask=prompt_mask_ex,
-                        inference=True,  # Auto-regressive
-                        quantize_cot_only=True
-                    )
+                    model_inputs['use_vq'] = use_vq
+                    
+                # Run model with prepared inputs
+                output_sequences_ar, output_logits_ar, vq_loss_ar, perplexity_ar, indices_ar = model(**model_inputs)
                 
                 # Accumulate indices for auto-regressive
                 if indices_ar is not None:
@@ -1836,12 +1848,23 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
                 if indices_tf is not None:
                     unique_indices = torch.unique(indices_tf).numel()
                     print(f"  Codebook usage: {unique_indices} unique indices out of {indices_tf.numel()} total")
+                
+                # Compute reconstruction loss for teacher forcing
+                if output_logits_tf is not None and cot_gt is not None and cot_mask_ex is not None:
+                    recon_loss_tf = compute_reconstruction_loss(output_logits_tf, cot_gt, cot_mask_ex)
+                    print(f"  Reconstruction Loss: {recon_loss_tf.item():.4f}")
                     
             if vq_loss_ar is not None and perplexity_ar is not None:
                 print(f"Auto-regressive - VQ Loss: {vq_loss_ar.item():.4f}, Perplexity: {perplexity_ar.item():.2f}")
                 if indices_ar is not None:
                     unique_indices = torch.unique(indices_ar).numel()
                     print(f"  Codebook usage: {unique_indices} unique indices out of {indices_ar.numel()} total")
+                
+                # Compute reconstruction loss for auto-regressive
+                if output_logits_ar is not None and cot_gt is not None and cot_mask_ex is not None:
+                    recon_loss_ar = compute_reconstruction_loss(output_logits_ar, cot_gt, cot_mask_ex)
+                    print(f"  Reconstruction Loss: {recon_loss_ar.item():.4f}")
+                    
             print()
             
             # Function to chunk text into 20-word segments
@@ -2500,17 +2523,6 @@ class SimpleGPT2VQVAETrainer(GPT2VQVAETrainer):
         if cots.ndim == 3:
             cots = torch.squeeze(cots, 1)
             cot_masks = torch.squeeze(cot_masks, 1)
-
-        def _compute_loss(output_logits, cots, cot_masks, vq_loss):
-            logits_flat = output_logits.reshape(-1, output_logits.size(-1))
-            targets_flat = cots.view(-1)
-            mask_flat = cot_masks.view(-1).bool()
-            
-            recon_loss = torch.tensor(0.0, device=self.device)
-            if mask_flat.sum() > 0:
-                recon_loss = self.criterion(logits_flat[mask_flat], targets_flat[mask_flat])
-            
-            return recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
         
         # Get use_vq from training config
         use_vq = self.training_config.get('use_vq', True)
@@ -2526,7 +2538,8 @@ class SimpleGPT2VQVAETrainer(GPT2VQVAETrainer):
                     quantize_cot_only=self.training_config.get('quantize_cot_only', True),
                     use_vq=use_vq
                 )
-                total_loss_batch = _compute_loss(output_logits, cots, cot_masks, vq_loss)
+                recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
+                total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
         else:
             _, output_logits, vq_loss, perplexity, indices = self.model(
                 prompt=prompts,
@@ -2537,7 +2550,8 @@ class SimpleGPT2VQVAETrainer(GPT2VQVAETrainer):
                 quantize_cot_only=self.training_config.get('quantize_cot_only', True),
                 use_vq=use_vq
             )
-            total_loss_batch = _compute_loss(output_logits, cots, cot_masks, vq_loss)
+            recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
+            total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
             
         return total_loss_batch, vq_loss, perplexity, indices
 
