@@ -1677,9 +1677,10 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
                                     data_dir: str,
                                     num_examples: int = 3,
                                     device: str = "cuda" if torch.cuda.is_available() else "cpu",
-                                    use_vq: bool = True):
+                                    use_vq: bool = True,
+                                    model_type: str = "GPT2VQVAE"):
     """
-    Demonstrate GPT2VQVAE model generation capabilities from a checkpoint.
+    Demonstrate GPT2VQVAE or SimpleGPT2VQVAE model generation capabilities from a checkpoint.
     
     Args:
         checkpoint_path: Path to the checkpoint file
@@ -1688,11 +1689,17 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
         num_examples: Number of examples to generate
         device: Device to run the model on
         use_vq: Whether to use vector quantization (for SimpleGPT2VQVAE)
+        model_type: Type of model to use ("GPT2VQVAE" or "SimpleGPT2VQVAE")
     """
-    print(f"Loading model from checkpoint: {checkpoint_path}")
+    print(f"Loading {model_type} model from checkpoint: {checkpoint_path}")
     
-    # Initialize model
-    model = GPT2VQVAE(**model_config).to(device)
+    # Initialize model based on type
+    if model_type == "SimpleGPT2VQVAE":
+        model = SimpleGPT2VQVAE(**model_config).to(device)
+        print(f"Initialized SimpleGPT2VQVAE model with use_vq={use_vq}")
+    else:
+        model = GPT2VQVAE(**model_config).to(device)
+        print(f"Initialized GPT2VQVAE model")
     
     # Load checkpoint
     model.load_checkpoint(checkpoint_path, device=device)
@@ -1757,7 +1764,7 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
             return f"[Decode error: {e}, tokens: {tokens.tolist()}]"
     
     print("\n" + "="*80)
-    print("GPT2VQVAE GENERATION DEMONSTRATION")
+    print(f"{model_type} GENERATION DEMONSTRATION")
     print("="*80)
     
     with torch.no_grad():
@@ -1787,7 +1794,7 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
                 }
 
                 # Add use_vq parameter for SimpleGPT2VQVAE
-                if model.__class__.__name__ == 'SimpleGPT2VQVAE':
+                if model_type == "SimpleGPT2VQVAE":
                     model_inputs['use_vq'] = use_vq
 
                 # Run model with prepared inputs
@@ -1806,6 +1813,7 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
                 vq_loss_tf = None
                 perplexity_tf = None
                 indices_tf = None
+                raise # TODO REMOVE
             
             # Generate auto-regressively (inference=True)
             try:
@@ -1820,7 +1828,7 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
                 }
                 
                 # Add use_vq parameter for SimpleGPT2VQVAE
-                if model.__class__.__name__ == 'SimpleGPT2VQVAE':
+                if model_type == "SimpleGPT2VQVAE":
                     model_inputs['use_vq'] = use_vq
                     
                 # Run model with prepared inputs
@@ -1937,39 +1945,40 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
             
             print("\n" + "="*120)
     
-    # Create comprehensive heatmaps from accumulated indices
-    print(f"\n{'='*80}")
-    print("GENERATING COMPREHENSIVE CODEBOOK USAGE HEATMAPS")
-    print(f"{'='*80}")
-    
-    # Combine all accumulated indices
-    if all_indices_tf:
-        combined_indices_tf = torch.cat(all_indices_tf, dim=0)
-        print(f"Teacher Forcing - Total indices: {combined_indices_tf.numel()}")
-        print(f"Teacher Forcing - Unique indices: {torch.unique(combined_indices_tf).numel()}")
+    if use_vq:
+        # Create comprehensive heatmaps from accumulated indices
+        print(f"\n{'='*80}")
+        print("GENERATING COMPREHENSIVE CODEBOOK USAGE HEATMAPS")
+        print(f"{'='*80}")
         
-        # Create comprehensive heatmap for teacher forcing
-        heatmap_path_tf = os.path.join(os.path.dirname(checkpoint_path), "codebook_usage_tf_comprehensive.png")
-        create_codebook_usage_heatmap(
-            combined_indices_tf, 
-            num_embeddings=num_embeddings,
-            title=f"Teacher Forcing Codebook Usage - All {num_examples} Examples",
-            save_path=heatmap_path_tf
-        )
-    
-    if all_indices_ar:
-        combined_indices_ar = torch.cat(all_indices_ar, dim=0)
-        print(f"Auto-regressive - Total indices: {combined_indices_ar.numel()}")
-        print(f"Auto-regressive - Unique indices: {torch.unique(combined_indices_ar).numel()}")
+        # Combine all accumulated indices
+        if all_indices_tf:
+            combined_indices_tf = torch.cat(all_indices_tf, dim=0)
+            print(f"Teacher Forcing - Total indices: {combined_indices_tf.numel()}")
+            print(f"Teacher Forcing - Unique indices: {torch.unique(combined_indices_tf).numel()}")
+            
+            # Create comprehensive heatmap for teacher forcing
+            heatmap_path_tf = os.path.join(os.path.dirname(checkpoint_path), "codebook_usage_tf_comprehensive.png")
+            create_codebook_usage_heatmap(
+                combined_indices_tf, 
+                num_embeddings=num_embeddings,
+                title=f"Teacher Forcing Codebook Usage - All {num_examples} Examples",
+                save_path=heatmap_path_tf
+            )
         
-        # Create comprehensive heatmap for auto-regressive
-        heatmap_path_ar = os.path.join(os.path.dirname(checkpoint_path), "codebook_usage_ar_comprehensive.png")
-        create_codebook_usage_heatmap(
-            combined_indices_ar, 
-            num_embeddings=num_embeddings,
-            title=f"Auto-regressive Codebook Usage - All {num_examples} Examples",
-            save_path=heatmap_path_ar
-        )
+        if all_indices_ar:
+            combined_indices_ar = torch.cat(all_indices_ar, dim=0)
+            print(f"Auto-regressive - Total indices: {combined_indices_ar.numel()}")
+            print(f"Auto-regressive - Unique indices: {torch.unique(combined_indices_ar).numel()}")
+            
+            # Create comprehensive heatmap for auto-regressive
+            heatmap_path_ar = os.path.join(os.path.dirname(checkpoint_path), "codebook_usage_ar_comprehensive.png")
+            create_codebook_usage_heatmap(
+                combined_indices_ar, 
+                num_embeddings=num_embeddings,
+                title=f"Auto-regressive Codebook Usage - All {num_examples} Examples",
+                save_path=heatmap_path_ar
+            )
     
     print("\nDemonstration completed!")
 
@@ -2129,7 +2138,7 @@ def create_codebook_usage_timeline_plot(codebook_history: List[torch.Tensor],
     
     plt.show()
 
-def sample_and_compute_codebook_usage(model: GPT2VQVAE,
+def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to Any to handle both model types
                                     dataset: TensorDataset,  # More specific type
                                     sample_size: int = 10,
                                     device: str = "cuda",
@@ -2138,7 +2147,7 @@ def sample_and_compute_codebook_usage(model: GPT2VQVAE,
     Randomly sample examples from dataset and compute codebook usage statistics.
     
     Args:
-        model: The VQ-VAE model
+        model: The VQ-VAE model (GPT2VQVAE or SimpleGPT2VQVAE)
         dataset: Dataset to sample from
         sample_size: Number of examples to sample
         device: Device to run computation on
@@ -2244,6 +2253,12 @@ def main():
                        help='Override num_thoughts parameter from config (truncates dataset if needed)')
     parser.add_argument('--demonstrate', type=str, default=None,
                        help='Demonstrate model generation from checkpoint (provide checkpoint path)')
+    parser.add_argument('--demonstrate-custom', type=str, default=None,
+                       help='Demonstrate model generation from checkpoint using custom prompt-CoT files (provide checkpoint path)')
+    parser.add_argument('--prompt-file', type=str, default='test_prompt.txt',
+                       help='Path to file containing custom prompt (used with --demonstrate-custom)')
+    parser.add_argument('--cot-file', type=str, default='test_cot.txt',
+                       help='Path to file containing custom CoT (used with --demonstrate-custom)')
     parser.add_argument('--num-examples', type=int, default=3,
                        help='Number of examples to generate in demonstration mode')
     parser.add_argument('--perplexity-threshold', type=float, default=None,
@@ -2373,14 +2388,35 @@ def main():
 
         # Run demonstration if requested
         if args.demonstrate:
+            model_type = "SimpleGPT2VQVAE" if args.simple else "GPT2VQVAE"
             print(f"\nRunning demonstration with checkpoint: {args.demonstrate}")
+            print(f"Using model type: {model_type}")
             demonstrate_model_from_checkpoint(
                 checkpoint_path=args.demonstrate,
                 model_config=model_config,
                 data_dir=data_dir,
                 num_examples=args.num_examples,
                 device=device,
-                use_vq=training_config.get('use_vq', True)
+                use_vq=training_config.get('use_vq', True),
+                model_type=model_type
+            )
+            return  # Exit after demonstration
+        
+        # Run custom demonstration if requested
+        if args.demonstrate_custom:
+            model_type = "SimpleGPT2VQVAE" if args.simple else "GPT2VQVAE"
+            print(f"\nRunning custom demonstration with checkpoint: {args.demonstrate_custom}")
+            print(f"Using model type: {model_type}")
+            print(f"Prompt file: {args.prompt_file}")
+            print(f"CoT file: {args.cot_file}")
+            demonstrate_custom_prompt_cot(
+                checkpoint_path=args.demonstrate_custom,
+                model_config=model_config,
+                prompt_file=args.prompt_file,
+                cot_file=args.cot_file,
+                device=device,
+                use_vq=training_config.get('use_vq', True),
+                model_type=model_type
             )
             return  # Exit after demonstration
         
@@ -2519,11 +2555,7 @@ class SimpleGPT2VQVAETrainer(GPT2VQVAETrainer):
     
     def _forward_pass(self, prompts, cots, prompt_masks, cot_masks):
         """Helper function for forward pass and loss calculation with use_vq parameter"""
-        # remove cot's & mask's second dimension if it's there
-        if cots.ndim == 3:
-            cots = torch.squeeze(cots, 1)
-            cot_masks = torch.squeeze(cot_masks, 1)
-        
+
         # Get use_vq from training config
         use_vq = self.training_config.get('use_vq', True)
         
@@ -2554,6 +2586,358 @@ class SimpleGPT2VQVAETrainer(GPT2VQVAETrainer):
             total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
             
         return total_loss_batch, vq_loss, perplexity, indices
+
+def demonstrate_custom_prompt_cot(checkpoint_path: str,
+                                 model_config: Dict[str, Any],
+                                 prompt_file: str = "test_prompt.txt",
+                                 cot_file: str = "test_cot.txt",
+                                 device: str = "cuda" if torch.cuda.is_available() else "cpu",
+                                 use_vq: bool = True,
+                                 model_type: str = "GPT2VQVAE"):
+    """
+    Demonstrate GPT2VQVAE or SimpleGPT2VQVAE model generation capabilities from a checkpoint
+    using custom prompt and CoT from plain text files.
+    
+    Args:
+        checkpoint_path: Path to the checkpoint file
+        model_config: Model configuration dictionary
+        prompt_file: Path to file containing the prompt in plain text
+        cot_file: Path to file containing the CoT in plain text
+        device: Device to run the model on
+        use_vq: Whether to use vector quantization (for SimpleGPT2VQVAE)
+        model_type: Type of model to use ("GPT2VQVAE" or "SimpleGPT2VQVAE")
+    """
+    print(f"Loading {model_type} model from checkpoint: {checkpoint_path}")
+    
+    # Initialize model based on type
+    if model_type == "SimpleGPT2VQVAE":
+        model = SimpleGPT2VQVAE(**model_config).to(device)
+        print(f"Initialized SimpleGPT2VQVAE model with use_vq={use_vq}")
+    else:
+        model = GPT2VQVAE(**model_config).to(device)
+        print(f"Initialized GPT2VQVAE model")
+    
+    # Load checkpoint
+    model.load_checkpoint(checkpoint_path, device=device)
+    model.eval()
+    
+    # Get num_embeddings and num_thoughts from model configuration
+    num_embeddings = model_config.get('num_embeddings', 512)
+    num_thoughts = 1 if model_type == "SimpleGPT2VQVAE" else model_config.get('num_thoughts', 32)
+    print(f"Model configured for {num_thoughts} parallel CoT sequences and {num_embeddings} embeddings")
+    
+    # Load tokenizer
+    try:
+        tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+        tokenizer.pad_token = tokenizer.eos_token
+        print("Loaded GPT2 tokenizer")
+    except Exception as e:
+        print(f"Warning: Could not load tokenizer: {e}")
+        tokenizer = None
+    
+    # Load prompt and CoT from files
+    print(f"Loading prompt from: {prompt_file}")
+    print(f"Loading CoT from: {cot_file}")
+    
+    try:
+        with open(prompt_file, 'r', encoding='utf-8') as f:
+            prompt_text = f.read().strip()
+        
+        with open(cot_file, 'r', encoding='utf-8') as f:
+            cot_text = f.read().strip()
+        
+        print(f"Prompt: {prompt_text}")
+        print(f"CoT: {cot_text}")
+        
+    except FileNotFoundError as e:
+        print(f"Error: Could not find file {e.filename}")
+        return
+    except Exception as e:
+        print(f"Error reading files: {e}")
+        return
+    
+    # Tokenize prompt and CoT
+    if tokenizer is None:
+        print("Error: Tokenizer not available")
+        return
+    
+    try:
+        print("For now, we will pad both the prompt and cot to length 128.")
+        # Tokenize and pad prompt to length 128
+        prompt_tokens = tokenizer.encode(prompt_text, return_tensors='pt', padding='max_length', max_length=128)
+        prompt_length = prompt_tokens.shape[1]
+        
+        # Tokenize and pad CoT to length 128 
+        cot_tokens = tokenizer.encode(cot_text, return_tensors='pt', padding='max_length', max_length=128)
+        cot_length = cot_tokens.shape[1]
+        
+        print(f"Prompt tokens: {prompt_tokens.shape} (length: {prompt_length})")
+        print(f"CoT tokens: {cot_tokens.shape} (length: {cot_length})")
+        
+        # Check sequence length limits
+        n_positions = model_config.get('n_positions', 1024)
+        total_length = prompt_length + cot_length
+        
+        if total_length > n_positions:
+            print(f"Warning: Total sequence length {total_length} exceeds model's n_positions {n_positions}")
+            print("Truncating sequences...")
+            
+            # Truncate CoT to fit within position limit
+            max_cot_length = n_positions - prompt_length
+            if max_cot_length <= 0:
+                print("Error: Prompt is too long, cannot fit CoT")
+                return
+            
+            cot_tokens = cot_tokens[:, :max_cot_length]
+            cot_length = max_cot_length
+            print(f"Truncated CoT to {cot_length} tokens")
+        
+    except Exception as e:
+        print(f"Error tokenizing text: {e}")
+        return
+    
+    # Create masks for prompt and CoT
+    prompt_mask = torch.ones_like(prompt_tokens, dtype=torch.bool)
+    cot_mask = torch.ones_like(cot_tokens, dtype=torch.bool)
+    
+    # Expand CoT to match num_thoughts (repeat the same CoT multiple times)
+    # This simulates having multiple parallel CoT sequences
+    cot_tokens_expanded = cot_tokens.unsqueeze(0).repeat(1, num_thoughts, 1)  # [1, num_thoughts, cot_length]
+    cot_mask_expanded = cot_mask.unsqueeze(0).repeat(1, num_thoughts, 1)      # [1, num_thoughts, cot_length]
+    
+    print(f"Expanded CoT shape: {cot_tokens_expanded.shape}")
+    
+    # Function to decode tokens to text
+    def decode_tokens(tokens, mask=None):
+        if tokenizer is None:
+            return f"[Tokens: {tokens.tolist()}]"
+        
+        if mask is not None:
+            # Apply mask to remove padding
+            tokens = tokens[mask.bool()]
+        
+        try:
+            return tokenizer.decode(tokens, skip_special_tokens=True)
+        except Exception as e:
+            return f"[Decode error: {e}, tokens: {tokens.tolist()}]"
+    
+    print("\n" + "="*80)
+    print(f"{model_type} CUSTOM PROMPT-COT DEMONSTRATION")
+    print("="*80)
+    
+    with torch.no_grad():
+        # Move tensors to device
+        prompt = prompt_tokens.to(device)  # [1, prompt_length]
+        cot_gt = cot_tokens_expanded.to(device)  # [1, num_thoughts, cot_length]
+        prompt_mask_ex = prompt_mask.to(device)
+        cot_mask_ex = cot_mask_expanded.to(device)
+        
+        print(f"Input shapes:")
+        print(f"  Prompt: {prompt.shape}")
+        print(f"  CoT: {cot_gt.shape}")
+        print(f"  Prompt mask: {prompt_mask_ex.shape}")
+        print(f"  CoT mask: {cot_mask_ex.shape}")
+        
+        # Generate with teacher forcing (inference=False)
+        try:
+            # Prepare base model inputs
+            model_inputs = {
+                'prompt': prompt,
+                'cot_sequences': cot_gt, 
+                'cot_mask': cot_mask_ex,
+                'prompt_mask': prompt_mask_ex,
+                'inference': False,  # Teacher forcing
+                'quantize_cot_only': True
+            }
+
+            # Add use_vq parameter for SimpleGPT2VQVAE
+            if model_type == "SimpleGPT2VQVAE":
+                model_inputs['use_vq'] = use_vq
+
+            # Run model with prepared inputs
+            _, output_logits_tf, vq_loss_tf, perplexity_tf, indices_tf = model(**model_inputs)
+            
+            # Get predicted tokens from logits
+            predicted_tokens_tf = torch.argmax(output_logits_tf, dim=-1)  # [B, M, L]
+            
+        except Exception as e:
+            print(f"Teacher forcing generation failed: {e}")
+            predicted_tokens_tf = None
+            vq_loss_tf = None
+            perplexity_tf = None
+            indices_tf = None
+        
+        # Generate auto-regressively (inference=True)
+        try:
+            # Prepare model inputs
+            model_inputs = {
+                'prompt': prompt,
+                'cot_sequences': cot_gt,
+                'cot_mask': cot_mask_ex,
+                'prompt_mask': prompt_mask_ex,
+                'inference': True,  # Auto-regressive
+                'quantize_cot_only': True
+            }
+            
+            # Add use_vq parameter for SimpleGPT2VQVAE
+            if model_type == "SimpleGPT2VQVAE":
+                model_inputs['use_vq'] = use_vq
+                
+            # Run model with prepared inputs
+            output_sequences_ar, output_logits_ar, vq_loss_ar, perplexity_ar, indices_ar = model(**model_inputs)
+            
+        except Exception as e:
+            print(f"Auto-regressive generation failed: {e}")
+            output_sequences_ar = None
+            vq_loss_ar = None
+            perplexity_ar = None
+            indices_ar = None
+        
+        # Display results
+        print(f"\n{'='*120}")
+        print(f"DEMONSTRATION RESULTS")
+        print(f"{'='*120}")
+        
+        # Print metrics
+        if vq_loss_tf is not None and perplexity_tf is not None:
+            print(f"Teacher Forcing - VQ Loss: {vq_loss_tf.item():.4f}, Perplexity: {perplexity_tf.item():.2f}")
+            if indices_tf is not None:
+                unique_indices = torch.unique(indices_tf).numel()
+                print(f"  Codebook usage: {unique_indices} unique indices out of {indices_tf.numel()} total")
+            
+            # Compute reconstruction loss for teacher forcing
+            if output_logits_tf is not None and cot_gt is not None and cot_mask_ex is not None:
+                recon_loss_tf = compute_reconstruction_loss(output_logits_tf, cot_gt, cot_mask_ex)
+                print(f"  Reconstruction Loss: {recon_loss_tf.item():.4f}")
+                
+        if vq_loss_ar is not None and perplexity_ar is not None:
+            print(f"Auto-regressive - VQ Loss: {vq_loss_ar.item():.4f}, Perplexity: {perplexity_ar.item():.2f}")
+            if indices_ar is not None:
+                unique_indices = torch.unique(indices_ar).numel()
+                print(f"  Codebook usage: {unique_indices} unique indices out of {indices_ar.numel()} total")
+            
+            # Compute reconstruction loss for auto-regressive
+            if output_logits_ar is not None and cot_gt is not None and cot_mask_ex is not None:
+                recon_loss_ar = compute_reconstruction_loss(output_logits_ar, cot_gt, cot_mask_ex)
+                print(f"  Reconstruction Loss: {recon_loss_ar.item():.4f}")
+                
+        print()
+        
+        # Function to chunk text into 20-word segments
+        def chunk_text(text, chunk_size=20):
+            """Split text into chunks of specified word count and on newlines."""
+            if not text:
+                return []
+            
+            # Split on newlines first
+            lines = text.split('\n')
+            chunks = []
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                words = line.split()
+                for i in range(0, len(words), chunk_size):
+                    chunk = ' '.join(words[i:i + chunk_size])
+                    if chunk:
+                        chunks.append(chunk)
+            
+            return chunks
+        
+        # Display results for each CoT sequence (they should all be the same since we repeated the same CoT)
+        print(f"\n{'='*120}")
+        print(f"GENERATION RESULTS COMPARISON")
+        print(f"{'='*120}")
+        
+        # Show original prompt and CoT
+        print(f"Original Prompt: {prompt_text}")
+        print(f"Original CoT: {cot_text}")
+        print()
+        
+        # Show results for the first CoT sequence (they should all be identical)
+        j = 0
+        print(f"--- CoT Sequence {j+1} (all sequences are identical) ---")
+        
+        # Get the three versions of the CoT
+        cot_gt_text = decode_tokens(cot_gt[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)
+        
+        if predicted_tokens_tf is not None:
+            cot_tf_text = decode_tokens(predicted_tokens_tf[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)
+        else:
+            cot_tf_text = "FAILED"
+        
+        if output_sequences_ar is not None:
+            cot_ar_text = decode_tokens(output_sequences_ar[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)
+        else:
+            cot_ar_text = "FAILED"
+        
+        # Chunk all three texts
+        gt_chunks = chunk_text(cot_gt_text)
+        tf_chunks = chunk_text(cot_tf_text)
+        ar_chunks = chunk_text(cot_ar_text)
+        
+        # Find the maximum number of chunks
+        max_chunks = max(len(gt_chunks), len(tf_chunks), len(ar_chunks))
+        
+        # Display chunks side-by-side
+        for chunk_idx in range(max_chunks):
+            gt_chunk = gt_chunks[chunk_idx] if chunk_idx < len(gt_chunks) else ""
+            tf_chunk = tf_chunks[chunk_idx] if chunk_idx < len(tf_chunks) else ""
+            ar_chunk = ar_chunks[chunk_idx] if chunk_idx < len(ar_chunks) else ""
+            
+            # Pad chunks to same length for alignment
+            max_length = max(len(gt_chunk), len(tf_chunk), len(ar_chunk))
+            gt_chunk_padded = gt_chunk.ljust(max_length)
+            tf_chunk_padded = tf_chunk.ljust(max_length)
+            ar_chunk_padded = ar_chunk.ljust(max_length)
+            
+            print(f"Original:        {gt_chunk_padded}")
+            print(f"Teacher Forced:  {tf_chunk_padded}")
+            print(f"Auto-regressive: {ar_chunk_padded}")
+            
+            # Add separator after each chunk (except the last one)
+            if chunk_idx < max_chunks - 1:
+                print("-" * 60)
+        
+        print("\n" + "="*120)
+    
+    # Create codebook usage heatmaps if VQ is enabled
+    if use_vq:
+        print(f"\n{'='*80}")
+        print("GENERATING CODEBOOK USAGE HEATMAPS")
+        print(f"{'='*80}")
+        
+        # Create heatmap for teacher forcing
+        if indices_tf is not None:
+            print(f"Teacher Forcing - Total indices: {indices_tf.numel()}")
+            print(f"Teacher Forcing - Unique indices: {torch.unique(indices_tf).numel()}")
+            
+            # Create heatmap for teacher forcing
+            heatmap_path_tf = os.path.join(os.path.dirname(checkpoint_path), "codebook_usage_tf_custom.png")
+            create_codebook_usage_heatmap(
+                indices_tf, 
+                num_embeddings=num_embeddings,
+                title=f"Teacher Forcing Codebook Usage - Custom Prompt-CoT",
+                save_path=heatmap_path_tf
+            )
+        
+        # Create heatmap for auto-regressive
+        if indices_ar is not None:
+            print(f"Auto-regressive - Total indices: {indices_ar.numel()}")
+            print(f"Auto-regressive - Unique indices: {torch.unique(indices_ar).numel()}")
+            
+            # Create heatmap for auto-regressive
+            heatmap_path_ar = os.path.join(os.path.dirname(checkpoint_path), "codebook_usage_ar_custom.png")
+            create_codebook_usage_heatmap(
+                indices_ar, 
+                num_embeddings=num_embeddings,
+                title=f"Auto-regressive Codebook Usage - Custom Prompt-CoT",
+                save_path=heatmap_path_ar
+            )
+    
+    print("\nCustom prompt-CoT demonstration completed!")
 
 if __name__ == "__main__":
     # Run main function for command-line training

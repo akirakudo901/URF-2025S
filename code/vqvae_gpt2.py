@@ -1155,7 +1155,7 @@ class GPT2VQVAE(nn.Module):
         
         return output_sequences, output_logits, vq_loss, perplexity, indices
 
-    def load_checkpoint(self, checkpoint_path: str, device: str = None):
+    def load_checkpoint(self, checkpoint_path: str, device: Optional[str] = None):
         """
         Load model checkpoint.
         
