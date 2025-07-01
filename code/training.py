@@ -37,6 +37,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from vqvae_gpt2 import GPT2VQVAE, compute_perplexity
 from vqvae_gpt2_simple import SimpleGPT2VQVAE
+from vqvae_gpt2_with_enhancement import EnhancedGPT2VQVAE
 
 class TrainingAbortedException(Exception):
     """
@@ -216,7 +217,8 @@ class GPT2VQVAETrainer:
     def __init__(self, 
                  model_config: Dict[str, Any],
                  training_config: Dict[str, Any],
-                 device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+                 device: str = "cuda" if torch.cuda.is_available() else "cpu",
+                 tracking_functions: Optional[Dict[str, Any]] = None):
         """
         Initialize the trainer.
         
@@ -224,10 +226,22 @@ class GPT2VQVAETrainer:
             model_config: Dictionary containing model hyperparameters
             training_config: Dictionary containing training hyperparameters
             device: Device to train on
+            tracking_functions: Optional dict containing custom tracking functions:
+                - 'track_codebook_usage': Function to track codebook usage
+                - 'save_codebook_plots': Function to save codebook plots
+                - 'tracking_enabled': Boolean to enable/disable tracking
         """
         self.model_config = model_config
         self.training_config = training_config
         self.device = device
+        
+        # Set up tracking functions (default to base class methods)
+        if tracking_functions is None:
+            tracking_functions = {}
+        
+        self.track_codebook_usage_func = tracking_functions.get('track_codebook_usage', self._default_track_codebook_usage)
+        self.save_codebook_plots_func = tracking_functions.get('save_codebook_plots', self._default_save_codebook_plots)
+        self.tracking_enabled = tracking_functions.get('tracking_enabled', True)
         
         # Initialize GPU memory monitor
         if device.startswith("cuda"):
@@ -241,23 +255,8 @@ class GPT2VQVAETrainer:
         self.gradient_accumulation_steps = training_config.get('gradient_accumulation_steps', 1)
         self.use_gradient_checkpointing = training_config.get('use_gradient_checkpointing', True)
         
-        # Ensure all numeric values are properly typed
-        def ensure_numeric_types(config_dict):
-            """Ensure all numeric values in config are properly typed."""
-            for key, value in config_dict.items():
-                if isinstance(value, str):
-                    try:
-                        if 'e' in value.lower() or '.' in value:
-                            config_dict[key] = float(value)
-                        else:
-                            config_dict[key] = int(value)
-                    except ValueError:
-                        pass  # Keep as string if conversion fails
-                elif isinstance(value, bool):
-                    config_dict[key] = bool(value)
-        
-        ensure_numeric_types(self.model_config)
-        ensure_numeric_types(self.training_config)
+        self.ensure_numeric_types(self.model_config)
+        self.ensure_numeric_types(self.training_config)
         
         # Log memory before model initialization
         if self.memory_monitor:
@@ -350,17 +349,96 @@ class GPT2VQVAETrainer:
         # Initialize gradient checkpointing as disabled by default
         self._gradient_checkpointing_enabled = False
         
-        # Codebook usage tracking
+        # Codebook usage tracking (legacy - now handled by tracking functions)
         self.codebook_tracking_enabled = self.training_config.get('codebook_tracking_enabled', True)
-        self.codebook_sample_size = self.training_config.get('codebook_sample_size', 100)
+        self.codebook_sample_size = self.training_config.get('codebook_sample_size', 1000)
         self.codebook_history = []  # List of count tensors over time
         self.codebook_perplexities = []  # List of perplexities over time
         self.codebook_measurement_points = []  # List of measurement point indices
         
-        if self.codebook_tracking_enabled:
-            print(f"Codebook usage tracking enabled with sample size: {self.codebook_sample_size}")
+        if self.tracking_enabled:
+            print(f"Codebook tracking enabled with custom functions")
         else:
-            print("Codebook usage tracking disabled (set codebook_tracking_enabled=True in config to enable)")
+            print("Codebook tracking disabled")
+    
+    def _default_track_codebook_usage(self, dataset: Any, measurement_point: int) -> None:
+        """Default codebook tracking function for base trainer."""
+        if not self.codebook_tracking_enabled:
+            return
+        
+        try:
+            # Sample and compute codebook usage
+            counts, perplexity = sample_and_compute_codebook_usage(
+                self.model, 
+                dataset, 
+                self.codebook_sample_size, 
+                self.device,
+                use_vq=self.training_config.get('use_vq', True)
+            )
+            
+            # Store results
+            self.codebook_history.append(counts)
+            self.codebook_perplexities.append(perplexity)
+            self.codebook_measurement_points.append(measurement_point)
+            
+            # Print current statistics
+            unique_codes = (counts > 0).sum().item()
+            total_usage = counts.sum().item()
+            print(f"\nCodebook tracking (point {measurement_point}): "
+                  f"Unique codes: {unique_codes}/{self.model.vector_quantizer.num_embeddings} "
+                  f"({unique_codes/self.model.vector_quantizer.num_embeddings*100:.1f}%), "
+                  f"Perplexity: {perplexity:.2f}")
+            
+        except Exception as e:
+            print(f"Warning: Failed to track codebook usage: {e}")
+    
+    def _default_save_codebook_plots(self, save_dir: str, epoch: int) -> None:
+        """Default codebook plotting function for base trainer."""
+        if not self.codebook_tracking_enabled or not self.codebook_history:
+            return
+        
+        try:
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # Save current heatmap
+            current_counts = self.codebook_history[-1]
+            heatmap_path = os.path.join(save_dir, f"codebook_usage_epoch_{epoch}.png")
+            create_codebook_usage_heatmap(
+                current_counts,
+                num_embeddings=self.model.vector_quantizer.num_embeddings,
+                title=f"Codebook Usage - Epoch {epoch}",
+                save_path=heatmap_path
+            )
+            
+            # Save timeline plot
+            timeline_path = os.path.join(save_dir, f"codebook_usage_timeline_epoch_{epoch}.png")
+            create_codebook_usage_timeline_plot(
+                self.codebook_history,
+                num_embeddings=self.model.vector_quantizer.num_embeddings,
+                measurement_points=self.codebook_measurement_points,
+                title=f"Codebook Usage Over Time - Up to Epoch {epoch}",
+                save_path=timeline_path
+            )
+            
+            print(f"Codebook tracking plots saved to {save_dir}")
+            
+        except Exception as e:
+            print(f"Warning: Failed to save codebook tracking plots: {e}")
+    
+    # Ensure all numeric values are properly typed
+    def ensure_numeric_types(self, config_dict):
+        """Ensure all numeric values in config are properly typed."""
+        for key, value in config_dict.items():
+            if isinstance(value, str):
+                try:
+                    if 'e' in value.lower() or '.' in value:
+                        config_dict[key] = float(value)
+                    else:
+                        config_dict[key] = int(value)
+                except ValueError:
+                    pass  # Keep as string if conversion fails
+            elif isinstance(value, bool):
+                config_dict[key] = bool(value)
     
     def log_memory_usage(self, stage: str):
         """Log current memory usage using the GPU memory monitor."""
@@ -401,81 +479,7 @@ class GPT2VQVAETrainer:
                 
                 print(f"Memory usage ({stage}): {allocated:.2f}GB allocated, {reserved:.2f}GB reserved, {max_allocated:.2f}GB max")
     
-    def track_codebook_usage(self, dataset: Any, measurement_point: int) -> None:
-        """
-        Track codebook usage by sampling from dataset and computing statistics.
-        
-        Args:
-            dataset: Dataset to sample from
-            measurement_point: Current measurement point index
-        """
-        if not self.codebook_tracking_enabled:
-            return
-        
-        try:
-            # Sample and compute codebook usage
-            counts, perplexity = sample_and_compute_codebook_usage(
-                self.model, 
-                dataset, 
-                self.codebook_sample_size, 
-                self.device,
-                use_vq=self.training_config.get('use_vq', True)
-            )
-            
-            # Store results
-            self.codebook_history.append(counts)
-            self.codebook_perplexities.append(perplexity)
-            self.codebook_measurement_points.append(measurement_point)
-            
-            # Print current statistics
-            unique_codes = (counts > 0).sum().item()
-            total_usage = counts.sum().item()
-            print(f"\nCodebook tracking (point {measurement_point}): "
-                  f"Unique codes: {unique_codes}/{self.model.vector_quantizer.num_embeddings} "
-                  f"({unique_codes/self.model.vector_quantizer.num_embeddings*100:.1f}%), "
-                  f"Perplexity: {perplexity:.2f}")
-            
-        except Exception as e:
-            print(f"Warning: Failed to track codebook usage: {e}")
 
-    def save_codebook_tracking_plots(self, save_dir: str, epoch: int) -> None:
-        """
-        Save codebook tracking visualizations.
-        
-        Args:
-            save_dir: Directory to save plots
-            epoch: Current epoch number
-        """
-        if not self.codebook_tracking_enabled or not self.codebook_history:
-            return
-        
-        try:
-            os.makedirs(save_dir, exist_ok=True)
-            
-            # Save current heatmap
-            current_counts = self.codebook_history[-1]
-            heatmap_path = os.path.join(save_dir, f"codebook_usage_epoch_{epoch}.png")
-            create_codebook_usage_heatmap(
-                current_counts,
-                num_embeddings=self.model.vector_quantizer.num_embeddings,
-                title=f"Codebook Usage - Epoch {epoch}",
-                save_path=heatmap_path
-            )
-            
-            # Save timeline plot
-            timeline_path = os.path.join(save_dir, f"codebook_usage_timeline_epoch_{epoch}.png")
-            create_codebook_usage_timeline_plot(
-                self.codebook_history,
-                num_embeddings=self.model.vector_quantizer.num_embeddings,
-                measurement_points=self.codebook_measurement_points,
-                title=f"Codebook Usage Over Time - Up to Epoch {epoch}",
-                save_path=timeline_path
-            )
-            
-            print(f"Codebook tracking plots saved to {save_dir}")
-            
-        except Exception as e:
-            print(f"Warning: Failed to save codebook tracking plots: {e}")
     
     def create_data_loader(self, 
                           dataset: torch.utils.data.Dataset,
@@ -614,12 +618,12 @@ class GPT2VQVAETrainer:
                 detailed_batch_indices.append(batch_idx)
                 
                 # Track codebook usage at measurement intervals
-                if self.codebook_tracking_enabled:
+                if self.tracking_enabled:
                     # Get the dataset from the data loader
                     dataset: Any = train_loader.dataset
                     if hasattr(dataset, 'dataset'):  # Handle SubsetRandomSampler case
                         dataset = dataset.dataset
-                    self.track_codebook_usage(dataset, batch_idx)
+                    self.track_codebook_usage_func(dataset, batch_idx)
             
             # Update progress bar
             acc_step = (accumulation_steps % self.gradient_accumulation_steps) + 1
@@ -981,10 +985,10 @@ class GPT2VQVAETrainer:
                     self.save_checkpoint(epoch + 1, val_metrics, False)
                 
                 # Save codebook tracking plots
-                if self.codebook_tracking_enabled:
+                if self.tracking_enabled:
                     checkpoint_dir = self.training_config.get('checkpoint_dir', 'checkpoints')
                     codebook_dir = os.path.join(checkpoint_dir, 'codebook_tracking')
-                    self.save_codebook_tracking_plots(codebook_dir, epoch + 1)
+                    self.save_codebook_plots_func(codebook_dir, epoch + 1)
                 
                 # Clear cache after each epoch
                 if torch.cuda.is_available():
@@ -1056,9 +1060,9 @@ class GPT2VQVAETrainer:
             self.plot_memory_usage(memory_path)
             
             # Save codebook tracking plots for aborted training
-            if self.codebook_tracking_enabled:
+            if self.tracking_enabled:
                 codebook_dir = os.path.join(checkpoint_dir, 'codebook_tracking')
-                self.save_codebook_tracking_plots(codebook_dir, e.epoch)
+                self.save_codebook_plots_func(codebook_dir, e.epoch)
             
             # Log final memory usage for aborted training
             self.log_memory_usage("training_aborted_end")
@@ -1546,71 +1550,96 @@ def load_config(config_path: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     
     return model_config, training_config
 
-def create_default_config(output_path: str):
+def create_default_config(output_path: str, enhanced_vq: bool = False):
     """
     Create a default configuration file with memory optimizations.
     
     Args:
         output_path: Path where to save the default config
+        enhanced_vq: Whether to include enhanced VQ-VAE configuration options
     """
+    # Base model configuration
+    model_config = {
+        'vocab_size': 50257,  # GPT2 vocabulary size
+        'd_model': 768,       # GPT2 model dimension
+        'num_embeddings': 512,  # VQ codebook size
+        'commitment_cost': 0.25,  # VQ commitment cost
+        'aggregation_hidden_dim': 1024,  # Aggregation MLP hidden dim
+        'num_thoughts': 40,   # Number of parallel sequences
+        'n_positions': 1024,   # Maximum sequence length
+        # Pretrained model settings
+        'use_pretrained_encoder': True,  # Load pretrained weights for encoder
+        'use_pretrained_decoder': True,  # and decoder
+        'pretrained_model_name': 'gpt2',  # Use GPT2-Small (124M parameters)
+        # Encoder-specific configuration (smaller, more efficient)
+        "encoder_n_layer": 6,        # Smaller encoder
+        "encoder_n_head": 12,
+        "encoder_n_inner": None,     # Will be set to 4*d_model
+        "encoder_dropout": 0.1,
+        "encoder_activation_function": "gelu",
+        # Decoder-specific configuration (larger, more powerful)
+        "decoder_n_layer": 12,       # Larger decoder
+        "decoder_n_head": 12,
+        "decoder_n_inner": None,     # Will be set to 4*d_model
+        "decoder_dropout": 0.1,
+        "decoder_activation_function": "gelu"
+    }
+    
+    # Add enhanced VQ-VAE specific parameters if requested
+    if enhanced_vq:
+        model_config.update({
+            # Enhanced Vector Quantizer specific parameters
+            'ema_decay': 0.99,           # EMA decay rate for codebook updates
+            'diversity_gamma': 0.1,      # Weight for diversity-promoting loss
+            'reset_threshold': 0.1,      # Threshold for codebook reset (usage ratio)
+            'reset_frequency': 1000,     # Frequency of codebook reset checks
+            'use_ema': True,             # Whether to use EMA updates
+        })
+    
+    # Base training configuration
+    training_config = {
+        'learning_rate': 1e-4,
+        'weight_decay': 0.01,
+        'beta1': 0.9,
+        'beta2': 0.999,
+        'use_lr_scheduler': True,
+        'min_lr': 1e-6,
+        'num_epochs': 50,
+        'batch_size': 2,  # Reduced for memory efficiency
+        'gradient_clip': 1.0,
+        'vq_loss_weight': 1.0,
+        'quantize_cot_only': True,
+        'save_every': 5,
+        'checkpoint_dir': 'checkpoints/gpt2vqvae',
+        'pad_token_id': 50256, # eos_token for GPT2TokenizerFast
+        'val_split': 0.1,
+        'num_measurements_per_epoch': 20,  # Number of detailed metrics per epoch
+        # Memory optimization settings
+        'use_mixed_precision': True,
+        'gradient_accumulation_steps': 4,  # Effective batch size = batch_size * gradient_accumulation_steps
+        'use_gradient_checkpointing': True,  # Enable gradient checkpointing for memory efficiency
+        'use_dynamic_batching': False,  # Enable for variable sequence lengths
+        'max_tokens_per_batch': 8192,  # For dynamic batching
+        'max_samples': None,  # Limit samples for debugging (set to number for testing)
+        # Perplexity threshold settings
+        'perplexity_threshold': 1.5,  # Training aborts when 20-step average perplexity goes below this value
+        'perplexity_window_size': 20,  # Number of steps to average for perplexity threshold check
+        # Checkpoint settings
+        'minimum_batches_for_checkpoint': 200,  # Minimum number of batches trained before saving aborted checkpoint
+        # Data config
+        'data_dir': 'data/GSM8K'
+    }
+    
+    # Add enhanced VQ-VAE specific training parameters if requested
+    if enhanced_vq:
+        training_config.update({
+            # Enhanced codebook tracking
+            'enhanced_codebook_tracking': True,  # Enable enhanced codebook monitoring
+        })
+    
     default_config = {
-        'model_config': {
-            'vocab_size': 50257,  # GPT2 vocabulary size
-            'd_model': 768,       # GPT2 model dimension
-            'num_embeddings': 512,  # VQ codebook size
-            'commitment_cost': 0.25,  # VQ commitment cost
-            'aggregation_hidden_dim': 1024,  # Aggregation MLP hidden dim
-            'num_thoughts': 40,   # Number of parallel sequences
-            'n_positions': 1024,   # Maximum sequence length
-            # Pretrained model settings
-            'use_pretrained_encoder': True,  # Load pretrained weights for encoder
-            'use_pretrained_decoder': True,  # and decoder
-            'pretrained_model_name': 'gpt2',  # Use GPT2-Small (124M parameters)
-            # Encoder-specific configuration (smaller, more efficient)
-            "encoder_n_layer": 6,        # Smaller encoder
-            "encoder_n_head": 12,
-            "encoder_n_inner": None,     # Will be set to 4*d_model
-            "encoder_dropout": 0.1,
-            "encoder_activation_function": "gelu",
-            # Decoder-specific configuration (larger, more powerful)
-            "decoder_n_layer": 12,       # Larger decoder
-            "decoder_n_head": 12,
-            "decoder_n_inner": None,     # Will be set to 4*d_model
-            "decoder_dropout": 0.1,
-            "decoder_activation_function": "gelu"
-        },
-        'training_config': {
-            'learning_rate': 1e-4,
-            'weight_decay': 0.01,
-            'beta1': 0.9,
-            'beta2': 0.999,
-            'use_lr_scheduler': True,
-            'min_lr': 1e-6,
-            'num_epochs': 50,
-            'batch_size': 2,  # Reduced for memory efficiency
-            'gradient_clip': 1.0,
-            'vq_loss_weight': 1.0,
-            'quantize_cot_only': True,
-            'save_every': 5,
-            'checkpoint_dir': 'checkpoints/gpt2vqvae',
-            'pad_token_id': 50256, # eos_token for GPT2TokenizerFast
-            'val_split': 0.1,
-            'num_measurements_per_epoch': 20,  # Number of detailed metrics per epoch
-            # Memory optimization settings
-            'use_mixed_precision': True,
-            'gradient_accumulation_steps': 4,  # Effective batch size = batch_size * gradient_accumulation_steps
-            'use_gradient_checkpointing': True,  # Enable gradient checkpointing for memory efficiency
-            'use_dynamic_batching': False,  # Enable for variable sequence lengths
-            'max_tokens_per_batch': 8192,  # For dynamic batching
-            'max_samples': None,  # Limit samples for debugging (set to number for testing)
-            # Perplexity threshold settings
-            'perplexity_threshold': 1.5,  # Training aborts when 20-step average perplexity goes below this value
-            'perplexity_window_size': 20,  # Number of steps to average for perplexity threshold check
-            # Checkpoint settings
-            'minimum_batches_for_checkpoint': 200,  # Minimum number of batches trained before saving aborted checkpoint
-            # Data config
-            'data_dir': 'data/GSM8K'
-        }
+        'model_config': model_config,
+        'training_config': training_config
     }
     
     # Determine file format based on extension
@@ -1639,7 +1668,20 @@ def create_default_config(output_path: str):
     print("Pretrained model settings:")
     print("  - Encoder: GPT2-Small pretrained weights (use_pretrained_encoder: True)")
     print("  - Decoder: GPT2-Small pretrained weights (use_pretrained_decoder: True)")
-    print("You can modify this file and use it for training.")
+    
+    if enhanced_vq:
+        print("\nEnhanced VQ-VAE settings included:")
+        print("  - EMA updates: Enabled (decay: 0.99)")
+        print("  - Diversity loss: Enabled (gamma: 0.1)")
+        print("  - Automatic codebook reset: Enabled (threshold: 0.1, frequency: 1000)")
+        print("  - Enhanced codebook tracking: Enabled")
+        print("\nEnhanced codebook training scheme reduces to normal VQ-VAE when:")
+        print("  - ema_decay = 0.0 (no EMA updates)")
+        print("  - diversity_gamma = 0.0 (no diversity loss)")
+        print("  - reset_threshold = 0.0 (no automatic resets)")
+        print("  - use_ema = False (EMA disabled)")
+    
+    print("\nYou can modify this file and use it for training.")
 
 def compute_reconstruction_loss(output_logits: torch.Tensor, 
                               target_sequences: torch.Tensor, 
@@ -1694,7 +1736,10 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
     print(f"Loading {model_type} model from checkpoint: {checkpoint_path}")
     
     # Initialize model based on type
-    if model_type == "SimpleGPT2VQVAE":
+    if model_type == "EnhancedGPT2VQVAE":
+        model = EnhancedGPT2VQVAE(**model_config).to(device)
+        print(f"Initialized EnhancedGPT2VQVAE model")
+    elif model_type == "SimpleGPT2VQVAE":
         model = SimpleGPT2VQVAE(**model_config).to(device)
         print(f"Initialized SimpleGPT2VQVAE model with use_vq={use_vq}")
     else:
@@ -1959,8 +2004,11 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
             
             # Create comprehensive heatmap for teacher forcing
             heatmap_path_tf = os.path.join(os.path.dirname(checkpoint_path), "codebook_usage_tf_comprehensive.png")
+            # Convert indices to counts
+            counts_tf = torch.bincount(combined_indices_tf[combined_indices_tf < num_embeddings], 
+                                      minlength=num_embeddings)
             create_codebook_usage_heatmap(
-                combined_indices_tf, 
+                counts_tf, 
                 num_embeddings=num_embeddings,
                 title=f"Teacher Forcing Codebook Usage - All {num_examples} Examples",
                 save_path=heatmap_path_tf
@@ -1973,8 +2021,11 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
             
             # Create comprehensive heatmap for auto-regressive
             heatmap_path_ar = os.path.join(os.path.dirname(checkpoint_path), "codebook_usage_ar_comprehensive.png")
+            # Convert indices to counts
+            counts_ar = torch.bincount(combined_indices_ar[combined_indices_ar < num_embeddings], 
+                                      minlength=num_embeddings)
             create_codebook_usage_heatmap(
-                combined_indices_ar, 
+                counts_ar, 
                 num_embeddings=num_embeddings,
                 title=f"Auto-regressive Codebook Usage - All {num_examples} Examples",
                 save_path=heatmap_path_ar
@@ -1982,7 +2033,7 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
     
     print("\nDemonstration completed!")
 
-def create_codebook_usage_heatmap(indices: torch.Tensor, 
+def create_codebook_usage_heatmap(counts: torch.Tensor, 
                                  num_embeddings: int,
                                  title: str = "Codebook Usage Heatmap",
                                  save_path: Optional[str] = None,
@@ -1990,10 +2041,10 @@ def create_codebook_usage_heatmap(indices: torch.Tensor,
                                  cmap: str = 'viridis',
                                  show_counts: bool = True) -> None:
     """
-    Create and optionally save a heatmap showing codebook usage from indices.
+    Create and optionally save a heatmap showing codebook usage from counts.
     
     Args:
-        indices (torch.Tensor): Tensor of codebook indices [batch_size, sequence_length] or flattened
+        counts (torch.Tensor): Tensor of codebook usage counts [num_embeddings]
         num_embeddings (int): Total number of embeddings in the codebook
         title (str): Title for the heatmap
         save_path (Optional[str]): Path to save the heatmap image (if None, only displays)
@@ -2002,18 +2053,24 @@ def create_codebook_usage_heatmap(indices: torch.Tensor,
         show_counts (bool): Whether to show count values on the heatmap
         
     Example:
-        >>> indices = torch.tensor([[0, 1, 2], [1, 2, 0], [2, 0, 1]])
-        >>> create_codebook_usage_heatmap(indices, num_embeddings=3, save_path="heatmap.png")
+        >>> counts = torch.tensor([10, 5, 3, 0, 2])  # Usage counts for 5 embeddings
+        >>> create_codebook_usage_heatmap(counts, num_embeddings=5, save_path="heatmap.png")
     """
-    # Flatten indices if needed
-    if indices.dim() > 1:
-        indices_flat = indices.flatten()
-    else:
-        indices_flat = indices
+    # Ensure counts is the right shape and convert to numpy
+    if counts.dim() > 1:
+        counts = counts.flatten()
     
-    # Count occurrences of each index using bincount
-    counts_np = torch.bincount(indices_flat[indices_flat < num_embeddings], 
-                               minlength=num_embeddings).cpu().numpy()
+    # Ensure we have the right number of counts
+    if counts.numel() < num_embeddings:
+        # Pad with zeros if needed
+        padded_counts = torch.zeros(num_embeddings, dtype=counts.dtype, device=counts.device)
+        padded_counts[:counts.numel()] = counts
+        counts = padded_counts
+    elif counts.numel() > num_embeddings:
+        # Truncate if needed
+        counts = counts[:num_embeddings]
+    
+    counts_np = counts.cpu().numpy()
     
     # Create the heatmap
     fig, ax = plt.subplots(figsize=figsize)
@@ -2031,12 +2088,44 @@ def create_codebook_usage_heatmap(indices: torch.Tensor,
     # Reshape to 2D
     heatmap_data = counts_padded.reshape(rows, cols)
     
-    # Create the heatmap
-    im = ax.imshow(heatmap_data, cmap=cmap, aspect='auto')
+    # Create a custom colormap that makes zeros white and uses the original colormap for non-zero values
+    from matplotlib.colors import ListedColormap
+    import matplotlib.colors as mcolors
+    
+    # Get the original colormap
+    original_cmap = plt.get_cmap(cmap)
+    
+    # Create a custom colormap with white for zeros and the original colormap for non-zeros
+    # We'll use a very small value (like 0.001) to represent zeros in the colormap
+    # and then replace those values with white
+    n_colors = 256
+    colors = original_cmap(np.linspace(0, 1, n_colors))
+    
+    # Replace the first color with white to represent zeros
+    colors[0] = [0, 0, 0, 0.9]  # White with full opacity
+    
+    # Create the custom colormap
+    custom_cmap = ListedColormap(colors)
+    
+    # Create the heatmap with the custom colormap
+    im = ax.imshow(heatmap_data, cmap=custom_cmap, aspect='auto')
     
     # Add colorbar
     cbar = plt.colorbar(im, ax=ax)
     cbar.set_label('Usage Count', rotation=270, labelpad=15)
+    
+    # Update colorbar ticks to show the actual range (excluding the artificial 0.001 value)
+    # Get the actual min and max values from the original data
+    actual_min = np.min(heatmap_data[heatmap_data > 0]) if np.any(heatmap_data > 0) else 0
+    actual_max = np.max(heatmap_data)
+    
+    # Set colorbar ticks to show meaningful values
+    if actual_max > 0:
+        # Create ticks that include 0 and some intermediate values
+        tick_values = [0] + list(np.linspace(actual_min, actual_max, 5))
+        tick_values = [int(v) for v in tick_values if v >= 0]
+        cbar.set_ticks(tick_values)
+        cbar.set_ticklabels([str(v) for v in tick_values])
     
     # Set title and labels
     ax.set_title(title, fontsize=14, fontweight='bold')
@@ -2050,8 +2139,12 @@ def create_codebook_usage_heatmap(indices: torch.Tensor,
                 idx = i * cols + j
                 if idx < num_embeddings:
                     count = int(heatmap_data[i, j])
-                    # Choose text color based on background brightness
-                    text_color = 'white' if count > np.max(heatmap_data) / 2 else 'black'
+                    # For zero values, use black text on white background
+                    if count == 0:
+                        text_color = 'white'
+                    else:
+                        # Choose text color based on background brightness for non-zero values
+                        text_color = 'white' if count < np.max(heatmap_data) / 2 else 'black'
                     ax.text(j, i, str(count), ha='center', va='center', 
                            color=text_color, fontweight='bold')
     
@@ -2061,7 +2154,7 @@ def create_codebook_usage_heatmap(indices: torch.Tensor,
     usage_percentage = (unique_usage / num_embeddings) * 100
     
     stats_text = f'Total usage: {total_usage}\nUnique codes: {unique_usage}/{num_embeddings} ({usage_percentage:.1f}%)'
-    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=10,
+    ax.text(0.02, 1.08, stats_text, transform=ax.transAxes, fontsize=10,
             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     
     plt.tight_layout()
@@ -2097,6 +2190,9 @@ def create_codebook_usage_timeline_plot(codebook_history: List[torch.Tensor],
     
     # Convert to numpy arrays
     history_np = [counts.numpy() for counts in codebook_history]
+    # TODO DELETE
+    print(f"codebook_history:")
+    [print(counts) for counts in codebook_history]
     
     # Create 3D plot
     fig = plt.figure(figsize=figsize)
@@ -2140,7 +2236,7 @@ def create_codebook_usage_timeline_plot(codebook_history: List[torch.Tensor],
 
 def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to Any to handle both model types
                                     dataset: TensorDataset,  # More specific type
-                                    sample_size: int = 10,
+                                    sample_size: int = 1000,
                                     device: str = "cuda",
                                     use_vq: bool = True) -> Tuple[torch.Tensor, float]:
     """
@@ -2156,6 +2252,7 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
     Returns:
         Tuple of (indices_tensor, perplexity)
     """
+    model_was_training = model.training
     model.eval()
     
     # Randomly sample indices
@@ -2164,7 +2261,8 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
         sample_size = total_samples
         print(f"Warning: Requested sample_size {sample_size} exceeds dataset size {total_samples}")
     
-    sample_indices = torch.randperm(total_samples)[:sample_size]
+    sample_indices = torch.randperm(total_samples, generator=torch.Generator().manual_seed(42))[:sample_size]
+    print(f"sample_indices: {sample_indices}")
     
     # Collect all indices from sampled examples
     all_indices = []
@@ -2172,6 +2270,9 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
     with torch.no_grad():
         for idx in sample_indices:
             prompts, cots, prompt_masks, cot_masks = dataset[idx]
+            print(f"example prompt & cots:")
+            print(f"prompt : {prompts}")
+            print(f"cots : {cots}")
             
             # Move to device
             prompts = prompts.unsqueeze(0).to(device)  # Add batch dimension
@@ -2205,6 +2306,7 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
                 
                 if indices is not None:
                     all_indices.append(indices.flatten())
+                    print(f"indices.flatten(): {indices.flatten()}")
                     
             except Exception as e:
                 print(f"Warning: Failed to compute indices for sample {idx}: {e}")
@@ -2224,9 +2326,14 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
             minlength=model.vector_quantizer.num_embeddings
         )
     ).long()
+    print(f"counts: {counts}")
     
     # Compute perplexity from counts
     perplexity = compute_perplexity(counts, "counts")
+    print(f"perplexity: {perplexity}")
+
+    if model_was_training:
+        model.train()
     
     return counts, perplexity.item()
 
@@ -2279,10 +2386,28 @@ def main():
                        help='Override batch size from config')
     parser.add_argument('--simple', action='store_true', default=False,
                        help='Use SimpleGPT2VQVAETrainer and SimpleGPT2VQVAE model (default: False)')
+    parser.add_argument('--enhanced', action='store_true', default=False,
+                       help='Use EnhancedGPT2VQVAETrainer and EnhancedGPT2VQVAE model (default: False)')
     parser.add_argument('--use-vq', action='store_true', default=None,
                        help='Enable vector quantization (default: True for SimpleGPT2VQVAE, True for GPT2VQVAE)')
     parser.add_argument('--no-vq', action='store_true', default=False,
                        help='Disable vector quantization (passes encoder outputs directly to decoder)')
+    
+    # Enhanced VQ-VAE specific arguments
+    parser.add_argument('--ema-decay', type=float, default=None,
+                       help='Override EMA decay rate for enhanced VQ-VAE (default: 0.99)')
+    parser.add_argument('--diversity-gamma', type=float, default=None,
+                       help='Override diversity loss weight for enhanced VQ-VAE (default: 0.1)')
+    parser.add_argument('--reset-threshold', type=float, default=None,
+                       help='Override codebook reset threshold for enhanced VQ-VAE (default: 0.1)')
+    parser.add_argument('--reset-frequency', type=int, default=None,
+                       help='Override codebook reset frequency for enhanced VQ-VAE (default: 1000)')
+    parser.add_argument('--disable-ema', action='store_true', default=False,
+                       help='Disable EMA updates in enhanced VQ-VAE')
+    parser.add_argument('--enhanced-codebook-tracking', action='store_true', default=None,
+                       help='Enable enhanced codebook tracking (default: True for enhanced VQ-VAE)')
+    parser.add_argument('--no-enhanced-codebook-tracking', action='store_true', default=False,
+                       help='Disable enhanced codebook tracking')
     
     args = parser.parse_args()
     
@@ -2294,7 +2419,9 @@ def main():
     
     # Handle create-config option
     if args.create_config:
-        create_default_config(args.create_config)
+        # Determine if enhanced VQ-VAE config is requested
+        enhanced_vq = args.enhanced
+        create_default_config(args.create_config, enhanced_vq=enhanced_vq)
         return
     
     try:
@@ -2363,6 +2490,46 @@ def main():
             training_config['use_vq'] = True
             print("Using default use_vq=True")
         
+        # Handle enhanced VQ-VAE specific arguments
+        if args.enhanced:
+            print("Enhanced VQ-VAE mode enabled")
+            
+            # Override enhanced VQ-VAE parameters if specified
+            if args.ema_decay is not None:
+                model_config['ema_decay'] = args.ema_decay
+                print(f"Overriding ema_decay to: {args.ema_decay}")
+            
+            if args.diversity_gamma is not None:
+                model_config['diversity_gamma'] = args.diversity_gamma
+                print(f"Overriding diversity_gamma to: {args.diversity_gamma}")
+            
+            if args.reset_threshold is not None:
+                model_config['reset_threshold'] = args.reset_threshold
+                print(f"Overriding reset_threshold to: {args.reset_threshold}")
+            
+            if args.reset_frequency is not None:
+                model_config['reset_frequency'] = args.reset_frequency
+                print(f"Overriding reset_frequency to: {args.reset_frequency}")
+            
+            if args.disable_ema:
+                model_config['use_ema'] = False
+                print("Disabling EMA updates (--disable-ema flag)")
+            
+            # Handle enhanced codebook tracking
+            if args.no_enhanced_codebook_tracking:
+                training_config['enhanced_codebook_tracking'] = False
+                print("Disabling enhanced codebook tracking (--no-enhanced-codebook-tracking flag)")
+            elif args.enhanced_codebook_tracking is not None:
+                training_config['enhanced_codebook_tracking'] = args.enhanced_codebook_tracking
+                print(f"Setting enhanced_codebook_tracking to: {args.enhanced_codebook_tracking}")
+            else:
+                # Default behavior: enable enhanced codebook tracking for enhanced VQ-VAE
+                training_config['enhanced_codebook_tracking'] = True
+                print("Using default enhanced_codebook_tracking=True for enhanced VQ-VAE")
+        else:
+            # For non-enhanced models, disable enhanced codebook tracking
+            training_config['enhanced_codebook_tracking'] = False
+        
         # Set device
         if args.device:
             device = args.device
@@ -2388,7 +2555,12 @@ def main():
 
         # Run demonstration if requested
         if args.demonstrate:
-            model_type = "SimpleGPT2VQVAE" if args.simple else "GPT2VQVAE"
+            if args.enhanced:
+                model_type = "EnhancedGPT2VQVAE"
+            elif args.simple:
+                model_type = "SimpleGPT2VQVAE"
+            else:
+                model_type = "GPT2VQVAE"
             print(f"\nRunning demonstration with checkpoint: {args.demonstrate}")
             print(f"Using model type: {model_type}")
             demonstrate_model_from_checkpoint(
@@ -2404,7 +2576,12 @@ def main():
         
         # Run custom demonstration if requested
         if args.demonstrate_custom:
-            model_type = "SimpleGPT2VQVAE" if args.simple else "GPT2VQVAE"
+            if args.enhanced:
+                model_type = "EnhancedGPT2VQVAE"
+            elif args.simple:
+                model_type = "SimpleGPT2VQVAE"
+            else:
+                model_type = "GPT2VQVAE"
             print(f"\nRunning custom demonstration with checkpoint: {args.demonstrate_custom}")
             print(f"Using model type: {model_type}")
             print(f"Prompt file: {args.prompt_file}")
@@ -2439,14 +2616,18 @@ def main():
         if args.resume_from:
             model_config['use_pretrained_encoder'] = False
             model_config['use_pretrained_decoder'] = False
-            if args.simple:
+            if args.enhanced:
+                trainer = EnhancedGPT2VQVAETrainer(model_config, training_config, device=device)
+            elif args.simple:
                 trainer = SimpleGPT2VQVAETrainer(model_config, training_config, device=device)
             else:
                 trainer = GPT2VQVAETrainer(model_config, training_config, device=device)
             print(f"Resuming from checkpoint: {args.resume_from}")
             trainer.load_checkpoint(args.resume_from)
         else:
-            if args.simple:
+            if args.enhanced:
+                trainer = EnhancedGPT2VQVAETrainer(model_config, training_config, device=device)
+            elif args.simple:
                 trainer = SimpleGPT2VQVAETrainer(model_config, training_config, device=device)
             else:
                 trainer = GPT2VQVAETrainer(model_config, training_config, device=device)
@@ -2531,6 +2712,10 @@ class SimpleGPT2VQVAETrainer(GPT2VQVAETrainer):
     """
     def __init__(self, model_config: Dict[str, Any], training_config: Dict[str, Any], device: str = "cuda" if torch.cuda.is_available() else "cpu"):
         super().__init__(model_config, training_config, device)
+
+        self.ensure_numeric_types(model_config)
+        self.ensure_numeric_types(training_config)
+
         # Replace the model with SimpleGPT2VQVAE
         self.model = SimpleGPT2VQVAE(**model_config).to(device)
         # Re-initialize optimizer and scheduler for the new model
@@ -2587,6 +2772,431 @@ class SimpleGPT2VQVAETrainer(GPT2VQVAETrainer):
             
         return total_loss_batch, vq_loss, perplexity, indices
 
+
+class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
+    """
+    Trainer for EnhancedGPT2VQVAE, inherits from GPT2VQVAETrainer but uses EnhancedGPT2VQVAE as the model.
+    
+    This enhanced trainer provides additional functionality for the enhanced vector quantizer:
+    - EMA (Exponential Moving Average) updates for codebook learning
+    - Diversity-promoting loss to encourage uniform codebook usage
+    - Automatic codebook reset mechanisms for unused embeddings
+    - Enhanced monitoring and statistics for codebook health
+    
+    The enhanced codebook training scheme reduces to normal VQ-VAE training when:
+    - ema_decay = 0.0 (no EMA updates)
+    - diversity_gamma = 0.0 (no diversity loss)
+    - reset_threshold = 0.0 (no automatic resets)
+    - use_ema = False (EMA disabled)
+    """
+    def __init__(self, model_config: Dict[str, Any], training_config: Dict[str, Any], device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+        # Filter out enhanced VQ-VAE specific parameters for parent constructor
+        enhanced_vq_params = {
+            'ema_decay', 'diversity_gamma', 'reset_threshold', 
+            'reset_frequency', 'use_ema'
+        }
+        
+        # Create filtered configs for parent constructor
+        filtered_model_config = {k: v for k, v in model_config.items() if k not in enhanced_vq_params}
+        filtered_training_config = {k: v for k, v in training_config.items() if k != 'enhanced_codebook_tracking'}
+        
+        # Store original configs for enhanced features
+        self.original_model_config = model_config
+        self.original_training_config = training_config
+        
+        # Set up enhanced tracking functions
+        enhanced_tracking_functions = {
+            'track_codebook_usage': self._enhanced_track_codebook_usage,
+            'save_codebook_plots': self._enhanced_save_codebook_plots,
+            'tracking_enabled': training_config.get('enhanced_codebook_tracking', True)
+        }
+        
+        # Call parent constructor with filtered configs and enhanced tracking functions
+        super().__init__(filtered_model_config, filtered_training_config, device, enhanced_tracking_functions)
+
+        self.ensure_numeric_types(self.original_model_config)
+        self.ensure_numeric_types(self.original_training_config)
+        
+        # Replace the model with EnhancedGPT2VQVAE using original config
+        self.model = EnhancedGPT2VQVAE(**model_config).to(device)
+        
+        # Re-initialize optimizer and scheduler for the new model
+        self.optimizer = optim.AdamW(
+            self.model.parameters(),
+            lr=training_config['learning_rate'],
+            weight_decay=training_config.get('weight_decay', 0.01),
+            betas=(training_config.get('beta1', 0.9), training_config.get('beta2', 0.999))
+        )
+        if training_config.get('use_lr_scheduler', True):
+            self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer,
+                T_max=training_config['num_epochs'],
+                eta_min=training_config.get('min_lr', 1e-6)
+            )
+        else:
+            self.scheduler = None
+        if self.use_gradient_checkpointing:
+            self.model.gradient_checkpointing_enable()
+            print("Gradient checkpointing enabled for EnhancedGPT2VQVAE")
+        
+        # Enhanced codebook tracking
+        self.enhanced_codebook_tracking = training_config.get('enhanced_codebook_tracking', True)
+        self.codebook_stats_history = []
+        self.diversity_history = []
+        
+        if self.enhanced_codebook_tracking:
+            print("Enhanced codebook tracking enabled")
+            print(f"EMA decay: {model_config.get('ema_decay', 0.99)}")
+            print(f"Diversity gamma: {model_config.get('diversity_gamma', 0.1)}")
+            print(f"Reset threshold: {model_config.get('reset_threshold', 0.1)}")
+            print(f"Reset frequency: {model_config.get('reset_frequency', 1000)}")
+            print(f"Use EMA: {model_config.get('use_ema', True)}")
+        else:
+            print("Enhanced codebook tracking disabled")
+        
+        print("EnhancedGPT2VQVAE trainer initialized successfully.")
+    
+    def _enhanced_track_codebook_usage(self, dataset: Any, measurement_point: int) -> None:
+        """
+        Enhanced codebook tracking with additional statistics.
+        
+        Args:
+            dataset: Dataset to sample from
+            measurement_point: Current measurement point index
+        """
+        # First, call the parent class's default codebook tracking
+        super()._default_track_codebook_usage(dataset, measurement_point)
+        
+        # Then, call the enhanced codebook tracking
+        if not self.enhanced_codebook_tracking:
+            return
+        
+        try:
+            # Get enhanced codebook statistics
+            codebook_stats = self.model.get_vector_quantizer_stats()
+            diversity_metrics = self.model.get_embedding_diversity()
+            
+            # Store results
+            self.codebook_stats_history.append(codebook_stats)
+            self.diversity_history.append(diversity_metrics)
+            
+            # Print enhanced statistics
+            print(f"\nEnhanced Codebook tracking (point {measurement_point}):")
+            print(f"  Total usage: {codebook_stats['total_usage']}")
+            print(f"  Unused codes: {codebook_stats['unused_codes']}/{self.model.vector_quantizer.num_embeddings} "
+                  f"({codebook_stats['unused_ratio']*100:.1f}%)")
+            print(f"  Reset counter: {codebook_stats['reset_counter']}")
+            
+            # Print rarely used codes statistics
+            codes_below_05 = codebook_stats.get('codes_below_0.5_percent', 0)
+            codes_below_1 = codebook_stats.get('codes_below_1.0_percent', 0)
+            codes_below_5 = codebook_stats.get('codes_below_5.0_percent', 0)
+            print(f"  Codes below 0.5%: {codes_below_05}")
+            print(f"  Codes below 1.0%: {codes_below_1}")
+            print(f"  Codes below 5.0%: {codes_below_5}")
+            
+            print(f"  Mean similarity: {diversity_metrics['mean_similarity']:.4f}")
+            print(f"  Embedding norm mean: {diversity_metrics['embedding_norm_mean']:.4f}")
+            
+            if 'ema_cluster_sizes' in codebook_stats:
+                ema_usage = (codebook_stats['ema_cluster_sizes'] > 0).sum().item()
+                print(f"  EMA active clusters: {ema_usage}/{self.model.vector_quantizer.num_embeddings}")
+            
+        except Exception as e:
+            print(f"Warning: Failed to track enhanced codebook usage: {e}")
+    
+    def _enhanced_save_codebook_plots(self, save_dir: str, epoch: int) -> None:
+        """
+        Save enhanced codebook tracking visualizations.
+        
+        Args:
+            save_dir: Directory to save plots
+            epoch: Current epoch number
+        """
+        # First, call the parent class's default codebook plotting
+        super()._default_save_codebook_plots(save_dir, epoch)
+        
+        # Then, save the enhanced codebook plots
+        if not self.enhanced_codebook_tracking or not self.codebook_stats_history:
+            return
+        
+        try:
+            # Save enhanced statistics plots
+            stats_path = os.path.join(save_dir, f"enhanced_codebook_stats_epoch_{epoch}.png")
+            self._plot_enhanced_codebook_stats(stats_path)
+            
+            # Save diversity evolution plots
+            diversity_path = os.path.join(save_dir, f"codebook_diversity_evolution_epoch_{epoch}.png")
+            self._plot_diversity_evolution(diversity_path)
+            
+            # Save dedicated rarely used codes plot
+            rarely_used_path = os.path.join(save_dir, f"rarely_used_codes_epoch_{epoch}.png")
+            self._plot_rarely_used_codes(rarely_used_path)
+            
+            print(f"Enhanced codebook plots saved to {save_dir}")
+            
+        except Exception as e:
+            print(f"Warning: Failed to save enhanced codebook plots: {e}")
+    
+    def _forward_pass(self, prompts, cots, prompt_masks, cot_masks):
+        """Helper function for forward pass and loss calculation with enhanced VQ features"""
+        
+        if self.use_mixed_precision:
+            with autocast('cuda'):
+                _, output_logits, vq_loss, perplexity, indices = self.model(
+                    prompt=prompts,
+                    cot_sequences=cots,
+                    cot_mask=cot_masks,
+                    prompt_mask=prompt_masks,
+                    inference=False,
+                    quantize_cot_only=self.training_config.get('quantize_cot_only', True)
+                )
+                recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
+                total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
+        else:
+            _, output_logits, vq_loss, perplexity, indices = self.model(
+                prompt=prompts,
+                cot_sequences=cots,
+                cot_mask=cot_masks,
+                prompt_mask=prompt_masks,
+                inference=False,
+                quantize_cot_only=self.training_config.get('quantize_cot_only', True)
+            )
+            recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
+            total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
+            
+        return total_loss_batch, vq_loss, perplexity, indices
+    
+    def _plot_enhanced_codebook_stats(self, save_path: str) -> None:
+        """Plot enhanced codebook statistics over time."""
+        if not self.codebook_stats_history:
+            return
+        
+        # Create a larger figure to accommodate more plots
+        fig, axes = plt.subplots(3, 2, figsize=(15, 15))
+        
+        # Extract data
+        epochs = list(range(len(self.codebook_stats_history)))
+        total_usage = [stats['total_usage'] for stats in self.codebook_stats_history]
+        unused_ratio = [stats['unused_ratio'] for stats in self.codebook_stats_history]
+        reset_counter = [stats['reset_counter'] for stats in self.codebook_stats_history]
+        
+        # Extract rarely used codes data
+        codes_below_05 = [stats.get('codes_below_0.5_percent', 0) for stats in self.codebook_stats_history]
+        codes_below_1 = [stats.get('codes_below_1.0_percent', 0) for stats in self.codebook_stats_history]
+        codes_below_5 = [stats.get('codes_below_5.0_percent', 0) for stats in self.codebook_stats_history]
+        
+        # Plot total usage
+        axes[0, 0].plot(epochs, total_usage, marker='o')
+        axes[0, 0].set_title('Total Codebook Usage')
+        axes[0, 0].set_xlabel('Measurement Point')
+        axes[0, 0].set_ylabel('Total Usage')
+        axes[0, 0].grid(True)
+        
+        # Plot unused ratio
+        axes[0, 1].plot(epochs, unused_ratio, marker='s', color='red')
+        axes[0, 1].set_title('Unused Code Ratio')
+        axes[0, 1].set_xlabel('Measurement Point')
+        axes[0, 1].set_ylabel('Unused Ratio')
+        axes[0, 1].grid(True)
+        
+        # Plot reset counter
+        axes[1, 0].plot(epochs, reset_counter, marker='^', color='green')
+        axes[1, 0].set_title('Reset Counter')
+        axes[1, 0].set_xlabel('Measurement Point')
+        axes[1, 0].set_ylabel('Reset Count')
+        axes[1, 0].grid(True)
+        
+        # Plot rarely used codes (stacked area plot)
+        axes[1, 1].fill_between(epochs, 0, codes_below_05, alpha=0.7, label='Below 0.5%', color='lightcoral')
+        axes[1, 1].fill_between(epochs, codes_below_05, codes_below_1, alpha=0.7, label='0.5-1.0%', color='orange')
+        axes[1, 1].fill_between(epochs, codes_below_1, codes_below_5, alpha=0.7, label='1.0-5.0%', color='gold')
+        axes[1, 1].set_title('Rarely Used Codes Distribution')
+        axes[1, 1].set_xlabel('Measurement Point')
+        axes[1, 1].set_ylabel('Number of Codes')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True)
+        
+        # Plot EMA cluster sizes if available
+        if 'ema_cluster_sizes' in self.codebook_stats_history[0]:
+            ema_active = [(stats['ema_cluster_sizes'] > 0).sum().item() for stats in self.codebook_stats_history]
+            axes[2, 0].plot(epochs, ema_active, marker='d', color='purple')
+            axes[2, 0].set_title('EMA Active Clusters')
+            axes[2, 0].set_xlabel('Measurement Point')
+            axes[2, 0].set_ylabel('Active Clusters')
+            axes[2, 0].grid(True)
+        else:
+            axes[2, 0].text(0.5, 0.5, 'EMA not enabled', ha='center', va='center', transform=axes[2, 0].transAxes)
+            axes[2, 0].set_title('EMA Active Clusters')
+        
+        # Plot individual rarely used codes lines for better visibility
+        axes[2, 1].plot(epochs, codes_below_05, marker='o', label='Below 0.5%', color='red')
+        axes[2, 1].plot(epochs, codes_below_1, marker='s', label='Below 1.0%', color='orange')
+        axes[2, 1].plot(epochs, codes_below_5, marker='^', label='Below 5.0%', color='gold')
+        axes[2, 1].set_title('Rarely Used Codes (Individual Lines)')
+        axes[2, 1].set_xlabel('Measurement Point')
+        axes[2, 1].set_ylabel('Number of Codes')
+        axes[2, 1].legend()
+        axes[2, 1].grid(True)
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _plot_rarely_used_codes(self, save_path: str) -> None:
+        """Plot detailed rarely used codes statistics over time."""
+        if not self.codebook_stats_history:
+            return
+        
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        
+        # Extract data
+        epochs = list(range(len(self.codebook_stats_history)))
+        codes_below_05 = [stats.get('codes_below_0.5_percent', 0) for stats in self.codebook_stats_history]
+        codes_below_1 = [stats.get('codes_below_1.0_percent', 0) for stats in self.codebook_stats_history]
+        codes_below_5 = [stats.get('codes_below_5.0_percent', 0) for stats in self.codebook_stats_history]
+        total_embeddings = self.model.vector_quantizer.num_embeddings
+        
+        # Plot 1: Individual lines for each threshold
+        axes[0, 0].plot(epochs, codes_below_05, marker='o', label='Below 0.5%', color='red', linewidth=2)
+        axes[0, 0].plot(epochs, codes_below_1, marker='s', label='Below 1.0%', color='orange', linewidth=2)
+        axes[0, 0].plot(epochs, codes_below_5, marker='^', label='Below 5.0%', color='gold', linewidth=2)
+        axes[0, 0].set_title('Rarely Used Codes Over Time')
+        axes[0, 0].set_xlabel('Measurement Point')
+        axes[0, 0].set_ylabel('Number of Codes')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True)
+        
+        # Plot 2: Stacked area plot
+        axes[0, 1].fill_between(epochs, 0, codes_below_05, alpha=0.7, label='Below 0.5%', color='lightcoral')
+        axes[0, 1].fill_between(epochs, codes_below_05, codes_below_1, alpha=0.7, label='0.5-1.0%', color='orange')
+        axes[0, 1].fill_between(epochs, codes_below_1, codes_below_5, alpha=0.7, label='1.0-5.0%', color='gold')
+        axes[0, 1].set_title('Rarely Used Codes Distribution (Stacked)')
+        axes[0, 1].set_xlabel('Measurement Point')
+        axes[0, 1].set_ylabel('Number of Codes')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True)
+        
+        # Plot 3: Percentage of total embeddings
+        codes_below_05_pct = [c / total_embeddings * 100 for c in codes_below_05]
+        codes_below_1_pct = [c / total_embeddings * 100 for c in codes_below_1]
+        codes_below_5_pct = [c / total_embeddings * 100 for c in codes_below_5]
+        
+        axes[1, 0].plot(epochs, codes_below_05_pct, marker='o', label='Below 0.5%', color='red', linewidth=2)
+        axes[1, 0].plot(epochs, codes_below_1_pct, marker='s', label='Below 1.0%', color='orange', linewidth=2)
+        axes[1, 0].plot(epochs, codes_below_5_pct, marker='^', label='Below 5.0%', color='gold', linewidth=2)
+        axes[1, 0].set_title('Rarely Used Codes (% of Total)')
+        axes[1, 0].set_xlabel('Measurement Point')
+        axes[1, 0].set_ylabel('Percentage of Total Embeddings')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True)
+        
+        # Plot 4: Heatmap-style visualization of the evolution
+        # Create a matrix where each row represents a measurement point and columns represent different thresholds
+        heatmap_data = np.array([codes_below_05, codes_below_1, codes_below_5]).T
+        im = axes[1, 1].imshow(heatmap_data, cmap='YlOrRd', aspect='auto', interpolation='nearest')
+        axes[1, 1].set_title('Rarely Used Codes Heatmap')
+        axes[1, 1].set_xlabel('Threshold Level')
+        axes[1, 1].set_ylabel('Measurement Point')
+        axes[1, 1].set_xticks([0, 1, 2])
+        axes[1, 1].set_xticklabels(['0.5%', '1.0%', '5.0%'])
+        axes[1, 1].set_yticks(range(0, len(epochs), max(1, len(epochs)//5)))
+        axes[1, 1].set_yticklabels([epochs[i] for i in range(0, len(epochs), max(1, len(epochs)//5))])
+        
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=axes[1, 1])
+        cbar.set_label('Number of Codes')
+        
+        # Add text annotations to heatmap
+        for i in range(len(epochs)):
+            for j in range(3):
+                value = heatmap_data[i, j]
+                if value > 0:  # Only show text for non-zero values
+                    axes[1, 1].text(j, i, str(int(value)), ha='center', va='center', 
+                                   color='white' if value > np.max(heatmap_data) / 2 else 'black', 
+                                   fontweight='bold', fontsize=8)
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _plot_diversity_evolution(self, save_path: str) -> None:
+        """Plot codebook diversity metrics over time."""
+        if not self.diversity_history:
+            return
+        
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        
+        # Extract data
+        epochs = list(range(len(self.diversity_history)))
+        mean_similarity = [metrics['mean_similarity'] for metrics in self.diversity_history]
+        max_similarity = [metrics['max_similarity'] for metrics in self.diversity_history]
+        embedding_norm_mean = [metrics['embedding_norm_mean'] for metrics in self.diversity_history]
+        embedding_norm_std = [metrics['embedding_norm_std'] for metrics in self.diversity_history]
+        
+        # Plot mean similarity
+        axes[0, 0].plot(epochs, mean_similarity, marker='o', color='blue')
+        axes[0, 0].set_title('Mean Embedding Similarity')
+        axes[0, 0].set_xlabel('Measurement Point')
+        axes[0, 0].set_ylabel('Mean Similarity')
+        axes[0, 0].grid(True)
+        
+        # Plot max similarity
+        axes[0, 1].plot(epochs, max_similarity, marker='s', color='red')
+        axes[0, 1].set_title('Max Embedding Similarity')
+        axes[0, 1].set_xlabel('Measurement Point')
+        axes[0, 1].set_ylabel('Max Similarity')
+        axes[0, 1].grid(True)
+        
+        # Plot embedding norm mean
+        axes[1, 0].plot(epochs, embedding_norm_mean, marker='^', color='green')
+        axes[1, 0].set_title('Mean Embedding Norm')
+        axes[1, 0].set_xlabel('Measurement Point')
+        axes[1, 0].set_ylabel('Mean Norm')
+        axes[1, 0].grid(True)
+        
+        # Plot embedding norm std
+        axes[1, 1].plot(epochs, embedding_norm_std, marker='d', color='purple')
+        axes[1, 1].set_title('Embedding Norm Std')
+        axes[1, 1].set_xlabel('Measurement Point')
+        axes[1, 1].set_ylabel('Norm Std')
+        axes[1, 1].grid(True)
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def manual_codebook_reset(self, reset_strategy='random'):
+        """
+        Manually reset the codebook using the enhanced vector quantizer.
+        
+        Args:
+            reset_strategy (str): Strategy for reset - 'random', 'uniform', or 'kmeans'
+        """
+        self.model.manual_codebook_reset(reset_strategy)
+    
+    def set_ema_decay(self, new_decay):
+        """
+        Update the EMA decay rate in the enhanced vector quantizer.
+        
+        Args:
+            new_decay (float): New EMA decay rate
+        """
+        self.model.set_ema_decay(new_decay)
+    
+    def disable_ema(self):
+        """Disable EMA updates in the enhanced vector quantizer."""
+        self.model.disable_ema()
+    
+    def enable_ema(self, decay=None):
+        """
+        Enable EMA updates in the enhanced vector quantizer.
+        
+        Args:
+            decay (float, optional): New EMA decay rate
+        """
+        self.model.enable_ema(decay)
+
 def demonstrate_custom_prompt_cot(checkpoint_path: str,
                                  model_config: Dict[str, Any],
                                  prompt_file: str = "test_prompt.txt",
@@ -2610,7 +3220,10 @@ def demonstrate_custom_prompt_cot(checkpoint_path: str,
     print(f"Loading {model_type} model from checkpoint: {checkpoint_path}")
     
     # Initialize model based on type
-    if model_type == "SimpleGPT2VQVAE":
+    if model_type == "EnhancedGPT2VQVAE":
+        model = EnhancedGPT2VQVAE(**model_config).to(device)
+        print(f"Initialized EnhancedGPT2VQVAE model")
+    elif model_type == "SimpleGPT2VQVAE":
         model = SimpleGPT2VQVAE(**model_config).to(device)
         print(f"Initialized SimpleGPT2VQVAE model with use_vq={use_vq}")
     else:
@@ -2916,8 +3529,11 @@ def demonstrate_custom_prompt_cot(checkpoint_path: str,
             
             # Create heatmap for teacher forcing
             heatmap_path_tf = os.path.join(os.path.dirname(checkpoint_path), "codebook_usage_tf_custom.png")
+            # Convert indices to counts
+            counts_tf = torch.bincount(indices_tf[indices_tf < num_embeddings], 
+                                      minlength=num_embeddings)
             create_codebook_usage_heatmap(
-                indices_tf, 
+                counts_tf, 
                 num_embeddings=num_embeddings,
                 title=f"Teacher Forcing Codebook Usage - Custom Prompt-CoT",
                 save_path=heatmap_path_tf
@@ -2930,8 +3546,11 @@ def demonstrate_custom_prompt_cot(checkpoint_path: str,
             
             # Create heatmap for auto-regressive
             heatmap_path_ar = os.path.join(os.path.dirname(checkpoint_path), "codebook_usage_ar_custom.png")
+            # Convert indices to counts
+            counts_ar = torch.bincount(indices_ar[indices_ar < num_embeddings], 
+                                      minlength=num_embeddings)
             create_codebook_usage_heatmap(
-                indices_ar, 
+                counts_ar, 
                 num_embeddings=num_embeddings,
                 title=f"Auto-regressive Codebook Usage - Custom Prompt-CoT",
                 save_path=heatmap_path_ar
