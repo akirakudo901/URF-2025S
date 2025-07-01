@@ -2190,9 +2190,6 @@ def create_codebook_usage_timeline_plot(codebook_history: List[torch.Tensor],
     
     # Convert to numpy arrays
     history_np = [counts.numpy() for counts in codebook_history]
-    # TODO DELETE
-    print(f"codebook_history:")
-    [print(counts) for counts in codebook_history]
     
     # Create 3D plot
     fig = plt.figure(figsize=figsize)
@@ -2262,7 +2259,6 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
         print(f"Warning: Requested sample_size {sample_size} exceeds dataset size {total_samples}")
     
     sample_indices = torch.randperm(total_samples, generator=torch.Generator().manual_seed(42))[:sample_size]
-    print(f"sample_indices: {sample_indices}")
     
     # Collect all indices from sampled examples
     all_indices = []
@@ -2270,9 +2266,6 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
     with torch.no_grad():
         for idx in sample_indices:
             prompts, cots, prompt_masks, cot_masks = dataset[idx]
-            print(f"example prompt & cots:")
-            print(f"prompt : {prompts}")
-            print(f"cots : {cots}")
             
             # Move to device
             prompts = prompts.unsqueeze(0).to(device)  # Add batch dimension
@@ -2306,7 +2299,6 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
                 
                 if indices is not None:
                     all_indices.append(indices.flatten())
-                    print(f"indices.flatten(): {indices.flatten()}")
                     
             except Exception as e:
                 print(f"Warning: Failed to compute indices for sample {idx}: {e}")
@@ -2326,11 +2318,9 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
             minlength=model.vector_quantizer.num_embeddings
         )
     ).long()
-    print(f"counts: {counts}")
     
     # Compute perplexity from counts
     perplexity = compute_perplexity(counts, "counts")
-    print(f"perplexity: {perplexity}")
 
     if model_was_training:
         model.train()
