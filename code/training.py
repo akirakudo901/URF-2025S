@@ -2965,10 +2965,6 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             diversity_path = os.path.join(save_dir, f"codebook_diversity_evolution_epoch_{epoch}.png")
             self._plot_diversity_evolution(diversity_path)
             
-            # Save dedicated rarely used codes plot
-            rarely_used_path = os.path.join(save_dir, f"rarely_used_codes_epoch_{epoch}.png")
-            self._plot_rarely_used_codes(rarely_used_path)
-            
             print(f"Enhanced codebook plots saved to {save_dir}")
             
         except Exception as e:
@@ -2992,6 +2988,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         codes_below_05 = [stats.get('codes_below_0.5_percent', 0) for stats in self.codebook_stats_history]
         codes_below_1 = [stats.get('codes_below_1.0_percent', 0) for stats in self.codebook_stats_history]
         codes_below_5 = [stats.get('codes_below_5.0_percent', 0) for stats in self.codebook_stats_history]
+        unused_codes = [stats.get('unused_codes', 0) for stats in self.codebook_stats_history]
         
         # Plot total usage
         axes[0, 0].plot(epochs, total_usage, marker='o')
@@ -3014,11 +3011,12 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         axes[1, 0].set_ylabel('Reset Count')
         axes[1, 0].grid(True)
         
-        # Plot rarely used codes (stacked area plot)
-        axes[1, 1].fill_between(epochs, 0, codes_below_05, alpha=0.7, label='Below 0.5%', color='lightcoral')
-        axes[1, 1].fill_between(epochs, codes_below_05, codes_below_1, alpha=0.7, label='0.5-1.0%', color='orange')
-        axes[1, 1].fill_between(epochs, codes_below_1, codes_below_5, alpha=0.7, label='1.0-5.0%', color='gold')
-        axes[1, 1].set_title('Rarely Used Codes Distribution')
+        # Plot rarely used codes (stacked area plot) - now including 0% usage
+        axes[1, 1].fill_between(epochs, 0, unused_codes, alpha=0.7, label='0% (Unused)', color='darkred')
+        axes[1, 1].fill_between(epochs, unused_codes, unused_codes + codes_below_05, alpha=0.7, label='0-0.5%', color='lightcoral')
+        axes[1, 1].fill_between(epochs, unused_codes + codes_below_05, unused_codes + codes_below_1, alpha=0.7, label='0.5-1.0%', color='orange')
+        axes[1, 1].fill_between(epochs, unused_codes + codes_below_1, unused_codes + codes_below_5, alpha=0.7, label='1.0-5.0%', color='gold')
+        axes[1, 1].set_title('Code Usage Distribution')
         axes[1, 1].set_xlabel('Measurement Point')
         axes[1, 1].set_ylabel('Number of Codes')
         axes[1, 1].legend()
@@ -3036,11 +3034,12 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             axes[2, 0].text(0.5, 0.5, 'EMA not enabled', ha='center', va='center', transform=axes[2, 0].transAxes)
             axes[2, 0].set_title('EMA Active Clusters')
         
-        # Plot individual rarely used codes lines for better visibility
-        axes[2, 1].plot(epochs, codes_below_05, marker='o', label='Below 0.5%', color='red')
-        axes[2, 1].plot(epochs, codes_below_1, marker='s', label='Below 1.0%', color='orange')
-        axes[2, 1].plot(epochs, codes_below_5, marker='^', label='Below 5.0%', color='gold')
-        axes[2, 1].set_title('Rarely Used Codes (Individual Lines)')
+        # Plot individual rarely used codes lines for better visibility - now including 0% usage
+        axes[2, 1].plot(epochs, unused_codes, marker='o', label='0% (Unused)', color='darkred', linewidth=2)
+        axes[2, 1].plot(epochs, codes_below_05, marker='s', label='Below 0.5%', color='red', linewidth=2)
+        axes[2, 1].plot(epochs, codes_below_1, marker='^', label='Below 1.0%', color='orange', linewidth=2)
+        axes[2, 1].plot(epochs, codes_below_5, marker='d', label='Below 5.0%', color='gold', linewidth=2)
+        axes[2, 1].set_title('Code Usage Thresholds (Individual Lines)')
         axes[2, 1].set_xlabel('Measurement Point')
         axes[2, 1].set_ylabel('Number of Codes')
         axes[2, 1].legend()
@@ -3050,82 +3049,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
     
-    def _plot_rarely_used_codes(self, save_path: str) -> None:
-        """Plot detailed rarely used codes statistics over time."""
-        if not self.codebook_stats_history:
-            return
-        
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        
-        # Extract data
-        epochs = list(range(len(self.codebook_stats_history)))
-        codes_below_05 = [stats.get('codes_below_0.5_percent', 0) for stats in self.codebook_stats_history]
-        codes_below_1 = [stats.get('codes_below_1.0_percent', 0) for stats in self.codebook_stats_history]
-        codes_below_5 = [stats.get('codes_below_5.0_percent', 0) for stats in self.codebook_stats_history]
-        total_embeddings = self.model.vector_quantizer.num_embeddings
-        
-        # Plot 1: Individual lines for each threshold
-        axes[0, 0].plot(epochs, codes_below_05, marker='o', label='Below 0.5%', color='red', linewidth=2)
-        axes[0, 0].plot(epochs, codes_below_1, marker='s', label='Below 1.0%', color='orange', linewidth=2)
-        axes[0, 0].plot(epochs, codes_below_5, marker='^', label='Below 5.0%', color='gold', linewidth=2)
-        axes[0, 0].set_title('Rarely Used Codes Over Time')
-        axes[0, 0].set_xlabel('Measurement Point')
-        axes[0, 0].set_ylabel('Number of Codes')
-        axes[0, 0].legend()
-        axes[0, 0].grid(True)
-        
-        # Plot 2: Stacked area plot
-        axes[0, 1].fill_between(epochs, 0, codes_below_05, alpha=0.7, label='Below 0.5%', color='lightcoral')
-        axes[0, 1].fill_between(epochs, codes_below_05, codes_below_1, alpha=0.7, label='0.5-1.0%', color='orange')
-        axes[0, 1].fill_between(epochs, codes_below_1, codes_below_5, alpha=0.7, label='1.0-5.0%', color='gold')
-        axes[0, 1].set_title('Rarely Used Codes Distribution (Stacked)')
-        axes[0, 1].set_xlabel('Measurement Point')
-        axes[0, 1].set_ylabel('Number of Codes')
-        axes[0, 1].legend()
-        axes[0, 1].grid(True)
-        
-        # Plot 3: Percentage of total embeddings
-        codes_below_05_pct = [c / total_embeddings * 100 for c in codes_below_05]
-        codes_below_1_pct = [c / total_embeddings * 100 for c in codes_below_1]
-        codes_below_5_pct = [c / total_embeddings * 100 for c in codes_below_5]
-        
-        axes[1, 0].plot(epochs, codes_below_05_pct, marker='o', label='Below 0.5%', color='red', linewidth=2)
-        axes[1, 0].plot(epochs, codes_below_1_pct, marker='s', label='Below 1.0%', color='orange', linewidth=2)
-        axes[1, 0].plot(epochs, codes_below_5_pct, marker='^', label='Below 5.0%', color='gold', linewidth=2)
-        axes[1, 0].set_title('Rarely Used Codes (% of Total)')
-        axes[1, 0].set_xlabel('Measurement Point')
-        axes[1, 0].set_ylabel('Percentage of Total Embeddings')
-        axes[1, 0].legend()
-        axes[1, 0].grid(True)
-        
-        # Plot 4: Heatmap-style visualization of the evolution
-        # Create a matrix where each row represents a measurement point and columns represent different thresholds
-        heatmap_data = np.array([codes_below_05, codes_below_1, codes_below_5]).T
-        im = axes[1, 1].imshow(heatmap_data, cmap='YlOrRd', aspect='auto', interpolation='nearest')
-        axes[1, 1].set_title('Rarely Used Codes Heatmap')
-        axes[1, 1].set_xlabel('Threshold Level')
-        axes[1, 1].set_ylabel('Measurement Point')
-        axes[1, 1].set_xticks([0, 1, 2])
-        axes[1, 1].set_xticklabels(['0.5%', '1.0%', '5.0%'])
-        axes[1, 1].set_yticks(range(0, len(epochs), max(1, len(epochs)//5)))
-        axes[1, 1].set_yticklabels([epochs[i] for i in range(0, len(epochs), max(1, len(epochs)//5))])
-        
-        # Add colorbar
-        cbar = plt.colorbar(im, ax=axes[1, 1])
-        cbar.set_label('Number of Codes')
-        
-        # Add text annotations to heatmap
-        for i in range(len(epochs)):
-            for j in range(3):
-                value = heatmap_data[i, j]
-                if value > 0:  # Only show text for non-zero values
-                    axes[1, 1].text(j, i, str(int(value)), ha='center', va='center', 
-                                   color='white' if value > np.max(heatmap_data) / 2 else 'black', 
-                                   fontweight='bold', fontsize=8)
-        
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
+
     
     def _plot_diversity_evolution(self, save_path: str) -> None:
         """Plot codebook diversity metrics over time."""
