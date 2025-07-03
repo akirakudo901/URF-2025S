@@ -293,12 +293,12 @@ class EnhancedVectorQuantizer(nn.Module):
             return False
         return self._reset_counter % self.reset_frequency == 0
     
-    def _reset_codebook(self, flat_input, reset_strategy='partial'):
+    def _reset_codebook(self, device, reset_strategy='partial'):
         """
         Reset codebook using data-dependent K-means++ clustering with reservoir samples.
         
         Args:
-            flat_input (torch.Tensor): Current input embeddings for reference
+            device (torch.device): Device to use for tensor operations
             reset_strategy (str): Reset strategy - 'partial' (reset unused codes) or 'full' (reset entire codebook)
         """
         if reset_strategy == 'partial':
@@ -315,7 +315,7 @@ class EnhancedVectorQuantizer(nn.Module):
             
             # Get embeddings for unused codes using reservoir samples
             unused_indices = torch.where(unused_mask)[0]
-            new_embeddings = self._get_embeddings_from_reservoir(num_unused, flat_input.device, "partial reset")
+            new_embeddings = self._get_embeddings_from_reservoir(num_unused, device, "partial reset")
             
             # Update only unused embeddings
             self.embedding.weight.data[unused_indices] = new_embeddings
@@ -331,7 +331,7 @@ class EnhancedVectorQuantizer(nn.Module):
             print("Codebook reset triggered - performing full data-dependent re-initialization")
             
             # Get embeddings for entire codebook using reservoir samples
-            new_embeddings = self._get_embeddings_from_reservoir(self.num_embeddings, flat_input.device, "full reset")
+            new_embeddings = self._get_embeddings_from_reservoir(self.num_embeddings, device, "full reset")
             
             # Update embedding weights with new embeddings
             self.embedding.weight.data.copy_(new_embeddings)
