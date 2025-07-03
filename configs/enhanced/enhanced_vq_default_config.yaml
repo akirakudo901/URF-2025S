@@ -1,0 +1,126 @@
+# Enhanced GPT2VQVAE Configuration
+# This configuration includes enhanced vector quantizer features:
+# - EMA (Exponential Moving Average) updates for codebook learning
+# - Diversity-promoting loss to encourage uniform codebook usage  
+# - Automatic codebook reset mechanisms for unused embeddings
+# - Enhanced monitoring and statistics for codebook health
+#
+# The enhanced codebook training scheme reduces to normal VQ-VAE when:
+# - ema_decay = 0.0 (no EMA updates)
+# - diversity_gamma = 0.0 (no diversity loss)
+# - reset_threshold = 0.0 (no automatic resets)
+# - use_ema = False (EMA disabled)
+
+model_config:
+  # ============================================================================
+  # Core Model Parameters
+  # ============================================================================
+  vocab_size: 50257          # GPT2 vocabulary size
+  d_model: 768              # GPT2 model dimension
+  n_positions: 1024         # Maximum sequence length for GPT2
+  
+  # ============================================================================
+  # VQ-VAE Specific Parameters
+  # ============================================================================
+  num_embeddings: 512       # VQ codebook size
+  commitment_cost: 0.25     # VQ commitment cost
+  aggregation_hidden_dim: 1024  # Aggregation MLP hidden dimension
+  num_thoughts: 40          # Number of parallel sequences
+  
+  # ============================================================================
+  # Enhanced Vector Quantizer Parameters
+  # ============================================================================
+  ema_decay: 0.99           # EMA decay rate for codebook updates
+  diversity_gamma: 0.1      # Weight for diversity-promoting loss
+  reset_threshold: 0.1      # Threshold for codebook reset (usage ratio)
+  reset_frequency: 1000     # Frequency of codebook reset checks
+  use_ema: true             # Whether to use EMA updates
+  
+  # ============================================================================
+  # Pretrained Model Settings
+  # ============================================================================
+  use_pretrained_encoder: true   # Load pretrained weights for encoder
+  use_pretrained_decoder: true   # Load pretrained weights for decoder
+  pretrained_model_name: gpt2    # Use GPT2-Small (124M parameters)
+  
+  # ============================================================================
+  # Encoder Configuration (smaller, more efficient)
+  # ============================================================================
+  encoder_n_layer: 6        # Number of hidden layers in encoder
+  encoder_n_head: 12        # Number of attention heads for encoder
+  encoder_n_inner: null     # Will be set to 4*d_model
+  encoder_dropout: 0.1      # Dropout probability for encoder
+  encoder_activation_function: gelu  # Activation function for encoder
+  
+  # ============================================================================
+  # Decoder Configuration (larger, more powerful)
+  # ============================================================================
+  decoder_n_layer: 12       # Number of hidden layers in decoder
+  decoder_n_head: 12        # Number of attention heads for decoder
+  decoder_n_inner: null     # Will be set to 4*d_model
+  decoder_dropout: 0.1      # Dropout probability for decoder
+  decoder_activation_function: gelu  # Activation function for decoder
+
+training_config:
+  # ============================================================================
+  # Basic Training Parameters
+  # ============================================================================
+  learning_rate: 0.0001     # Learning rate
+  num_epochs: 50            # Number of training epochs
+  batch_size: 2             # Batch size (reduced for memory efficiency)
+  val_split: 0.1            # Fraction of data for validation
+  
+  # ============================================================================
+  # Optimizer Parameters
+  # ============================================================================
+  weight_decay: 0.01        # Weight decay for AdamW
+  beta1: 0.9               # Beta1 for AdamW
+  beta2: 0.999             # Beta2 for AdamW
+  gradient_clip: 1.0       # Gradient clipping norm
+  
+  # ============================================================================
+  # Learning Rate Scheduler
+  # ============================================================================
+  use_lr_scheduler: true    # Whether to use learning rate scheduler
+  min_lr: 1.0e-06          # Minimum learning rate for cosine annealing
+  
+  # ============================================================================
+  # Loss Function Parameters
+  # ============================================================================
+  vq_loss_weight: 1.0      # Weight for VQ loss component
+  quantize_cot_only: true  # Only quantize chain-of-thought sequences
+  pad_token_id: 50256      # Token ID for padding (eos_token for GPT2TokenizerFast)
+  
+  # ============================================================================
+  # Memory Optimization Settings
+  # ============================================================================
+  use_mixed_precision: true           # Enable mixed precision training
+  gradient_accumulation_steps: 4      # Effective batch size = batch_size * gradient_accumulation_steps
+  use_gradient_checkpointing: true    # Enable gradient checkpointing for memory efficiency
+  use_dynamic_batching: false         # Enable for variable sequence lengths
+  max_tokens_per_batch: 8192          # For dynamic batching
+  max_samples: null                   # Limit samples for debugging (set to number for testing)
+  
+  # ============================================================================
+  # Perplexity Threshold Monitoring
+  # ============================================================================
+  perplexity_threshold: 1.5           # Training aborts when 20-step average perplexity goes below this value
+  perplexity_window_size: 20          # Number of steps to average for perplexity threshold check
+  
+  # ============================================================================
+  # Checkpoint and Saving Settings
+  # ============================================================================
+  save_every: 5                       # Save checkpoint every N epochs
+  checkpoint_dir: checkpoints/gpt2vqvae  # Directory for saving checkpoints
+  minimum_batches_for_checkpoint: 200 # Minimum number of batches trained before saving aborted checkpoint
+  
+  # ============================================================================
+  # Monitoring and Logging
+  # ============================================================================
+  num_measurements_per_epoch: 20      # Number of detailed metrics per epoch
+  enhanced_codebook_tracking: true    # Enable enhanced codebook monitoring
+  
+  # ============================================================================
+  # Data Configuration
+  # ============================================================================
+  data_dir: data/GSM8K               # Directory containing training data
