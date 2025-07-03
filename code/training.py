@@ -2826,12 +2826,16 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         self.ensure_numeric_types(self.original_model_config)
         self.ensure_numeric_types(self.original_training_config)
         
-        # Add max_reset_steps to model_config if not present
+        # Manage some model_config entries
         if 'max_reset_steps' not in model_config:
             model_config['max_reset_steps'] = None
+        if 'reset_stop_fraction' in model_config:
+            reset_stop_fraction = model_config["reset_stop_fraction"]
+            clean_model_config = model_config.copy()
+            del clean_model_config["reset_stop_fraction"]
         
         # Replace the model with EnhancedGPT2VQVAE using original config
-        self.model = EnhancedGPT2VQVAE(**model_config).to(device)
+        self.model = EnhancedGPT2VQVAE(**clean_model_config).to(device)
         
         # Re-initialize optimizer and scheduler for the new model
         self.optimizer = optim.AdamW(
