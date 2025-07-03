@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
+from typing import Optional
 
 # Import functions and classes from the base file
 from vqvae_gpt2 import (
@@ -19,20 +20,24 @@ class EnhancedVectorQuantizer(nn.Module):
     def __init__(self, num_embeddings: int, embedding_dim: int, 
                  commitment_cost: float = 0.25, ema_decay: float = 0.99,
                  diversity_gamma: float = 0.1, reset_threshold: float = 0.1,
-                 reset_frequency: int = 1000, use_ema: bool = True):
+                 reset_frequency: int = 1000, use_ema: bool = True,
+                 max_reset_steps: Optional[int] = None):
         """
         Enhanced Vector quantizer initialization with EMA updates and diversity mechanisms.
-
-        :param int num_embeddings: Codebook size.
-        :param int embedding_dim: Dimension of each embedding.
-        :param float commitment_cost: Commitment loss multiplier, defaults to 0.25
-        :param float ema_decay: EMA decay rate for codebook updates, defaults to 0.99
-        :param float diversity_gamma: Weight for diversity-promoting loss, defaults to 0.1
-        :param float reset_threshold: Threshold for codebook reset (usage ratio), defaults to 0.1
-        :param int reset_frequency: Frequency of codebook reset checks, defaults to 1000
-        :param bool use_ema: Whether to use EMA updates, defaults to True
+        
+        Args:
+            num_embeddings: Number of embeddings in the codebook
+            embedding_dim: Dimension of each embedding
+            commitment_cost: Weight for the commitment loss
+            ema_decay: Decay rate for EMA updates
+            diversity_gamma: Weight for diversity-promoting loss
+            reset_threshold: Threshold for triggering codebook reset (usage ratio)
+            reset_frequency: Frequency of checking for codebook reset
+            use_ema: Whether to use EMA updates
+            max_reset_steps: Maximum training steps during which resets are allowed (None = no limit)
         """
-        super(EnhancedVectorQuantizer, self).__init__()
+        super().__init__()
+        
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.commitment_cost = commitment_cost
@@ -41,25 +46,28 @@ class EnhancedVectorQuantizer(nn.Module):
         self.reset_threshold = reset_threshold
         self.reset_frequency = reset_frequency
         self.use_ema = use_ema
+        self.max_reset_steps = max_reset_steps
         
-        # Create embedding table
+        # Initialize embeddings
         self.embedding = nn.Embedding(num_embeddings, embedding_dim)
         # Improved initialization
         self.embedding.weight.data.normal_(mean=0.0, std=0.02)
         
-        # EMA tracking variables
+        # EMA parameters
         if self.use_ema:
             self.register_buffer('_ema_cluster_size', torch.zeros(num_embeddings))
             self.register_buffer('_ema_w', torch.zeros(num_embeddings, embedding_dim))
             self.register_buffer('_ema_decay', torch.tensor(ema_decay))
         
-        # Codebook reset tracking
-        self.register_buffer('_reset_counter', torch.tensor(0))
-        self.register_buffer('_usage_counts', torch.zeros(num_embeddings))
+        # Usage tracking
+        self.register_buffer('_usage_counts', torch.zeros(num_embeddings, dtype=torch.long))
+        self.register_buffer('_reset_counter', torch.zeros(1, dtype=torch.long))
         
-        # Codebook tracking for inference
-        self.register_buffer('_inference_usage_counts', torch.zeros(self.num_embeddings))
-            
+        # Separate inference usage tracking
+        self.register_buffer('_inference_usage_counts', torch.zeros(num_embeddings, dtype=torch.long))
+        
+        # Training step tracking
+        self.register_buffer('_current_step', torch.zeros(1, dtype=torch.long))
         
     def _update_ema(self, flat_input, encoding_indices):
         """
@@ -162,27 +170,17 @@ class EnhancedVectorQuantizer(nn.Module):
         
         return l2_reg + orthogonality_reg
     
-    def _check_codebook_reset(self, encoding_indices):
+    def _check_codebook_reset(self):
         """
         Check if codebook reset is needed based on usage statistics.
         
-        Args:
-            encoding_indices (torch.Tensor): Indices of nearest embeddings
-            
         Returns:
             bool: True if reset is needed, False otherwise
         """
-        # Check reset condition every reset_frequency steps
-        if self._reset_counter % self.reset_frequency == 0:
-            total_usage = self._usage_counts.sum().item()
-            if total_usage > 0:
-                usage_ratio = self._usage_counts / total_usage
-                unused_ratio = (usage_ratio < self.reset_threshold).float().mean().item()
-                
-                if unused_ratio > 0.5:  # If more than 50% of codes are underused
-                    return True
-        
-        return False
+        # Only allow resets for the initial portion of training if max_reset_steps is set
+        if self.max_reset_steps is not None and self._current_step > self.max_reset_steps:
+            return False
+        return self._reset_counter % self.reset_frequency == 0
     
     def _reset_codebook(self, flat_input):
         """
@@ -197,27 +195,26 @@ class EnhancedVectorQuantizer(nn.Module):
         usage_ratio = self._usage_counts / (self._usage_counts.sum().item() + 1e-8)
         unused_mask = usage_ratio < self.reset_threshold
         
-        # Reinitialize unused embeddings
-        if unused_mask.sum().item() > 0:
-            # Use random samples from current input as new embeddings
-            num_unused = unused_mask.sum().item()
-            if flat_input.shape[0] >= num_unused:
-                # Sample random inputs for unused embeddings
-                indices = torch.randperm(flat_input.shape[0])[:num_unused]
-                new_embeddings = flat_input[indices].float()
-            else:
-                # Use random initialization if not enough inputs
-                new_embeddings = torch.randn(num_unused, self.embedding_dim, 
-                                           device=flat_input.device) * 0.02
-            
-            # Update unused embeddings
-            unused_indices = torch.where(unused_mask)[0]
-            self.embedding.weight.data[unused_indices] = new_embeddings
-            
-            # Reset EMA statistics for unused embeddings
-            if self.use_ema:
-                self._ema_cluster_size.data[unused_indices] = 0
-                self._ema_w.data[unused_indices] = 0
+        # THIS RANDOM REINITIALIZATION IS VERY SUBOPTIMAL...
+        # Use random samples from current input as new embeddings
+        num_unused = unused_mask.sum().item()
+        if flat_input.shape[0] >= num_unused:
+            # Sample random inputs for unused embeddings
+            indices = torch.randperm(flat_input.shape[0])[:num_unused]
+            new_embeddings = flat_input[indices].float()
+        else:
+            # Use random initialization if not enough inputs
+            new_embeddings = torch.randn(num_unused, self.embedding_dim, 
+                                        device=flat_input.device) * 0.02
+        
+        # Update unused embeddings
+        unused_indices = torch.where(unused_mask)[0]
+        self.embedding.weight.data[unused_indices] = new_embeddings
+        
+        # Reset EMA statistics for unused embeddings
+        if self.use_ema:
+            self._ema_cluster_size.data[unused_indices] = 0
+            self._ema_w.data[unused_indices] = 0
         
         # Reset usage counts
         self._usage_counts.zero_()
@@ -279,9 +276,10 @@ class EnhancedVectorQuantizer(nn.Module):
             # Update training usage counts and reset counter
             self._usage_counts += current_usage
             self._reset_counter += 1
+            self._current_step += 1
             
             # Check for codebook reset
-            if self._check_codebook_reset(encoding_indices):
+            if self._check_codebook_reset():
                 self._reset_codebook(flat_input)
         else:
             # During inference, update separate inference usage counts
@@ -515,6 +513,10 @@ class EnhancedVectorQuantizer(nn.Module):
             ]
         }
 
+    def set_current_step(self, current_step):
+        """Set the current training step for reset timing control."""
+        self._current_step[0] = current_step
+
 
 class EnhancedGPT2VQVAE(GPT2VQVAE):
     def __init__(self, vocab_size, d_model=768, num_embeddings=512, 
@@ -524,7 +526,7 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
                  pretrained_model_name="gpt2",
                  # Vector Quantizer specific parameters
                  ema_decay=0.99, diversity_gamma=0.1, reset_threshold=0.1,
-                 reset_frequency=1000, use_ema=True,
+                 reset_frequency=1000, use_ema=True, max_reset_steps=None,
                  # Unified parameters (applied to both encoder and decoder if specified)
                  n_layer=12, n_head=12, n_inner=None, dropout=0.1, activation_function="gelu",
                  # Encoder-specific parameters (take precedence over unified if specified)
@@ -534,75 +536,56 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
                  decoder_n_layer=None, decoder_n_head=None, decoder_n_inner=None,
                  decoder_dropout=None, decoder_activation_function=None):
         """
-        Enhanced GPT2-based VQ-VAE model that uses GPT2 as both encoder and decoder.
+        Enhanced GPT2VQVAE with improved vector quantization.
         
-        Args:
-            # Shared parameters (must be the same for both encoder and decoder)
-            vocab_size (int): Vocabulary size
-            d_model (int): Model dimension (default: 768 for GPT2)
-            n_positions (int): Maximum sequence length for GPT2 (default: 1024)
-            
-            # VQ-VAE specific parameters
-            num_embeddings (int): VQ codebook size
-            commitment_cost (float): VQ commitment cost
-            aggregation_hidden_dim (int): Aggregation MLP hidden dimension
-            num_thoughts (int): Number of parallel sequences
-            
-            # Pretrained model settings
-            use_pretrained_encoder (bool): Whether to load pretrained weights for encoder
-            use_pretrained_decoder (bool): Whether to load pretrained weights for decoder
-            pretrained_model_name (str): Name of pretrained model to load (default: "gpt2")
-            
-            # Vector Quantizer specific parameters
-            ema_decay (float): EMA decay rate for codebook updates
-            diversity_gamma (float): Weight for diversity-promoting loss
-            reset_threshold (float): Threshold for codebook reset (usage ratio)
-            reset_frequency (int): Frequency of codebook reset checks
-            use_ema (bool): Whether to use EMA updates
-            
-            # Unified parameters (applied to both encoder and decoder)
-            n_layer (int): Number of hidden layers for both encoder and decoder (default: 12)
-            n_head (int): Number of attention heads for both encoder and decoder (default: 12)
-            n_inner (int, optional): Dimensionality of inner feed-forward layers for both encoder and decoder
-            dropout (float): Dropout probability for both encoder and decoder (default: 0.1)
-            activation_function (str): Activation function for both encoder and decoder (default: "gelu")
-            
-            # Encoder-specific parameters (take precedence over unified if specified)
-            encoder_n_layer (int, optional): Number of hidden layers in the encoder
-            encoder_n_head (int, optional): Number of attention heads for encoder
-            encoder_n_inner (int, optional): Dimensionality of encoder inner feed-forward layers
-            encoder_dropout (float, optional): Dropout probability for encoder
-            encoder_activation_function (str, optional): Activation function for encoder
-            
-            # Decoder-specific parameters (take precedence over unified if specified)
-            decoder_n_layer (int, optional): Number of hidden layers in the decoder
-            decoder_n_head (int, optional): Number of attention heads for decoder
-            decoder_n_inner (int, optional): Dimensionality of decoder inner feed-forward layers
-            decoder_dropout (float, optional): Dropout probability for decoder
-            decoder_activation_function (str, optional): Activation function for decoder
+        This enhanced version includes:
+        - EMA (Exponential Moving Average) updates for codebook learning
+        - Diversity-promoting loss to encourage uniform codebook usage
+        - Automatic codebook reset mechanisms for unused embeddings
+        - Enhanced monitoring and statistics for codebook health
+        
+        The enhanced codebook training scheme reduces to normal VQ-VAE training when:
+        - ema_decay = 0.0 (no EMA updates)
+        - diversity_gamma = 0.0 (no diversity loss)
+        - reset_threshold = 0.0 (no automatic resets)
+        - use_ema = False (EMA disabled)
         """
-        # Call parent constructor with all the base parameters
+        # Extract vector quantizer parameters
+        vq_params = {
+            'num_embeddings': num_embeddings,
+            'embedding_dim': d_model,
+            'commitment_cost': commitment_cost,
+            'ema_decay': ema_decay,
+            'diversity_gamma': diversity_gamma,
+            'reset_threshold': reset_threshold,
+            'reset_frequency': reset_frequency,
+            'use_ema': use_ema,
+            'max_reset_steps': max_reset_steps
+        }
+        
+        # Call parent constructor with remaining parameters
         super().__init__(
             vocab_size=vocab_size,
             d_model=d_model,
-            num_embeddings=num_embeddings,
-            commitment_cost=commitment_cost,
             aggregation_hidden_dim=aggregation_hidden_dim,
             num_thoughts=num_thoughts,
             n_positions=n_positions,
             use_pretrained_encoder=use_pretrained_encoder,
             use_pretrained_decoder=use_pretrained_decoder,
             pretrained_model_name=pretrained_model_name,
+            # Unified parameters
             n_layer=n_layer,
             n_head=n_head,
             n_inner=n_inner,
             dropout=dropout,
             activation_function=activation_function,
+            # Encoder-specific parameters
             encoder_n_layer=encoder_n_layer,
             encoder_n_head=encoder_n_head,
             encoder_n_inner=encoder_n_inner,
             encoder_dropout=encoder_dropout,
             encoder_activation_function=encoder_activation_function,
+            # Decoder-specific parameters
             decoder_n_layer=decoder_n_layer,
             decoder_n_head=decoder_n_head,
             decoder_n_inner=decoder_n_inner,
@@ -610,11 +593,8 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             decoder_activation_function=decoder_activation_function
         )
         
-        # Replace the vector quantizer with the enhanced version
-        self.vector_quantizer = EnhancedVectorQuantizer(
-            num_embeddings, d_model, commitment_cost, ema_decay, 
-            diversity_gamma, reset_threshold, reset_frequency, use_ema
-        )
+        # Replace the vector quantizer with enhanced version
+        self.vector_quantizer = EnhancedVectorQuantizer(**vq_params)
         
         # Store enhanced configuration for checkpoint validation
         self._enhanced_config = {
