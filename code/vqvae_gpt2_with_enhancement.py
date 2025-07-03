@@ -57,6 +57,10 @@ class EnhancedVectorQuantizer(nn.Module):
         self.register_buffer('_reset_counter', torch.tensor(0))
         self.register_buffer('_usage_counts', torch.zeros(num_embeddings))
         
+        # Codebook tracking for inference
+        self.register_buffer('_inference_usage_counts', torch.zeros(self.num_embeddings))
+            
+        
     def _update_ema(self, flat_input, encoding_indices):
         """
         Update EMA statistics for codebook learning.
@@ -281,9 +285,6 @@ class EnhancedVectorQuantizer(nn.Module):
                 self._reset_codebook(flat_input)
         else:
             # During inference, update separate inference usage counts
-            if not hasattr(self, '_inference_usage_counts'):
-                self.register_buffer('_inference_usage_counts', 
-                                     torch.zeros(self.num_embeddings).to(current_usage.device))
             self._inference_usage_counts += current_usage
         
         # Quantize
@@ -339,8 +340,6 @@ class EnhancedVectorQuantizer(nn.Module):
                 })
         else:
             # During inference, return inference statistics (read-only)
-            if not hasattr(self, '_inference_usage_counts'):
-                self.register_buffer('_inference_usage_counts', torch.zeros(self.num_embeddings))
             inference_usage = self._inference_usage_counts
             total_inference_usage = inference_usage.sum().item()
             usage_ratios = (inference_usage / (total_inference_usage + 1e-8)).clone().detach()
