@@ -7,6 +7,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import logging
 from typing import Optional
+from sklearn.cluster import KMeans
+from collections import deque
 
 # Import functions and classes from the base file
 from vqvae_gpt2 import (
@@ -16,12 +18,63 @@ from vqvae_gpt2 import (
 
 logger = logging.getLogger(__name__)
 
+class ReservoirSampler:
+    """
+    Reservoir sampling for efficient data-dependent initialization.
+    Based on the paper's recommendation for handling large datasets.
+    """
+    def __init__(self, reservoir_size=10000):
+        self.reservoir_size = reservoir_size
+        self.reservoir = deque(maxlen=reservoir_size)
+        self.count = 0
+    
+    def add_sample(self, sample):
+        """Add a sample to the reservoir using reservoir sampling."""
+        self.count += 1
+        if len(self.reservoir) < self.reservoir_size:
+            self.reservoir.append(sample)
+        else:
+            # Reservoir sampling: replace with probability reservoir_size/count
+            if torch.rand(1).item() < self.reservoir_size / self.count:
+                idx = torch.randint(0, self.reservoir_size, (1,)).item()
+                self.reservoir[idx] = sample
+    
+    def get_samples(self, num_samples=None, shuffle=True):
+        """
+        Get samples from the reservoir.
+        
+        Args:
+            num_samples (int, optional): Number of samples to return. If None, returns all samples.
+            shuffle (bool): Whether to shuffle the samples before returning. If False, returns first num_samples.
+            
+        Returns:
+            torch.Tensor: Requested samples from reservoir, or None if reservoir is empty
+        """
+        if num_samples is None:
+            num_samples = len(self.reservoir)
+        if len(self.reservoir) == 0:
+            return None
+        
+        # Convert to tensor
+        samples = torch.stack(list(self.reservoir))
+        if num_samples > len(samples):
+            num_samples = len(samples)
+        
+        if shuffle:
+            # Return shuffled samples
+            indices = torch.randperm(len(samples))[:num_samples]
+            return samples[indices]
+        else:
+            # Return first num_samples without shuffling
+            return samples[:num_samples]
+
 class EnhancedVectorQuantizer(nn.Module):
     def __init__(self, num_embeddings: int, embedding_dim: int, 
                  commitment_cost: float = 0.25, ema_decay: float = 0.99,
                  diversity_gamma: float = 0.1, reset_threshold: float = 0.1,
                  reset_frequency: int = 1000, use_ema: bool = True,
-                 max_reset_steps: Optional[int] = None):
+                 max_reset_steps: Optional[int] = None, reservoir_size: int = 10000,
+                 reset_strategy: str = 'partial'):
         """
         Enhanced Vector quantizer initialization with EMA updates and diversity mechanisms.
         
@@ -35,6 +88,8 @@ class EnhancedVectorQuantizer(nn.Module):
             reset_frequency: Frequency of checking for codebook reset
             use_ema: Whether to use EMA updates
             max_reset_steps: Maximum training steps during which resets are allowed (None = no limit)
+            reservoir_size: Size of reservoir for data-dependent initialization
+            reset_strategy: Strategy for automatic resets - 'partial' (reset unused codes) or 'full' (reset entire codebook)
         """
         super().__init__()
         
@@ -47,6 +102,7 @@ class EnhancedVectorQuantizer(nn.Module):
         self.reset_frequency = reset_frequency
         self.use_ema = use_ema
         self.max_reset_steps = max_reset_steps
+        self.reset_strategy = reset_strategy
         
         # Initialize embeddings
         self.embedding = nn.Embedding(num_embeddings, embedding_dim)
@@ -68,6 +124,61 @@ class EnhancedVectorQuantizer(nn.Module):
         
         # Training step tracking
         self.register_buffer('_current_step', torch.zeros(1, dtype=torch.long))
+        
+        # Reservoir sampler for data-dependent initialization
+        self.reservoir_sampler = ReservoirSampler(reservoir_size)
+    
+    def _perform_kmeans_clustering(self, samples, num_clusters, device):
+        """
+        Perform K-means++ clustering on samples and return centroids.
+        
+        Args:
+            samples (torch.Tensor): Input samples for clustering
+            num_clusters (int): Number of clusters to create
+            device (torch.device): Device to place centroids on
+            
+        Returns:
+            torch.Tensor: Cluster centroids
+        """
+        # Flatten samples if needed
+        flat_samples = samples.view(-1, self.embedding_dim)
+        
+        # Use K-means++ for clustering
+        kmeans = KMeans(n_clusters=num_clusters, init='k-means++', 
+                       n_init="auto", random_state=42)
+        
+        # Fit K-means and get centroids
+        kmeans.fit(flat_samples.detach().cpu().numpy())
+        centroids = torch.from_numpy(kmeans.cluster_centers_).float().to(device)
+        
+        return centroids
+    
+    def _get_embeddings_from_reservoir(self, num_embeddings, device, context="reset"):
+        """
+        Get embeddings by performing K-means++ clustering on reservoir samples.
+        Falls back to random initialization if not enough samples.
+        
+        Args:
+            num_embeddings (int): Number of embeddings to generate
+            device (torch.device): Device to place embeddings on
+            context (str): Context for logging (e.g., "reset", "initialization")
+            
+        Returns:
+            torch.Tensor: Generated embeddings
+        """
+        # Get samples from reservoir - use all samples, no need to shuffle since we do KMeans
+        reservoir_samples = self.reservoir_sampler.get_samples(num_samples=None, shuffle=False)
+        
+        if reservoir_samples is not None and len(reservoir_samples) >= num_embeddings:
+            # Use K-means++ clustering for data-dependent initialization
+            embeddings = self._perform_kmeans_clustering(reservoir_samples, num_embeddings, device)
+            print(f"Data-dependent {context} completed using {len(reservoir_samples)} reservoir samples")
+        else:
+            # Fallback to random initialization if not enough samples
+            embeddings = torch.randn(num_embeddings, self.embedding_dim, device=device) * 0.02
+            print(f"Warning: Not enough reservoir samples for {context}, using random initialization for {num_embeddings} embeddings")
+        
+        return embeddings
         
     def _update_ema(self, flat_input, encoding_indices):
         """
@@ -182,39 +293,55 @@ class EnhancedVectorQuantizer(nn.Module):
             return False
         return self._reset_counter % self.reset_frequency == 0
     
-    def _reset_codebook(self, flat_input):
+    def _reset_codebook(self, flat_input, reset_strategy='partial'):
         """
-        Reset codebook by reinitializing unused embeddings.
+        Reset codebook using data-dependent K-means++ clustering with reservoir samples.
         
         Args:
             flat_input (torch.Tensor): Current input embeddings for reference
+            reset_strategy (str): Reset strategy - 'partial' (reset unused codes) or 'full' (reset entire codebook)
         """
-        print("Codebook reset triggered - reinitializing unused embeddings")
-        
-        # Identify unused embeddings
-        usage_ratio = self._usage_counts / (self._usage_counts.sum().item() + 1e-8)
-        unused_mask = usage_ratio < self.reset_threshold
-        
-        # THIS RANDOM REINITIALIZATION IS VERY SUBOPTIMAL...
-        # Use random samples from current input as new embeddings
-        num_unused = unused_mask.sum().item()
-        if flat_input.shape[0] >= num_unused:
-            # Sample random inputs for unused embeddings
-            indices = torch.randperm(flat_input.shape[0])[:num_unused]
-            new_embeddings = flat_input[indices].float()
+        if reset_strategy == 'partial':
+            print("Codebook reset triggered - performing partial reset of unused codes")
+            
+            # Identify unused embeddings
+            usage_ratio = self._usage_counts / (self._usage_counts.sum().item() + 1e-8)
+            unused_mask = usage_ratio < self.reset_threshold
+            num_unused = unused_mask.sum().item()
+            
+            if num_unused == 0:
+                print("No unused codes found for partial reset")
+                return
+            
+            # Get embeddings for unused codes using reservoir samples
+            unused_indices = torch.where(unused_mask)[0]
+            new_embeddings = self._get_embeddings_from_reservoir(num_unused, flat_input.device, "partial reset")
+            
+            # Update only unused embeddings
+            self.embedding.weight.data[unused_indices] = new_embeddings
+            
+            # Reset EMA statistics for unused embeddings only
+            if self.use_ema:
+                self._ema_cluster_size.data[unused_indices] = 0
+                self._ema_w.data[unused_indices] = 0
+            
+            print(f"Partial reset completed: {num_unused} unused codes reinitialized")
+                
+        elif reset_strategy == 'full':
+            print("Codebook reset triggered - performing full data-dependent re-initialization")
+            
+            # Get embeddings for entire codebook using reservoir samples
+            new_embeddings = self._get_embeddings_from_reservoir(self.num_embeddings, flat_input.device, "full reset")
+            
+            # Update embedding weights with new embeddings
+            self.embedding.weight.data.copy_(new_embeddings)
+            
+            # Reset EMA statistics for entire codebook
+            if self.use_ema:
+                self._ema_cluster_size.zero_()
+                self._ema_w.zero_()
         else:
-            # Use random initialization if not enough inputs
-            new_embeddings = torch.randn(num_unused, self.embedding_dim, 
-                                        device=flat_input.device) * 0.02
-        
-        # Update unused embeddings
-        unused_indices = torch.where(unused_mask)[0]
-        self.embedding.weight.data[unused_indices] = new_embeddings
-        
-        # Reset EMA statistics for unused embeddings
-        if self.use_ema:
-            self._ema_cluster_size.data[unused_indices] = 0
-            self._ema_w.data[unused_indices] = 0
+            raise ValueError(f"Unknown reset strategy: {reset_strategy}. Use 'partial' or 'full'")
         
         # Reset usage counts
         self._usage_counts.zero_()
@@ -270,6 +397,9 @@ class EnhancedVectorQuantizer(nn.Module):
         # Training-specific updates
         current_usage = torch.bincount(encoding_indices, minlength=self.num_embeddings)
         if self.training:
+            # Add to reservoir for future re-initialization
+            self.reservoir_sampler.add_sample(inputs.detach().clone())
+            
             # Update EMA statistics
             self._update_ema(flat_input, encoding_indices)
             
@@ -280,7 +410,7 @@ class EnhancedVectorQuantizer(nn.Module):
             
             # Check for codebook reset
             if self._check_codebook_reset():
-                self._reset_codebook(flat_input)
+                self._reset_codebook(flat_input, self.reset_strategy)
         else:
             # During inference, update separate inference usage counts
             self._inference_usage_counts += current_usage
@@ -358,6 +488,11 @@ class EnhancedVectorQuantizer(nn.Module):
                     'ema_weights_norm': torch.norm(self._ema_w, p=2, dim=1).mean().item(),
                 })
         
+        # Add reservoir information
+        stats['reservoir_size'] = len(self.reservoir_sampler.reservoir)
+        stats['reservoir_count'] = self.reservoir_sampler.count
+        stats['reset_strategy'] = self.reset_strategy
+        
         return stats
     
     def get_embedding_diversity(self):
@@ -410,9 +545,9 @@ class EnhancedVectorQuantizer(nn.Module):
             normalized_vectors = F.normalize(random_vectors, p=2, dim=1)
             self.embedding.weight.data.copy_(normalized_vectors * 0.02)
         elif reset_strategy == 'kmeans':
-            # This would require input data, so we'll use random for now
-            print("K-means reset requires input data - using random instead")
-            self.embedding.weight.data.normal_(mean=0.0, std=0.02)
+            # Use reservoir samples for K-means reset
+            new_embeddings = self._get_embeddings_from_reservoir(self.num_embeddings, self.embedding.weight.device, "manual reset")
+            self.embedding.weight.data.copy_(new_embeddings)
         else:
             raise ValueError(f"Unknown reset strategy: {reset_strategy}")
         
@@ -526,7 +661,8 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
                  pretrained_model_name="gpt2",
                  # Vector Quantizer specific parameters
                  ema_decay=0.99, diversity_gamma=0.1, reset_threshold=0.1,
-                 reset_frequency=1000, use_ema=True, max_reset_steps=None,
+                 reset_frequency=1000, use_ema=True, max_reset_steps=None, reservoir_size=10000,
+                 reset_strategy='partial',
                  # Unified parameters (applied to both encoder and decoder if specified)
                  n_layer=12, n_head=12, n_inner=None, dropout=0.1, activation_function="gelu",
                  # Encoder-specific parameters (take precedence over unified if specified)
@@ -560,7 +696,9 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             'reset_threshold': reset_threshold,
             'reset_frequency': reset_frequency,
             'use_ema': use_ema,
-            'max_reset_steps': max_reset_steps
+            'max_reset_steps': max_reset_steps,
+            'reservoir_size': reservoir_size,
+            'reset_strategy': reset_strategy
         }
         
         # Call parent constructor with remaining parameters
@@ -603,6 +741,8 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             'reset_threshold': reset_threshold,
             'reset_frequency': reset_frequency,
             'use_ema': use_ema,
+            'reservoir_size': reservoir_size,
+            'reset_strategy': reset_strategy,
         }
     
     def get_vector_quantizer_stats(self):
