@@ -745,6 +745,219 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             'reset_strategy': reset_strategy,
         }
     
+    def forward(self, prompt, cot_sequences, cot_mask=None, prompt_mask=None, inference=False, quantize_cot_only=True, pad_token_id=50256, no_vq=False):
+        """
+        Forward pass through the model with optional vector quantization bypass.
+        
+        Args:
+            prompt (torch.Tensor): Prompt sequences [batch_size, K] where K is prompt length
+            cot_sequences (torch.Tensor): Chain-of-thought sequences [batch_size, M, L]
+            cot_mask (torch.Tensor, optional): Chain-of-thought attention mask for padding
+            prompt_mask (torch.Tensor, optional): Prompt attention mask for padding
+            inference (bool): If True, performs inference without teacher forcing
+            quantize_cot_only (bool): If True, only quantize the COT portion of sequences
+            pad_token_id (int): Token ID to use for padding when K=0, defaults to 50256
+            no_vq (bool): If True, bypass vector quantization and use aggregated embeddings directly
+            
+        Returns:
+            tuple: (output_sequences, output_logits, vq_loss, perplexity, indices)
+                - output_sequences: Generated token sequences [batch_size, M, L]
+                - output_logits: Token logits for each position [batch_size, M, L, vocab_size]
+                - vq_loss: Vector quantization loss (zero if no_vq=True)
+                - perplexity: Codebook usage perplexity (zero if no_vq=True)
+                - indices: Codebook usage indices [batch_size, L] or [batch_size, K+L] depending on quantize_cot_only (zeros if no_vq=True)
+        """
+        batch_size, K = prompt.shape
+        _, M, L = cot_sequences.shape
+        
+        # Encode using the enhanced encode method with optional VQ bypass
+        quantized, vq_loss, perplexity, indices = self.encode(
+            prompt, cot_sequences, 
+            prompt_mask, cot_mask, 
+            quantize_cot_only=quantize_cot_only,
+            no_vq=no_vq
+        )
+        
+        # quantized shape depends on quantize_cot_only:
+        if quantize_cot_only:          # if True: [batch_size, L, M, d_model] (only COT positions)
+            cot_quantized = quantized
+        else:                          # if False: [batch_size, K+L, M, d_model] (all positions)
+            cot_quantized = quantized[:, K:, :, :]
+        
+        if not inference:
+            # During training, use teacher forcing with single forward pass to get all logits
+            output_logits = self.decode(cot_quantized, prompt, cot_sequences, prompt_mask, cot_mask, pad_token_id) # [batch_size, M, L, vocab_size]
+            
+            # Get the predicted tokens from logits
+            output_sequences = torch.argmax(output_logits, dim=-1)
+        else:
+            # Initialize tensor to store generation results and logits
+            output_sequences = torch.zeros((batch_size, M, L), dtype=torch.long, device=cot_sequences.device)
+            output_logits = torch.empty((batch_size, M, L, self.decoder_config.vocab_size), device=cot_sequences.device)
+        
+            # TODO IF I FIND THE TIME : USE KV-CACHING TO SPEED UP AUTO-REGRESSIVE GENERATION
+            # During inference, generate sequence auto-regressively
+            for t in range(L):
+                current_output = self.decode(cot_quantized, prompt, output_sequences, prompt_mask, cot_mask, pad_token_id)
+                
+                # Get next token predictions
+                output_logits[:, :, t, :] = current_output[:, :, t, :]  # [batch_size, M, L, vocab_size]
+                output_sequences[:, :, t] = torch.argmax(output_logits[:, :, t, :], dim=-1)  # [batch_size, M, L]
+        
+        return output_sequences, output_logits, vq_loss, perplexity, indices
+    
+    def encode(self, prompt_sequences, cot_sequences, prompt_mask=None, cot_mask=None, 
+               aggregate_mode="linear", quantize_cot_only=True, no_vq=False):
+        """
+        Enhanced encode method with optional vector quantization bypass.
+        
+        Args:
+            prompt_sequences (torch.Tensor): Prompt sequences [batch_size, K]
+            cot_sequences (torch.Tensor): Chain-of-thought sequences [batch_size, M, L]
+            prompt_mask (torch.Tensor, optional): Prompt attention mask for padding
+            cot_mask (torch.Tensor, optional): COT attention mask for padding
+            aggregate_mode (str): Mode of aggregation
+            quantize_cot_only (bool): If True, only quantize COT positions (K to K+L-1). 
+                                    If False, quantize all positions (0 to K+L-1).
+            no_vq (bool): If True, bypass vector quantization and return aggregated embeddings directly
+            
+        Returns:
+            tuple: (quantized, vq_loss, perplexity, indices) 
+        """
+        # Call parent encode method to get the aggregated embeddings
+        if no_vq:
+            # For no_vq mode, we need to get the aggregated embeddings without quantization
+            # We'll call the parent encode method but intercept before VQ
+            batch_size, K = prompt_sequences.shape
+            _, M, L = cot_sequences.shape
+            
+            # Check if gradient checkpointing is enabled to determine caching strategy
+            use_caching = not self.is_gradient_checkpointing_enabled()
+            
+            if use_caching:
+                # CACHING APPROACH: Encode prompt first, then COT with cached activations
+                
+                # Step 1: Encode prompt sequences with caching
+                prompt_outputs = self.encoder(
+                    input_ids=prompt_sequences,
+                    attention_mask=prompt_mask,
+                    past_key_values=DynamicCache(),
+                    use_cache=True,
+                    return_dict=True
+                )
+                
+                # Extract prompt activations and cache
+                prompt_activations = prompt_outputs.last_hidden_state  # [batch_size, K, d_model]
+                prompt_cache = prompt_outputs.past_key_values
+                
+                # Step 2: Process COT sequences with padded prompt cache
+                cot_flat = cot_sequences.view(batch_size * M, L)  # [batch_size * M, L]
+                if cot_mask is not None:
+                    cot_mask_flat = cot_mask.view(batch_size * M, L)  # [batch_size * M, L]
+                else:
+                    cot_mask_flat = None
+                
+                # Pad prompt cache M times using helper method
+                padded_cache = self._pad_kv_cache(prompt_cache, batch_size, M)
+                
+                # Step 3: Continue encoding with COT sequences using cached prompt activations
+                combined_mask = self._create_combined_mask(prompt_mask, cot_mask_flat, batch_size, M, K, L, cot_flat.device)
+                
+                # Continue encoding with cached activations - only pass COT sequences as input_ids
+                cot_outputs = self.encoder(
+                    input_ids=cot_flat,  # Only COT sequences, not combined input
+                    attention_mask=combined_mask,
+                    past_key_values=padded_cache,  # Use padded prompt cache
+                    use_cache=False,
+                    return_dict=True
+                )
+                
+                # Get COT hidden states (only the newly computed activations)
+                cot_memory = cot_outputs.last_hidden_state
+                
+                if quantize_cot_only:
+                    # Only use COT activations, no need to concatenate with prompt
+                    cot_memory = cot_memory.view(batch_size, M, L, -1)
+                    memory = cot_memory.transpose(1, 2)  # [batch_size, L, M, d_model]
+                else:
+                    # Pad prompt activations M times to match COT batch size
+                    padded_prompt_activations = prompt_activations.unsqueeze(1).expand(-1, M, -1, -1)
+                    padded_prompt_activations = padded_prompt_activations.reshape(batch_size * M, K, -1)
+                    
+                    # Concatenate prompt activations with COT activations to get full sequence
+                    full_memory = torch.cat([padded_prompt_activations, cot_memory], dim=1)  # [batch_size * M, K + L, d_model]
+                    
+                    # Reshape to group tokens at same positions across sequences
+                    full_memory = full_memory.view(batch_size, M, K + L, -1)
+                    memory = full_memory.transpose(1, 2)  # [batch_size, K + L, M, d_model]
+            
+            else:
+                # NON-CACHING APPROACH: Process full sequence in one pass
+                # Reshape COT sequences to [batch_size * M, L]
+                cot_flat = cot_sequences.view(batch_size * M, L)  # [batch_size * M, L]
+                
+                # Pad prompt sequences M times to match COT batch size
+                padded_prompt = prompt_sequences.unsqueeze(1).expand(-1, M, -1)
+                padded_prompt = padded_prompt.reshape(batch_size * M, K)
+                
+                # Concatenate prompt and COT sequences
+                full_sequences = torch.cat([padded_prompt, cot_flat], dim=1)  # [batch_size * M, K + L]
+                
+                # Create combined attention mask using helper method
+                if cot_mask is not None:
+                    cot_mask_flat = cot_mask.view(batch_size * M, L)  # [batch_size * M, L]
+                else:
+                    cot_mask_flat = None
+                
+                combined_mask = self._create_combined_mask(prompt_mask, cot_mask_flat, batch_size, M, K, L, cot_flat.device)
+                
+                # Encode full sequence in one pass
+                full_outputs = self.encoder(
+                    input_ids=full_sequences,
+                    attention_mask=combined_mask,
+                    use_cache=False,  # No caching when gradient checkpointing is enabled
+                    return_dict=True
+                )
+                
+                # Extract hidden states
+                full_memory = full_outputs.last_hidden_state
+                
+                if quantize_cot_only:
+                    # Only use COT activations (positions K to K+L-1)
+                    cot_memory = full_memory[:, K:, :]  # [batch_size * M, L, d_model]
+                    # Reshape to group tokens at same positions across sequences
+                    cot_memory = cot_memory.view(batch_size, M, L, -1)
+                    memory = cot_memory.transpose(1, 2)  # [batch_size, L, M, d_model]
+                else:
+                    # Use all activations
+                    # Reshape to group tokens at same positions across sequences
+                    full_memory = full_memory.view(batch_size, M, K + L, -1)
+                    memory = full_memory.transpose(1, 2)  # [batch_size, K + L, M, d_model]
+
+            # COMMON PROCESSING: Reshape for aggregation
+            memory = memory.reshape(-1, M, memory.size(-1))  # [batch_size*L or batch_size*(K+L), M, d_model]
+
+            # Aggregate the memory content per-prompt into single chains 
+            aggregated = self.aggregate(memory, mode=aggregate_mode) # [batch_size*L or batch_size*(K+L), d_model]
+            
+            # For no_vq mode, tile the aggregated embeddings back to match the expected shape
+            # This mimics what the vector quantizer would do after quantization
+            quantized = aggregated.unsqueeze(1).expand(-1, M, -1)  # [batch_size*(L or K+L), M, d_model]
+            
+            # Reshape back using the appropriate length
+            quantized = quantized.view(batch_size, -1, M, quantized.size(-1))
+            
+            # Return dummy values for VQ-related outputs
+            vq_loss = torch.tensor(0.0, device=quantized.device)
+            perplexity = torch.tensor(0.0, device=quantized.device)
+            indices = torch.zeros(batch_size, -1, device=quantized.device, dtype=torch.long)
+            
+            return quantized, vq_loss, perplexity, indices
+        else:
+            # Normal VQ mode - call parent encode method
+            return super().encode(prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
+                                aggregate_mode, quantize_cot_only)
+    
     def get_vector_quantizer_stats(self):
         """
         Get statistics from the enhanced vector quantizer.
