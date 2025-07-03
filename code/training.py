@@ -351,7 +351,7 @@ class GPT2VQVAETrainer:
         
         # Codebook usage tracking (legacy - now handled by tracking functions)
         self.codebook_tracking_enabled = self.training_config.get('codebook_tracking_enabled', True)
-        self.codebook_sample_size = self.training_config.get('codebook_sample_size', 1000)
+        self.codebook_sample_size = self.training_config.get('codebook_sample_size', 100)
         self.codebook_history = []  # List of count tensors over time
         self.codebook_perplexities = []  # List of perplexities over time
         self.codebook_measurement_points = []  # List of measurement point indices
@@ -836,6 +836,22 @@ class GPT2VQVAETrainer:
         
         if checkpoint['scheduler_state_dict'] and self.scheduler:
             self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            # Check and update scheduler parameters if needed
+            loaded_T_max = self.scheduler.T_max
+            loaded_eta_min = self.scheduler.eta_min
+            config_T_max = self.training_config['num_epochs']
+            config_eta_min = self.training_config.get('min_lr', 1e-6)
+            mismatch = False
+            if loaded_T_max != config_T_max:
+                print(f"Warning: Scheduler T_max from checkpoint ({loaded_T_max}) does not match current config ({config_T_max}). Overriding to config value.")
+                self.scheduler.T_max = config_T_max
+                mismatch = True
+            if loaded_eta_min != config_eta_min:
+                print(f"Warning: Scheduler eta_min from checkpoint ({loaded_eta_min}) does not match current config ({config_eta_min}). Overriding to config value.")
+                self.scheduler.eta_min = config_eta_min
+                mismatch = True
+            if mismatch:
+                print("Scheduler parameters have been updated to match the current training configuration.")
         
         self.train_losses = checkpoint.get('train_losses', [])
         self.val_losses = checkpoint.get('val_losses', [])
@@ -1594,6 +1610,7 @@ def create_default_config(output_path: str, enhanced_vq: bool = False):
             'reset_threshold': 0.1,      # Threshold for codebook reset (usage ratio)
             'reset_frequency': 1000,     # Frequency of codebook reset checks
             'use_ema': True,             # Whether to use EMA updates
+            'reset_stop_fraction': 0.2,  # Fraction of training during which resets are allowed (will be converted to max_reset_steps)
         })
     
     # Base training configuration
@@ -1674,12 +1691,14 @@ def create_default_config(output_path: str, enhanced_vq: bool = False):
         print("  - EMA updates: Enabled (decay: 0.99)")
         print("  - Diversity loss: Enabled (gamma: 0.1)")
         print("  - Automatic codebook reset: Enabled (threshold: 0.1, frequency: 1000)")
+        print("  - Reset stop fraction: 0.2 (resets only allowed for first 20% of training)")
         print("  - Enhanced codebook tracking: Enabled")
         print("\nEnhanced codebook training scheme reduces to normal VQ-VAE when:")
         print("  - ema_decay = 0.0 (no EMA updates)")
         print("  - diversity_gamma = 0.0 (no diversity loss)")
         print("  - reset_threshold = 0.0 (no automatic resets)")
         print("  - use_ema = False (EMA disabled)")
+        print("  - reset_stop_fraction = 0.0 (no reset timing limit)")
     
     print("\nYou can modify this file and use it for training.")
 
@@ -2233,7 +2252,7 @@ def create_codebook_usage_timeline_plot(codebook_history: List[torch.Tensor],
 
 def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to Any to handle both model types
                                     dataset: TensorDataset,  # More specific type
-                                    sample_size: int = 1000,
+                                    sample_size: int = 100,
                                     device: str = "cuda",
                                     use_vq: bool = True) -> Tuple[torch.Tensor, float]:
     """
@@ -2783,7 +2802,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         # Filter out enhanced VQ-VAE specific parameters for parent constructor
         enhanced_vq_params = {
             'ema_decay', 'diversity_gamma', 'reset_threshold', 
-            'reset_frequency', 'use_ema'
+            'reset_frequency', 'use_ema', 'reset_stop_fraction'
         }
         
         # Create filtered configs for parent constructor
@@ -2806,6 +2825,10 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
 
         self.ensure_numeric_types(self.original_model_config)
         self.ensure_numeric_types(self.original_training_config)
+        
+        # Add max_reset_steps to model_config if not present
+        if 'max_reset_steps' not in model_config:
+            model_config['max_reset_steps'] = None
         
         # Replace the model with EnhancedGPT2VQVAE using original config
         self.model = EnhancedGPT2VQVAE(**model_config).to(device)
@@ -2841,10 +2864,29 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             print(f"Reset threshold: {model_config.get('reset_threshold', 0.1)}")
             print(f"Reset frequency: {model_config.get('reset_frequency', 1000)}")
             print(f"Use EMA: {model_config.get('use_ema', True)}")
+            print(f"Reset stop fraction: {reset_stop_fraction}")
         else:
             print("Enhanced codebook tracking disabled")
-        
         print("EnhancedGPT2VQVAE trainer initialized successfully.")
+
+    def train_epoch(self, train_loader, num_measurements_per_epoch, current_epoch=0):
+        # Set max_reset_steps on the first epoch if it's still None
+        if self.model.vector_quantizer.max_reset_steps is None:
+            # Calculate total training steps
+            num_epochs = self.training_config['num_epochs']
+            steps_per_epoch = len(train_loader)
+            total_training_steps = num_epochs * steps_per_epoch
+            
+            # Calculate max_reset_steps from reset_stop_fraction
+            reset_stop_fraction = self.original_model_config.get('reset_stop_fraction', 0.2)
+            max_reset_steps = int(reset_stop_fraction * total_training_steps)
+            
+            # Set max_reset_steps on the vector quantizer
+            self.model.vector_quantizer.max_reset_steps = max_reset_steps
+            print(f"Set max_reset_steps to {max_reset_steps} (based on {total_training_steps} total steps, {reset_stop_fraction*100:.0f}% of training)")
+        
+        # Call the parent train_epoch method
+        return super().train_epoch(train_loader, num_measurements_per_epoch, current_epoch)
     
     def _enhanced_track_codebook_usage(self, dataset: Any, measurement_point: int) -> None:
         """
@@ -2927,35 +2969,6 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             
         except Exception as e:
             print(f"Warning: Failed to save enhanced codebook plots: {e}")
-    
-    def _forward_pass(self, prompts, cots, prompt_masks, cot_masks):
-        """Helper function for forward pass and loss calculation with enhanced VQ features"""
-        
-        if self.use_mixed_precision:
-            with autocast('cuda'):
-                _, output_logits, vq_loss, perplexity, indices = self.model(
-                    prompt=prompts,
-                    cot_sequences=cots,
-                    cot_mask=cot_masks,
-                    prompt_mask=prompt_masks,
-                    inference=False,
-                    quantize_cot_only=self.training_config.get('quantize_cot_only', True)
-                )
-                recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
-                total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
-        else:
-            _, output_logits, vq_loss, perplexity, indices = self.model(
-                prompt=prompts,
-                cot_sequences=cots,
-                cot_mask=cot_masks,
-                prompt_mask=prompt_masks,
-                inference=False,
-                quantize_cot_only=self.training_config.get('quantize_cot_only', True)
-            )
-            recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
-            total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
-            
-        return total_loss_batch, vq_loss, perplexity, indices
     
     def _plot_enhanced_codebook_stats(self, save_path: str) -> None:
         """Plot enhanced codebook statistics over time."""
