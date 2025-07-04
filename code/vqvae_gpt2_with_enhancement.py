@@ -10,6 +10,8 @@ from typing import Optional
 from sklearn.cluster import KMeans
 from collections import deque
 
+from transformers.cache_utils import DynamicCache
+
 # Import functions and classes from the base file
 from vqvae_gpt2 import (
     compute_perplexity,
@@ -410,7 +412,7 @@ class EnhancedVectorQuantizer(nn.Module):
             
             # Check for codebook reset
             if self._check_codebook_reset():
-                self._reset_codebook(flat_input, self.reset_strategy)
+                self._reset_codebook(flat_input.device, self.reset_strategy)
         else:
             # During inference, update separate inference usage counts
             self._inference_usage_counts += current_usage
@@ -950,7 +952,7 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             # Return dummy values for VQ-related outputs
             vq_loss = torch.tensor(0.0, device=quantized.device)
             perplexity = torch.tensor(0.0, device=quantized.device)
-            indices = torch.zeros(batch_size, -1, device=quantized.device, dtype=torch.long)
+            indices = torch.zeros(batch_size, device=quantized.device, dtype=torch.long)
             
             return quantized, vq_loss, perplexity, indices
         else:
