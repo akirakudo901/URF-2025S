@@ -158,7 +158,7 @@ class EnhancedVectorQuantizer(nn.Module):
                  diversity_gamma: float = 0.1, reset_threshold: float = 0.1,
                  reset_frequency: int = 1000, use_ema: bool = True,
                  max_reset_steps: Optional[int] = None, reservoir_size: int = 10000,
-                 reset_strategy: str = 'partial'):
+                 reset_strategy: str = 'partial', use_batch_norm: bool = True):
         """
         Enhanced Vector quantizer initialization with EMA updates and diversity mechanisms.
         
@@ -174,6 +174,7 @@ class EnhancedVectorQuantizer(nn.Module):
             max_reset_steps: Maximum training steps during which resets are allowed (None = no limit)
             reservoir_size: Size of reservoir for data-dependent initialization
             reset_strategy: Strategy for automatic resets - 'partial' (reset unused codes) or 'full' (reset entire codebook)
+            use_batch_norm: Whether to use batch normalization before vector quantization
         """
         super().__init__()
         
@@ -187,6 +188,7 @@ class EnhancedVectorQuantizer(nn.Module):
         self.use_ema = use_ema
         self.max_reset_steps = max_reset_steps
         self.reset_strategy = reset_strategy
+        self.use_batch_norm = use_batch_norm
         
         # Initialize embeddings
         self.embedding = nn.Embedding(num_embeddings, embedding_dim)
@@ -211,6 +213,12 @@ class EnhancedVectorQuantizer(nn.Module):
         
         # Reservoir sampler for data-dependent initialization
         self.reservoir_sampler = ReservoirSampler(reservoir_size, embedding_dim)
+        
+        # Batch normalization (optional)
+        if self.use_batch_norm:
+            self.batch_norm = nn.BatchNorm1d(embedding_dim, momentum=0.01, eps=1e-5)
+        else:
+            self.batch_norm = None
     
     def _perform_kmeans_clustering(self, samples, num_clusters, device):
         """
@@ -467,10 +475,15 @@ class EnhancedVectorQuantizer(nn.Module):
         input_shape = inputs.shape
         flat_input = inputs.view(-1, self.embedding_dim) # [ (batch x seq_len), emb_dim ]
 
+        # Batch normalization (optional)
+        if self.use_batch_norm and self.batch_norm is not None:
+            normalized_inputs = self.batch_norm(flat_input)
+        else:
+            normalized_inputs = flat_input
         # Calculate distances
-        distances = (torch.sum(flat_input**2, dim=1, keepdim=True)           # [ (batch x seq_len), emb_num ]    
+        distances = (torch.sum(normalized_inputs**2, dim=1, keepdim=True)           # [ (batch x seq_len), emb_num ]    
                     + torch.sum(self.embedding.weight**2, dim=1)
-                    - 2 * torch.matmul(flat_input, self.embedding.weight.T))
+                    - 2 * torch.matmul(normalized_inputs, self.embedding.weight.T))
             
         # Encoding
         encoding_indices = torch.argmin(distances, dim=1) # [ (batch x seq_len) ]
@@ -485,7 +498,7 @@ class EnhancedVectorQuantizer(nn.Module):
             self.reservoir_sampler.add_samples(inputs.detach().clone().cpu())
             
             # Update EMA statistics
-            self._update_ema(flat_input, encoding_indices)
+            self._update_ema(normalized_inputs, encoding_indices)
             
             # Update training usage counts and reset counter
             self._usage_counts += current_usage
@@ -494,7 +507,7 @@ class EnhancedVectorQuantizer(nn.Module):
             
             # Check for codebook reset
             if self._check_codebook_reset():
-                self._reset_codebook(flat_input.device, self.reset_strategy)
+                self._reset_codebook(normalized_inputs.device, self.reset_strategy)
         else:
             # During inference, update separate inference usage counts
             self._inference_usage_counts += current_usage
@@ -576,6 +589,7 @@ class EnhancedVectorQuantizer(nn.Module):
         stats['reservoir_size'] = len(self.reservoir_sampler.reservoir)
         stats['reservoir_count'] = self.reservoir_sampler.count
         stats['reset_strategy'] = self.reset_strategy
+        stats['batch_norm_enabled'] = self.is_batch_norm_enabled()
         
         return stats
     
@@ -717,12 +731,13 @@ class EnhancedVectorQuantizer(nn.Module):
             ],
             'enabled_features': [
                 'Vector quantization (encoding and decoding)',
-                'Loss computation (without gradient accumulation)'
+                'Loss computation (without gradient accumulation)',
                 'Distance calculation',
                 'Perplexity computation',
                 'Inference usage statistics tracking (_inference_usage_counts)',
                 'Statistics retrieval (get_codebook_stats, get_embedding_diversity)',
-                'Read-only EMA statistics access'
+                'Read-only EMA statistics access',
+                'Batch normalization (if enabled)'
             ],
             'safety_mechanisms': [
                 'Training mode checks in all training-specific methods',
@@ -735,6 +750,33 @@ class EnhancedVectorQuantizer(nn.Module):
     def set_current_step(self, current_step):
         """Set the current training step for reset timing control."""
         self._current_step[0] = current_step
+    
+    def enable_batch_norm(self):
+        """Enable batch normalization if it was previously disabled."""
+        if not self.use_batch_norm:
+            self.use_batch_norm = True
+            self.batch_norm = nn.BatchNorm1d(self.embedding_dim, momentum=0.01, eps=1e-5)
+            print("Batch normalization enabled")
+        else:
+            print("Batch normalization is already enabled")
+    
+    def disable_batch_norm(self):
+        """Disable batch normalization."""
+        if self.use_batch_norm:
+            self.use_batch_norm = False
+            self.batch_norm = None
+            print("Batch normalization disabled")
+        else:
+            print("Batch normalization is already disabled")
+    
+    def is_batch_norm_enabled(self):
+        """
+        Check if batch normalization is enabled.
+        
+        Returns:
+            bool: True if batch normalization is enabled, False otherwise
+        """
+        return self.use_batch_norm and self.batch_norm is not None
 
 
 class EnhancedGPT2VQVAE(GPT2VQVAE):
@@ -746,7 +788,7 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
                  # Vector Quantizer specific parameters
                  ema_decay=0.99, diversity_gamma=0.1, reset_threshold=0.1,
                  reset_frequency=1000, use_ema=True, max_reset_steps=None, reservoir_size=10000,
-                 reset_strategy='partial',
+                 reset_strategy='partial', use_batch_norm=False,
                  # Unified parameters (applied to both encoder and decoder if specified)
                  n_layer=12, n_head=12, n_inner=None, dropout=0.1, activation_function="gelu",
                  # Encoder-specific parameters (take precedence over unified if specified)
@@ -754,7 +796,8 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
                  encoder_dropout=None, encoder_activation_function=None,
                  # Decoder-specific parameters (take precedence over unified if specified)
                  decoder_n_layer=None, decoder_n_head=None, decoder_n_inner=None,
-                 decoder_dropout=None, decoder_activation_function=None):
+                 decoder_dropout=None, decoder_activation_function=None, 
+                 reset_stop_fraction=None):
         """
         Enhanced GPT2VQVAE with improved vector quantization.
         
@@ -782,7 +825,8 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             'use_ema': use_ema,
             'max_reset_steps': max_reset_steps,
             'reservoir_size': reservoir_size,
-            'reset_strategy': reset_strategy
+            'reset_strategy': reset_strategy,
+            'use_batch_norm': use_batch_norm
         }
         
         # Call parent constructor with remaining parameters
@@ -827,6 +871,7 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             'use_ema': use_ema,
             'reservoir_size': reservoir_size,
             'reset_strategy': reset_strategy,
+            'use_batch_norm': use_batch_norm,
         }
     
     def forward(self, prompt, cot_sequences, cot_mask=None, prompt_mask=None, inference=False, quantize_cot_only=True, pad_token_id=50256, no_vq=False):
@@ -1090,3 +1135,20 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             decay (float, optional): New EMA decay rate
         """
         self.vector_quantizer.enable_ema(decay)
+    
+    def enable_batch_norm(self):
+        """Enable batch normalization in the enhanced vector quantizer."""
+        self.vector_quantizer.enable_batch_norm()
+    
+    def disable_batch_norm(self):
+        """Disable batch normalization in the enhanced vector quantizer."""
+        self.vector_quantizer.disable_batch_norm()
+    
+    def is_batch_norm_enabled(self):
+        """
+        Check if batch normalization is enabled in the enhanced vector quantizer.
+        
+        Returns:
+            bool: True if batch normalization is enabled, False otherwise
+        """
+        return self.vector_quantizer.is_batch_norm_enabled()
