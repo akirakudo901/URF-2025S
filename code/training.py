@@ -1671,6 +1671,7 @@ def create_default_config(output_path: str, enhanced_vq: bool = False, phased_tr
                 'initialization_steps': 1500,    # Steps to train in no-vq mode
                 'r_reestim': 500,                # Frequency of codebook reinitialization
                 'quantization_start': 5000,      # Step to start normal VQ training
+                'codebook_lr_multiplier': 1.0,   # Codebook learning rate multiplier
             })
     
     default_config = {
@@ -1725,6 +1726,7 @@ def create_default_config(output_path: str, enhanced_vq: bool = False, phased_tr
             print("  - Reinitialization phase: 1500 to 5000 steps (VQ + periodic reinitialization)")
             print("  - Reinitialization frequency: every 500 steps")
             print("  - Normal training phase: after 5000 steps")
+            print("  - Codebook learning rate multiplier: 1.0x (no difference)")
             print("\nPhased training recipe:")
             print("  1. Train without VQ to learn good representations")
             print("  2. Periodically reinitialize codebook using KMeans on reservoir samples")
@@ -2541,6 +2543,8 @@ def main():
                        help='Override r_reestim for phased training (default: 500)')
     parser.add_argument('--quantization-start', type=int, default=None,
                        help='Override quantization_start for phased training (default: 5000)')
+    parser.add_argument('--codebook-lr-multiplier', type=float, default=None,
+                       help='Override codebook_lr_multiplier for phased training (default: 1.0)')
     
     args = parser.parse_args()
     
@@ -2681,6 +2685,10 @@ def main():
                 if args.quantization_start is not None:
                     training_config['quantization_start'] = args.quantization_start
                     print(f"Overriding quantization_start to: {args.quantization_start}")
+                
+                if args.codebook_lr_multiplier is not None:
+                    training_config['codebook_lr_multiplier'] = args.codebook_lr_multiplier
+                    print(f"Overriding codebook_lr_multiplier to: {args.codebook_lr_multiplier}")
         else:
             # For non-enhanced models, disable enhanced codebook tracking
             training_config['enhanced_codebook_tracking'] = False
@@ -3697,14 +3705,22 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         self.r_reestim = training_config.get('r_reestim', 500)
         self.quantization_start = training_config.get('quantization_start', 5000)
         
+        # Extract codebook learning rate multiplier
+        self.codebook_lr_multiplier = training_config.get('codebook_lr_multiplier', 1.0)
+        
         # Validate parameters
         if self.initialization_steps >= self.quantization_start:
             raise ValueError("initialization_steps must be less than quantization_start")
         if self.r_reestim <= 0:
             raise ValueError("r_reestim must be positive")
+        if self.codebook_lr_multiplier <= 0:
+            raise ValueError("codebook_lr_multiplier must be positive")
         
         # Initialize parent trainer
         super().__init__(model_config, training_config, device)
+        
+        # Override optimizer with codebook-specific learning rates
+        self._setup_codebook_optimizer()
         
         # Training phase tracking
         self.current_step = 0
@@ -3714,6 +3730,69 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         print(f"  - Reinitialization phase: {self.initialization_steps} to {self.quantization_start} steps")
         print(f"  - Reinitialization frequency: every {self.r_reestim} steps")
         print(f"  - Normal training phase: after {self.quantization_start} steps")
+        print(f"  - Codebook learning rate multiplier: {self.codebook_lr_multiplier}x")
+    
+    def _setup_codebook_optimizer(self):
+        """
+        Set up optimizer with different learning rates for codebook parameters.
+        Codebook parameters get learning_rate * codebook_lr_multiplier,
+        while all other parameters get the normal learning_rate.
+        """
+        # if the multipler is 1.0, no change
+        if self.codebook_lr_multiplier == 1.0:
+            return
+        
+        # Get the base learning rate
+        base_lr = self.training_config['learning_rate']
+        codebook_lr = base_lr * self.codebook_lr_multiplier
+        
+        # Separate parameters into codebook and non-codebook groups
+        codebook_params = []
+        other_params = []
+        
+        for name, param in self.model.named_parameters():
+            # TODO: CONSIDER IF aggregation_mlp SHOULD GET HIGHER LR OR NOT
+            # TBH, HARD TO SAY. WILL START WITHOUT.
+            # if 'vector_quantizer' in name or 'aggregation_mlp' in name:
+            if 'vector_quantizer' in name:
+                codebook_params.append(param)
+            else:
+                other_params.append(param)
+        
+        # Create parameter groups with different learning rates
+        param_groups = [
+            {
+                'params': other_params,
+                'lr': base_lr,
+                'weight_decay': self.training_config.get('weight_decay', 0.01),
+                'betas': (self.training_config.get('beta1', 0.9), self.training_config.get('beta2', 0.999))
+            },
+            {
+                'params': codebook_params,
+                'lr': codebook_lr,
+                'weight_decay': self.training_config.get('weight_decay', 0.01),
+                'betas': (self.training_config.get('beta1', 0.9), self.training_config.get('beta2', 0.999))
+            }
+        ]
+        
+        # Recreate optimizer with parameter groups
+        self.optimizer = optim.AdamW(param_groups)
+        
+        # Recreate scheduler if it exists
+        if self.training_config.get('use_lr_scheduler', True):
+            self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer,
+                T_max=self.training_config['num_epochs'],
+                eta_min=self.training_config.get('min_lr', 1e-6)
+            )
+        else:
+            self.scheduler = None
+        
+        print(f"Optimizer reconfigured with separate learning rates:")
+        print(f"  - Main parameters: {base_lr:.2e}")
+        print(f"  - Codebook parameters: {codebook_lr:.2e} ({self.codebook_lr_multiplier}x multiplier)")
+        print(f"  - Codebook parameters count: {len(codebook_params)}")
+        print(f"  - Other parameters count: {len(other_params)}")
     
     def _determine_training_phase(self, current_step: int) -> str:
         """
