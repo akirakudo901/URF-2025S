@@ -25,13 +25,42 @@ class ReservoirSampler:
     Reservoir sampling for efficient data-dependent initialization.
     Based on the paper's recommendation for handling large datasets.
     """
-    def __init__(self, reservoir_size=10000):
+    def __init__(self, reservoir_size=10000, embedding_size=None):
         self.reservoir_size = reservoir_size
+        self.embedding_size = embedding_size
         self.reservoir = deque(maxlen=reservoir_size)
         self.count = 0
     
+    def _validate_and_flatten_sample(self, sample):
+        """
+        Validate sample dimensions and flatten if necessary.
+        
+        Args:
+            sample (torch.Tensor): Input sample
+            
+        Returns:
+            torch.Tensor: Flattened sample with shape [..., embedding_size]
+        """
+        if self.embedding_size is not None:
+            if sample.shape[-1] != self.embedding_size:
+                raise ValueError(f"Sample's last dimension {sample.shape[-1]} does not match expected embedding_size {self.embedding_size}")
+        
+        # Flatten to 2D if more than 2 dimensions, keeping the last dimension
+        if sample.dim() > 2:
+            # Reshape to [..., embedding_size] where ... represents all dimensions except the last
+            sample = sample.view(-1, sample.shape[-1])
+        
+        return sample
+    
     def add_sample(self, sample):
-        """Add a sample to the reservoir using reservoir sampling."""
+        """
+        Add a sample to the reservoir using reservoir sampling.
+        
+        Args:
+            sample (torch.Tensor): Sample to add to reservoir
+        """
+        sample = self._validate_and_flatten_sample(sample)
+        
         self.count += 1
         if len(self.reservoir) < self.reservoir_size:
             self.reservoir.append(sample)
@@ -40,6 +69,59 @@ class ReservoirSampler:
             if torch.rand(1).item() < self.reservoir_size / self.count:
                 idx = torch.randint(0, self.reservoir_size, (1,)).item()
                 self.reservoir[idx] = sample
+    
+    def add_samples(self, samples):
+        """
+        Add multiple samples to the reservoir efficiently.
+        
+        Args:
+            samples (torch.Tensor): Batch of samples to add [batch_size, ...]
+        """
+        if samples.dim() == 0:
+            # Single sample case
+            self.add_sample(samples)
+            return
+        
+        # Validate and flatten all samples
+        samples = self._validate_and_flatten_sample(samples)
+        
+        # If samples is 1D, treat as single sample
+        if samples.dim() == 1:
+            self.add_sample(samples)
+            return
+        
+        batch_size = samples.shape[0]
+        
+        # First, fill the reservoir if it's not full
+        remaining_capacity = max(0, self.reservoir_size - len(self.reservoir))
+        samples_to_fill = min(remaining_capacity, batch_size)
+        
+        if samples_to_fill > 0:
+            # Add samples to fill the reservoir
+            for i in range(samples_to_fill):
+                self.reservoir.append(samples[i])
+            self.count += samples_to_fill
+            samples = samples[samples_to_fill:]  # Remove used samples
+            batch_size -= samples_to_fill
+        
+        # If we still have samples and reservoir is full, use reservoir sampling
+        if batch_size > 0 and len(self.reservoir) >= self.reservoir_size:
+            # Generate all random numbers at once for efficiency
+            random_values = torch.rand(batch_size)
+            reservoir_ratio = self.reservoir_size / (self.count + torch.arange(batch_size, dtype=torch.float))
+            
+            # Find samples that should replace existing ones
+            replace_mask = random_values < reservoir_ratio
+            
+            # Generate random indices for replacement
+            replace_indices = torch.randint(0, self.reservoir_size, (batch_size,))
+            
+            # Apply replacements
+            for i, (should_replace, idx) in enumerate(zip(replace_mask, replace_indices)):
+                if should_replace:
+                    self.reservoir[idx] = samples[i]
+            
+            self.count += batch_size
     
     def get_samples(self, num_samples=None, shuffle=True):
         """
@@ -128,7 +210,7 @@ class EnhancedVectorQuantizer(nn.Module):
         self.register_buffer('_current_step', torch.zeros(1, dtype=torch.long))
         
         # Reservoir sampler for data-dependent initialization
-        self.reservoir_sampler = ReservoirSampler(reservoir_size)
+        self.reservoir_sampler = ReservoirSampler(reservoir_size, embedding_dim)
     
     def _perform_kmeans_clustering(self, samples, num_clusters, device):
         """
@@ -150,7 +232,7 @@ class EnhancedVectorQuantizer(nn.Module):
                        n_init="auto", random_state=42)
         
         # Fit K-means and get centroids
-        kmeans.fit(flat_samples.detach().cpu().numpy())
+        kmeans.fit(flat_samples.numpy())
         centroids = torch.from_numpy(kmeans.cluster_centers_).float().to(device)
         
         return centroids
@@ -304,7 +386,7 @@ class EnhancedVectorQuantizer(nn.Module):
             reset_strategy (str): Reset strategy - 'partial' (reset unused codes) or 'full' (reset entire codebook)
         """
         if reset_strategy == 'partial':
-            print("Codebook reset triggered - performing partial reset of unused codes")
+            print("\nCodebook reset triggered - performing partial reset of unused codes")
             
             # Identify unused embeddings
             usage_ratio = self._usage_counts / (self._usage_counts.sum().item() + 1e-8)
@@ -330,7 +412,7 @@ class EnhancedVectorQuantizer(nn.Module):
             print(f"Partial reset completed: {num_unused} unused codes reinitialized")
                 
         elif reset_strategy == 'full':
-            print("Codebook reset triggered - performing full data-dependent re-initialization")
+            print("\nCodebook reset triggered - performing full data-dependent re-initialization")
             
             # Get embeddings for entire codebook using reservoir samples
             new_embeddings = self._get_embeddings_from_reservoir(self.num_embeddings, device, "full reset")
@@ -400,7 +482,7 @@ class EnhancedVectorQuantizer(nn.Module):
         current_usage = torch.bincount(encoding_indices, minlength=self.num_embeddings)
         if self.training:
             # Add to reservoir for future re-initialization
-            self.reservoir_sampler.add_sample(inputs.detach().clone())
+            self.reservoir_sampler.add_samples(inputs.detach().clone().cpu())
             
             # Update EMA statistics
             self._update_ema(flat_input, encoding_indices)
