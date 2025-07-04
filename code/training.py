@@ -10,7 +10,6 @@ from typing import Tuple, Optional, Dict, Any, List
 import os
 import json
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D  # For 3D plotting
 from tqdm import tqdm
 # import wandb  # Optional: for experiment tracking
 import argparse
@@ -20,7 +19,7 @@ import gc
 from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
 # from torch.cuda.amp import autocast, GradScaler
-from transformers import GPT2Tokenizer
+from transformers import GPT2Tokenizer, GPT2LMHeadModel
 import numpy as np
 
 # GPU memory monitoring
@@ -752,7 +751,7 @@ class GPT2VQVAETrainer:
             'perplexity': total_perplexity / num_batches
         }
     
-    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None):
+    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None, **kwargs):
         """
         Save model checkpoint.
         
@@ -761,6 +760,7 @@ class GPT2VQVAETrainer:
             metrics: Current metrics
             is_best: Whether this is the best model so far
             checkpoint_path: Path to save the checkpoint (optional)
+            **kwargs: Additional data to append to the checkpoint
         """
         checkpoint_dir = self.training_config.get('checkpoint_dir', 'checkpoints')
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -782,6 +782,9 @@ class GPT2VQVAETrainer:
             'detailed_perplexities': self.detailed_perplexities,
             'detailed_batch_indices': self.detailed_batch_indices
         }
+        
+        # Add any additional data passed as kwargs
+        checkpoint.update(kwargs)
         
         # Save best model if this is the best so far
         if is_best:
@@ -865,6 +868,8 @@ class GPT2VQVAETrainer:
         
         print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
         print("Checkpoint loaded successfully. Configuration validation completed.")
+        
+        return checkpoint
     
     def train(self, 
               prompt_sequences: torch.Tensor,
@@ -1566,14 +1571,19 @@ def load_config(config_path: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     
     return model_config, training_config
 
-def create_default_config(output_path: str, enhanced_vq: bool = False):
+def create_default_config(output_path: str, enhanced_vq: bool = False, phased_training: bool = False):
     """
     Create a default configuration file with memory optimizations.
     
     Args:
         output_path: Path where to save the default config
         enhanced_vq: Whether to include enhanced VQ-VAE configuration options
+        phased_training: Whether to include phased training configuration options (requires enhanced_vq=True)
     """
+    # Validate phased training requires enhanced VQ-VAE
+    if phased_training and not enhanced_vq:
+        raise ValueError("Phased training requires enhanced VQ-VAE (enhanced_vq=True)")
+    
     # Base model configuration
     model_config = {
         'vocab_size': 50257,  # GPT2 vocabulary size
@@ -1653,6 +1663,15 @@ def create_default_config(output_path: str, enhanced_vq: bool = False):
             # Enhanced codebook tracking
             'enhanced_codebook_tracking': True,  # Enable enhanced codebook monitoring
         })
+        
+        # Add phased training parameters if requested
+        if phased_training:
+            training_config.update({
+                # Phased training parameters
+                'initialization_steps': 1500,    # Steps to train in no-vq mode
+                'r_reestim': 500,                # Frequency of codebook reinitialization
+                'quantization_start': 5000,      # Step to start normal VQ training
+            })
     
     default_config = {
         'model_config': model_config,
@@ -1699,6 +1718,17 @@ def create_default_config(output_path: str, enhanced_vq: bool = False):
         print("  - reset_threshold = 0.0 (no automatic resets)")
         print("  - use_ema = False (EMA disabled)")
         print("  - reset_stop_fraction = 0.0 (no reset timing limit)")
+        
+        if phased_training:
+            print("\nPhased training settings included:")
+            print("  - Initialization phase: 0 to 1500 steps (no-vq mode)")
+            print("  - Reinitialization phase: 1500 to 5000 steps (VQ + periodic reinitialization)")
+            print("  - Reinitialization frequency: every 500 steps")
+            print("  - Normal training phase: after 5000 steps")
+            print("\nPhased training recipe:")
+            print("  1. Train without VQ to learn good representations")
+            print("  2. Periodically reinitialize codebook using KMeans on reservoir samples")
+            print("  3. Switch to normal VQ-VAE training with all enhancements")
     
     print("\nYou can modify this file and use it for training.")
 
@@ -1739,7 +1769,8 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
                                     num_examples: int = 3,
                                     device: str = "cuda" if torch.cuda.is_available() else "cpu",
                                     use_vq: bool = True,
-                                    model_type: str = "GPT2VQVAE"):
+                                    model_type: str = "GPT2VQVAE",
+                                    seed: int = 42):
     """
     Demonstrate GPT2VQVAE or SimpleGPT2VQVAE model generation capabilities from a checkpoint.
     
@@ -1751,6 +1782,7 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
         device: Device to run the model on
         use_vq: Whether to use vector quantization (for SimpleGPT2VQVAE)
         model_type: Type of model to use ("GPT2VQVAE" or "SimpleGPT2VQVAE")
+        seed: Random seed for sampling examples (default: 42)
     """
     print(f"Loading {model_type} model from checkpoint: {checkpoint_path}")
     
@@ -1778,25 +1810,50 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
     all_indices_tf = []
     all_indices_ar = []
     
-    # Load tokenizer
+    # Load tokenizer and GPT2 model for baseline comparison
     try:
         tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
         tokenizer.pad_token = tokenizer.eos_token
         print("Loaded GPT2 tokenizer")
+        
+        # Load pre-trained GPT2 model for baseline comparison
+        gpt2_model = GPT2LMHeadModel.from_pretrained('gpt2').to(device)
+        gpt2_model.eval()
+        print("Loaded pre-trained GPT2 model for baseline comparison")
     except Exception as e:
-        print(f"Warning: Could not load tokenizer: {e}")
+        print(f"Warning: Could not load GPT2 model/tokenizer: {e}")
         tokenizer = None
+        gpt2_model = None
     
     # Load some example data
     print(f"Loading example data from: {data_dir}")
     try:
-        # Load a small subset of data for demonstration
-        prompt_sequences = torch.load(os.path.join(data_dir, "prompt_sequences.pt"))[:num_examples]
-        cot_sequences = torch.load(os.path.join(data_dir, "cot_sequences_tensor.pt"))[:num_examples]
-        prompt_mask = torch.load(os.path.join(data_dir, "prompt_mask.pt"))[:num_examples]
-        cot_mask = torch.load(os.path.join(data_dir, "cot_mask.pt"))[:num_examples]
+        # Load all data first
+        all_prompt_sequences = torch.load(os.path.join(data_dir, "prompt_sequences.pt"))
+        all_cot_sequences = torch.load(os.path.join(data_dir, "cot_sequences_tensor.pt"))
+        all_prompt_mask = torch.load(os.path.join(data_dir, "prompt_mask.pt"))
+        all_cot_mask = torch.load(os.path.join(data_dir, "cot_mask.pt"))
         
-        print(f"Loaded {len(prompt_sequences)} examples")
+        total_examples = len(all_prompt_sequences)
+        print(f"Loaded {total_examples} total examples")
+        
+        # Randomly sample num_examples
+        if num_examples > total_examples:
+            print(f"Warning: Requested {num_examples} examples but only {total_examples} available. Using all examples.")
+            num_examples = total_examples
+        
+        # Generate random indices for sampling
+        import random
+        random.seed(seed)  # For reproducible sampling
+        sample_indices = random.sample(range(total_examples), num_examples)
+        
+        # Sample the data using the random indices
+        prompt_sequences = all_prompt_sequences[sample_indices]
+        cot_sequences = all_cot_sequences[sample_indices]
+        prompt_mask = all_prompt_mask[sample_indices]
+        cot_mask = all_cot_mask[sample_indices]
+        
+        print(f"Randomly sampled {len(prompt_sequences)} examples using seed {seed}")
         
         # Check if data has enough CoT sequences
         data_num_thoughts = cot_sequences.shape[1]
@@ -1908,6 +1965,54 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
                 vq_loss_ar = None
                 perplexity_ar = None
                 indices_ar = None
+
+            # Generate baseline using pre-trained GPT2
+            gpt2_baseline_texts = []
+            if gpt2_model is not None and tokenizer is not None:
+                try:
+                    # NEW START
+                    input_ids = prompt
+                    # Generate continuation (length: same as a single CoT sequence)
+                    max_gen_len = cot_gt.shape[-1]
+                    gpt2_outputs = gpt2_model.generate(
+                        input_ids=input_ids,
+                        max_length=input_ids.shape[1] + max_gen_len,
+                        do_sample=False,
+                        pad_token_id=tokenizer.eos_token_id
+                    )
+                    # Extract only the generated part (excluding the prompt)
+                    generated_tokens = gpt2_outputs[0][input_ids.shape[1]:]
+                    # Repeat the same baseline for each CoT sequence for fair comparison
+                    for _ in range(num_thoughts):
+                        gpt2_baseline_texts.append(tokenizer.decode(generated_tokens, skip_special_tokens=True))
+                    # NEW END
+
+                    # ORIGINAL START
+                    # Encode the prompt (remove padding)
+                    # prompt_tokens = prompt[0]
+                    # if prompt_mask_ex is not None:
+                    #     prompt_tokens = prompt_tokens[prompt_mask_ex[0].bool()]
+                    # input_ids = prompt_tokens.unsqueeze(0)
+                    # # Generate continuation (length: same as a single CoT sequence)
+                    # max_gen_len = cot_gt.shape[-1]
+                    # gpt2_outputs = gpt2_model.generate(
+                    #     input_ids=input_ids,
+                    #     max_length=input_ids.shape[1] + max_gen_len,
+                    #     do_sample=False,
+                    #     pad_token_id=tokenizer.eos_token_id
+                    # )
+                    # # Extract only the generated part (excluding the prompt)
+                    # generated_tokens = gpt2_outputs[0][input_ids.shape[1]:]
+                    # # Repeat the same baseline for each CoT sequence for fair comparison
+                    # for _ in range(num_thoughts):
+                    #     gpt2_baseline_texts.append(tokenizer.decode(generated_tokens, skip_special_tokens=True))
+                    
+                    # ORIGINAL END
+                except Exception as e:
+                    print(f"GPT2 baseline generation failed: {e}")
+                    gpt2_baseline_texts = ["FAILED"] * num_thoughts
+            else:
+                gpt2_baseline_texts = ["FAILED"] * num_thoughts
             
             # Display side-by-side comparison for each CoT sequence
             print(f"\n{'='*120}")
@@ -1979,29 +2084,36 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
                 else:
                     cot_ar_text = "FAILED"
                 
-                # Chunk all three texts
+                # GPT2 baseline text
+                gpt2_text = gpt2_baseline_texts[j] if j < len(gpt2_baseline_texts) else "FAILED"
+                
+                # Chunk all four texts
                 gt_chunks = chunk_text(cot_gt_text)
                 tf_chunks = chunk_text(cot_tf_text)
                 ar_chunks = chunk_text(cot_ar_text)
+                gpt2_chunks = chunk_text(gpt2_text)
                 
                 # Find the maximum number of chunks
-                max_chunks = max(len(gt_chunks), len(tf_chunks), len(ar_chunks))
+                max_chunks = max(len(gt_chunks), len(tf_chunks), len(ar_chunks), len(gpt2_chunks))
                 
                 # Display chunks side-by-side
                 for chunk_idx in range(max_chunks):
                     gt_chunk = gt_chunks[chunk_idx] if chunk_idx < len(gt_chunks) else ""
                     tf_chunk = tf_chunks[chunk_idx] if chunk_idx < len(tf_chunks) else ""
                     ar_chunk = ar_chunks[chunk_idx] if chunk_idx < len(ar_chunks) else ""
+                    gpt2_chunk = gpt2_chunks[chunk_idx] if chunk_idx < len(gpt2_chunks) else ""
                     
                     # Pad chunks to same length for alignment
-                    max_length = max(len(gt_chunk), len(tf_chunk), len(ar_chunk))
+                    max_length = max(len(gt_chunk), len(tf_chunk), len(ar_chunk), len(gpt2_chunk))
                     gt_chunk_padded = gt_chunk.ljust(max_length)
                     tf_chunk_padded = tf_chunk.ljust(max_length)
                     ar_chunk_padded = ar_chunk.ljust(max_length)
+                    gpt2_chunk_padded = gpt2_chunk.ljust(max_length)
                     
                     print(f"Original:        {gt_chunk_padded}")
                     print(f"Teacher Forced:  {tf_chunk_padded}")
                     print(f"Auto-regressive: {ar_chunk_padded}")
+                    print(f"GPT2 Baseline:   {gpt2_chunk_padded}")
                     
                     # Add separator after each chunk (except the last one)
                     if chunk_idx < max_chunks - 1:
@@ -2377,6 +2489,8 @@ def main():
                        help='Path to file containing custom CoT (used with --demonstrate-custom)')
     parser.add_argument('--num-examples', type=int, default=3,
                        help='Number of examples to generate in demonstration mode')
+    parser.add_argument('--demo-seed', type=int, default=42,
+                       help='Random seed for demonstration sampling (default: 42)')
     parser.add_argument('--perplexity-threshold', type=float, default=None,
                        help='Training will abort when 20-step average perplexity goes below this value (default: 1.5)')
     parser.add_argument('--perplexity-window-size', type=int, default=None,
@@ -2397,6 +2511,8 @@ def main():
                        help='Use SimpleGPT2VQVAETrainer and SimpleGPT2VQVAE model (default: False)')
     parser.add_argument('--enhanced', action='store_true', default=False,
                        help='Use EnhancedGPT2VQVAETrainer and EnhancedGPT2VQVAE model (default: False)')
+    parser.add_argument('--phased', action='store_true', default=False,
+                       help='Use PhasedEnhancedGPT2VQVAETrainer for phased training (requires --enhanced)')
     parser.add_argument('--use-vq', action='store_true', default=None,
                        help='Enable vector quantization (default: True for SimpleGPT2VQVAE, True for GPT2VQVAE)')
     parser.add_argument('--no-vq', action='store_true', default=False,
@@ -2418,7 +2534,21 @@ def main():
     parser.add_argument('--no-enhanced-codebook-tracking', action='store_true', default=False,
                        help='Disable enhanced codebook tracking')
     
+    # Phased training specific arguments
+    parser.add_argument('--initialization-steps', type=int, default=None,
+                       help='Override initialization_steps for phased training (default: 1500)')
+    parser.add_argument('--r-reestim', type=int, default=None,
+                       help='Override r_reestim for phased training (default: 500)')
+    parser.add_argument('--quantization-start', type=int, default=None,
+                       help='Override quantization_start for phased training (default: 5000)')
+    
     args = parser.parse_args()
+    
+    # Validate phased training arguments
+    if args.phased and not args.enhanced:
+        print("Error: --phased requires --enhanced to be enabled")
+        print("Please use both --enhanced and --phased flags together")
+        return
     
     # Check for nvidia-ml-py3 availability
     if args.monitor_gpu_memory and not NVML_AVAILABLE:
@@ -2429,8 +2559,7 @@ def main():
     # Handle create-config option
     if args.create_config:
         # Determine if enhanced VQ-VAE config is requested
-        enhanced_vq = args.enhanced
-        create_default_config(args.create_config, enhanced_vq=enhanced_vq)
+        create_default_config(args.create_config, enhanced_vq=args.enhanced, phased_training=args.phased)
         return
     
     try:
@@ -2535,6 +2664,23 @@ def main():
                 # Default behavior: enable enhanced codebook tracking for enhanced VQ-VAE
                 training_config['enhanced_codebook_tracking'] = True
                 print("Using default enhanced_codebook_tracking=True for enhanced VQ-VAE")
+            
+            # Handle phased training parameters
+            if args.phased:
+                print("Phased training mode enabled")
+                
+                # Override phased training parameters if specified
+                if args.initialization_steps is not None:
+                    training_config['initialization_steps'] = args.initialization_steps
+                    print(f"Overriding initialization_steps to: {args.initialization_steps}")
+                
+                if args.r_reestim is not None:
+                    training_config['r_reestim'] = args.r_reestim
+                    print(f"Overriding r_reestim to: {args.r_reestim}")
+                
+                if args.quantization_start is not None:
+                    training_config['quantization_start'] = args.quantization_start
+                    print(f"Overriding quantization_start to: {args.quantization_start}")
         else:
             # For non-enhanced models, disable enhanced codebook tracking
             training_config['enhanced_codebook_tracking'] = False
@@ -2564,8 +2710,8 @@ def main():
 
         # Run demonstration if requested
         if args.demonstrate:
-            if args.enhanced:
-                model_type = "EnhancedGPT2VQVAE"
+            if args.phased or args.enhanced:
+                model_type = "EnhancedGPT2VQVAE"  # Phased trainer uses EnhancedGPT2VQVAE model
             elif args.simple:
                 model_type = "SimpleGPT2VQVAE"
             else:
@@ -2579,14 +2725,15 @@ def main():
                 num_examples=args.num_examples,
                 device=device,
                 use_vq=training_config.get('use_vq', True),
-                model_type=model_type
+                model_type=model_type,
+                seed=args.demo_seed
             )
             return  # Exit after demonstration
         
         # Run custom demonstration if requested
         if args.demonstrate_custom:
-            if args.enhanced:
-                model_type = "EnhancedGPT2VQVAE"
+            if args.phased or args.enhanced:
+                model_type = "EnhancedGPT2VQVAE"  # Phased trainer uses EnhancedGPT2VQVAE model
             elif args.simple:
                 model_type = "SimpleGPT2VQVAE"
             else:
@@ -2625,7 +2772,9 @@ def main():
         if args.resume_from:
             model_config['use_pretrained_encoder'] = False
             model_config['use_pretrained_decoder'] = False
-            if args.enhanced:
+            if args.phased:
+                trainer = PhasedEnhancedGPT2VQVAETrainer(model_config, training_config, device=device)
+            elif args.enhanced:
                 trainer = EnhancedGPT2VQVAETrainer(model_config, training_config, device=device)
             elif args.simple:
                 trainer = SimpleGPT2VQVAETrainer(model_config, training_config, device=device)
@@ -2634,7 +2783,9 @@ def main():
             print(f"Resuming from checkpoint: {args.resume_from}")
             trainer.load_checkpoint(args.resume_from)
         else:
-            if args.enhanced:
+            if args.phased:
+                trainer = PhasedEnhancedGPT2VQVAETrainer(model_config, training_config, device=device)
+            elif args.enhanced:
                 trainer = EnhancedGPT2VQVAETrainer(model_config, training_config, device=device)
             elif args.simple:
                 trainer = SimpleGPT2VQVAETrainer(model_config, training_config, device=device)
@@ -2802,7 +2953,9 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         # Filter out enhanced VQ-VAE specific parameters for parent constructor
         enhanced_vq_params = {
             'ema_decay', 'diversity_gamma', 'reset_threshold', 
-            'reset_frequency', 'use_ema', 'reset_stop_fraction'
+            'reset_frequency', 'use_ema', 'reset_stop_fraction',
+            # for further enhancement
+            'max_reset_steps', 'reservoir_size', 'reset_strategy'
         }
         
         # Create filtered configs for parent constructor
@@ -2829,13 +2982,9 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         # Manage some model_config entries
         if 'max_reset_steps' not in model_config:
             model_config['max_reset_steps'] = None
-        if 'reset_stop_fraction' in model_config:
-            reset_stop_fraction = model_config["reset_stop_fraction"]
-            clean_model_config = model_config.copy()
-            del clean_model_config["reset_stop_fraction"]
         
         # Replace the model with EnhancedGPT2VQVAE using original config
-        self.model = EnhancedGPT2VQVAE(**clean_model_config).to(device)
+        self.model = EnhancedGPT2VQVAE(**model_config).to(device)
         
         # Re-initialize optimizer and scheduler for the new model
         self.optimizer = optim.AdamW(
@@ -2868,7 +3017,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             print(f"Reset threshold: {model_config.get('reset_threshold', 0.1)}")
             print(f"Reset frequency: {model_config.get('reset_frequency', 1000)}")
             print(f"Use EMA: {model_config.get('use_ema', True)}")
-            print(f"Reset stop fraction: {reset_stop_fraction}")
+            print(f"Reset stop fraction: {self.original_model_config.get('reset_stop_fraction', 0.2)}")
         else:
             print("Enhanced codebook tracking disabled")
         print("EnhancedGPT2VQVAE trainer initialized successfully.")
@@ -2891,6 +3040,25 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         
         # Call the parent train_epoch method
         return super().train_epoch(train_loader, num_measurements_per_epoch, current_epoch)
+
+    def load_checkpoint(self, checkpoint_path: str):
+        """
+        Enhanced checkpoint loading that restores phased training state.
+        
+        Args:
+            checkpoint_path: Path to checkpoint file
+        """
+        # Load checkpoint using parent method
+        checkpoint = super().load_checkpoint(checkpoint_path)
+        
+        # Restore phased training state if available
+        if 'current_step' in checkpoint:
+            self.current_step = checkpoint['current_step']
+            print(f"Restored training step: {self.current_step}")
+        else:
+            raise Exception("Checkpoint does not contain 'current_step' information. Phased training cannot be resumed properly without this data.")
+        
+        return checkpoint
     
     def _enhanced_track_codebook_usage(self, dataset: Any, measurement_point: int) -> None:
         """
@@ -3417,29 +3585,36 @@ def demonstrate_custom_prompt_cot(checkpoint_path: str,
         else:
             cot_ar_text = "FAILED"
         
-        # Chunk all three texts
+        # GPT2 baseline text
+        gpt2_text = gpt2_baseline_texts[j] if j < len(gpt2_baseline_texts) else "FAILED"
+        
+        # Chunk all four texts
         gt_chunks = chunk_text(cot_gt_text)
         tf_chunks = chunk_text(cot_tf_text)
         ar_chunks = chunk_text(cot_ar_text)
+        gpt2_chunks = chunk_text(gpt2_text)
         
         # Find the maximum number of chunks
-        max_chunks = max(len(gt_chunks), len(tf_chunks), len(ar_chunks))
+        max_chunks = max(len(gt_chunks), len(tf_chunks), len(ar_chunks), len(gpt2_chunks))
         
         # Display chunks side-by-side
         for chunk_idx in range(max_chunks):
             gt_chunk = gt_chunks[chunk_idx] if chunk_idx < len(gt_chunks) else ""
             tf_chunk = tf_chunks[chunk_idx] if chunk_idx < len(tf_chunks) else ""
             ar_chunk = ar_chunks[chunk_idx] if chunk_idx < len(ar_chunks) else ""
+            gpt2_chunk = gpt2_chunks[chunk_idx] if chunk_idx < len(gpt2_chunks) else ""
             
             # Pad chunks to same length for alignment
-            max_length = max(len(gt_chunk), len(tf_chunk), len(ar_chunk))
+            max_length = max(len(gt_chunk), len(tf_chunk), len(ar_chunk), len(gpt2_chunk))
             gt_chunk_padded = gt_chunk.ljust(max_length)
             tf_chunk_padded = tf_chunk.ljust(max_length)
             ar_chunk_padded = ar_chunk.ljust(max_length)
+            gpt2_chunk_padded = gpt2_chunk.ljust(max_length)
             
             print(f"Original:        {gt_chunk_padded}")
             print(f"Teacher Forced:  {tf_chunk_padded}")
             print(f"Auto-regressive: {ar_chunk_padded}")
+            print(f"GPT2 Baseline:   {gpt2_chunk_padded}")
             
             # Add separator after each chunk (except the last one)
             if chunk_idx < max_chunks - 1:
@@ -3488,6 +3663,232 @@ def demonstrate_custom_prompt_cot(checkpoint_path: str,
             )
     
     print("\nCustom prompt-CoT demonstration completed!")
+
+class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
+    """
+    Specialized trainer for EnhancedGPT2VQVAE that implements a phased training approach:
+    
+    1. Initialization Phase (0 to initialization_steps):
+       - Train using no-vq mode to learn good representations
+       
+    2. Reinitialization Phase (initialization_steps to quantization_start):
+       - Every r_reestim steps, fully reinitialize codebook using KMeans on reservoir samples
+       - Continue training with VQ enabled
+       
+    3. Normal Training Phase (after quantization_start):
+       - Standard VQ-VAE training with all enhancements
+    """
+    
+    def __init__(self, model_config: Dict[str, Any], training_config: Dict[str, Any], 
+                 device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+        """
+        Initialize the phased trainer.
+        
+        Args:
+            model_config: Model configuration dictionary
+            training_config: Training configuration dictionary with phased training parameters:
+                - initialization_steps: Number of steps to train in no-vq mode
+                - r_reestim: Frequency of codebook reinitialization during reinitialization phase
+                - quantization_start: Step at which to start normal VQ training
+            device: Device to train on
+        """
+        # Extract phased training parameters
+        self.initialization_steps = training_config.get('initialization_steps', 1500)
+        self.r_reestim = training_config.get('r_reestim', 500)
+        self.quantization_start = training_config.get('quantization_start', 5000)
+        
+        # Validate parameters
+        if self.initialization_steps >= self.quantization_start:
+            raise ValueError("initialization_steps must be less than quantization_start")
+        if self.r_reestim <= 0:
+            raise ValueError("r_reestim must be positive")
+        
+        # Initialize parent trainer
+        super().__init__(model_config, training_config, device)
+        
+        # Training phase tracking
+        self.current_step = 0
+        
+        print(f"PhasedEnhancedGPT2VQVAETrainer initialized with:")
+        print(f"  - Initialization phase: 0 to {self.initialization_steps} steps (no-vq mode)")
+        print(f"  - Reinitialization phase: {self.initialization_steps} to {self.quantization_start} steps")
+        print(f"  - Reinitialization frequency: every {self.r_reestim} steps")
+        print(f"  - Normal training phase: after {self.quantization_start} steps")
+    
+    def _determine_training_phase(self, current_step: int) -> str:
+        """
+        Determine the current training phase based on the step number.
+        
+        Args:
+            current_step: Current training step
+            
+        Returns:
+            str: Current phase name
+        """
+        if current_step < self.initialization_steps:
+            return "initialization"
+        elif current_step < self.quantization_start:
+            return "reinitialization"
+        else:
+            return "normal"
+    
+    def _should_reinitialize_codebook(self, current_step: int) -> bool:
+        """
+        Check if codebook should be reinitialized at the current step.
+        
+        Args:
+            current_step: Current training step
+            
+        Returns:
+            bool: True if codebook should be reinitialized
+        """
+        if current_step < self.initialization_steps:
+            return False
+        
+        if current_step >= self.quantization_start:
+            return False
+        
+        # Check if we're in reinitialization phase using modulo
+        if current_step >= self.initialization_steps:
+            adjusted_step = current_step - self.initialization_steps
+            return (adjusted_step + 1) % self.r_reestim == 0
+        
+        return False
+    
+    def _reinitialize_codebook(self, current_step: int):
+        """
+        Reinitialize the codebook using the EnhancedVectorQuantizer's _reset_codebook method.
+        
+        Args:
+            current_step: Current training step for logging
+        """
+        print(f"\n=== Codebook Reinitialization at step {current_step} ===")
+        
+        # Get a dummy input tensor for the device reference (required by _reset_codebook)
+        device = self.model.vector_quantizer.embedding.weight.device
+        
+        # Use the EnhancedVectorQuantizer's _reset_codebook method with 'full' strategy
+        # This will perform K-means++ clustering on reservoir samples and reset the entire codebook
+        self.model.vector_quantizer._reset_codebook(device, reset_strategy='full')
+    
+    def _forward_pass(self, prompts, cots, prompt_masks, cot_masks):
+        """
+        Enhanced forward pass that handles different training phases.
+        
+        Args:
+            prompts: Prompt sequences
+            cots: Chain-of-thought sequences
+            prompt_masks: Prompt attention masks
+            cot_masks: COT attention masks
+            
+        Returns:
+            tuple: (total_loss_batch, vq_loss, perplexity, indices)
+        """
+        # Determine current phase
+        current_phase = self._determine_training_phase(self.current_step)
+        
+        # Check if we need to reinitialize codebook
+        if self._should_reinitialize_codebook(self.current_step):
+            self._reinitialize_codebook(self.current_step)
+        
+        # Determine whether to use VQ based on current phase
+        use_vq = current_phase != "initialization"
+        
+        # Update phase tracking for logging
+        last_step_phase = self._determine_training_phase(self.current_step-1)
+        if current_phase != last_step_phase:
+            print(f"\n=== Phase transition: {last_step_phase} -> {current_phase} at step {self.current_step-1} ===")
+        
+        # Perform forward pass with appropriate VQ setting and handle mixed precision
+        if self.use_mixed_precision:
+            with autocast('cuda'):
+                _, output_logits, vq_loss, perplexity, indices = self.model(
+                    prompt=prompts,
+                    cot_sequences=cots,
+                    cot_mask=cot_masks,
+                    prompt_mask=prompt_masks,
+                    inference=False,
+                    quantize_cot_only=self.training_config.get('quantize_cot_only', True),
+                    no_vq=not use_vq
+                )
+                recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
+                total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
+        else:
+            _, output_logits, vq_loss, perplexity, indices = self.model(
+                prompt=prompts,
+                cot_sequences=cots,
+                cot_mask=cot_masks,
+                prompt_mask=prompt_masks,
+                inference=False,
+                quantize_cot_only=self.training_config.get('quantize_cot_only', True),
+                no_vq=not use_vq
+            )
+            recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
+            total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
+        
+        return total_loss_batch, vq_loss, perplexity, indices
+    
+    def train_epoch(self, train_loader, num_measurements_per_epoch, current_epoch=0):
+        """
+        Enhanced train_epoch that tracks training steps and handles phase transitions.
+        
+        Args:
+            train_loader: Training data loader
+            num_measurements_per_epoch: Number of measurements per epoch
+            current_epoch: Current epoch number
+            
+        Returns:
+            dict: Training metrics for the epoch
+        """
+        # Set max_reset_steps on the first epoch if it's still None
+        if current_epoch == 0 and self.model.vector_quantizer.max_reset_steps is None:
+            # Set max_reset_steps to quantization_start to disable automatic resets during initialization
+            self.model.vector_quantizer.max_reset_steps = self.quantization_start
+        
+        # Call parent train_epoch
+        metrics = super().train_epoch(train_loader, num_measurements_per_epoch, current_epoch)
+        
+        return metrics
+    
+    def _update_weights(self):
+        """
+        Enhanced weight update that increments step counter.
+        """
+        # Call parent weight update
+        super()._update_weights()
+        # Increment step counter
+        self.current_step += 1
+    
+    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None):
+        """
+        Enhanced checkpoint saving that includes phased training state.
+        
+        Args:
+            epoch: Current epoch
+            metrics: Training metrics
+            is_best: Whether this is the best model so far
+            checkpoint_path: Optional custom checkpoint path
+        """
+        # Call parent save_checkpoint with current_step info as kwargs
+        super().save_checkpoint(epoch, metrics, is_best, checkpoint_path, 
+                                **{
+                                    "current_step" : self.current_step
+                                    })
+    
+    def load_checkpoint(self, checkpoint_path: str):
+        """
+        Enhanced checkpoint loading that restores phased training state.
+        
+        Args:
+            checkpoint_path: Path to checkpoint file
+        """
+        # Load checkpoint using parent method
+        checkpoint = super().load_checkpoint(checkpoint_path)
+        
+        # Update current phase
+        print(f"Current training phase: {self._determine_training_phase(self.current_step)}")
+        
+        return checkpoint
 
 if __name__ == "__main__":
     # Run main function for command-line training
