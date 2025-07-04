@@ -547,10 +547,10 @@ class EnhancedVectorQuantizer(nn.Module):
         if self.training:
             # During training, return training statistics
             total_usage = self._usage_counts.sum().item()
-            usage_ratios = (self._usage_counts / (total_usage + 1e-8)).clone().detach()
+            usage_ratios = (self._usage_counts / (total_usage + 1e-8)).clone().detach().cpu()
             stats = {
                 'total_usage': total_usage,
-                'usage_counts': self._usage_counts.clone().detach(),
+                'usage_counts': self._usage_counts.clone().detach().cpu(),
                 'usage_ratio': usage_ratios,
                 'unused_codes': (self._usage_counts == 0).sum().item(),
                 'unused_ratio': (self._usage_counts == 0).float().mean().item(),
@@ -560,17 +560,17 @@ class EnhancedVectorQuantizer(nn.Module):
                 stats[f'codes_below_{int(t*1000)/10:.1f}_percent'] = (usage_ratios < t).sum().item()
             if self.use_ema:
                 stats.update({
-                    'ema_cluster_sizes': self._ema_cluster_size.clone().detach(),
+                    'ema_cluster_sizes': self._ema_cluster_size.clone().detach().cpu(),
                     'ema_weights_norm': torch.norm(self._ema_w, p=2, dim=1).mean().item(),
                 })
         else:
             # During inference, return inference statistics (read-only)
             inference_usage = self._inference_usage_counts
             total_inference_usage = inference_usage.sum().item()
-            usage_ratios = (inference_usage / (total_inference_usage + 1e-8)).clone().detach()
+            usage_ratios = (inference_usage / (total_inference_usage + 1e-8)).clone().detach().cpu()
             stats = {
                 'total_usage': total_inference_usage,
-                'usage_counts': inference_usage.clone().detach(),
+                'usage_counts': inference_usage.clone().detach().cpu(),
                 'usage_ratio': usage_ratios,
                 'unused_codes': (inference_usage == 0).sum().item(),
                 'unused_ratio': (inference_usage == 0).float().mean().item(),
@@ -581,7 +581,7 @@ class EnhancedVectorQuantizer(nn.Module):
             if self.use_ema:
                 # Return current EMA stats without modifying them
                 stats.update({
-                    'ema_cluster_sizes': self._ema_cluster_size.clone().detach(),
+                    'ema_cluster_sizes': self._ema_cluster_size.clone().detach().cpu(),
                     'ema_weights_norm': torch.norm(self._ema_w, p=2, dim=1).mean().item(),
                 })
         
