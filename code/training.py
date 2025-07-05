@@ -40,6 +40,8 @@ from vqvae_gpt2 import GPT2VQVAE, compute_perplexity
 from vqvae_gpt2_simple import SimpleGPT2VQVAE
 from vqvae_gpt2_with_enhancement import EnhancedGPT2VQVAE
 
+TRACK_MEMORY = True
+
 class TrainingAbortedException(Exception):
     """
     Custom exception raised when training is aborted due to perplexity threshold or other conditions.
@@ -905,6 +907,10 @@ class GPT2VQVAETrainer:
             num_measurements_per_epoch: Number of metrics saved per epoch
             seed: Random seed for reproducible train/validation split
         """
+        # FOR DEBUG
+        if TRACK_MEMORY:
+            torch.cuda.memory._record_memory_history(max_entries=10000)
+
         # Log initial memory usage
         self.log_memory_usage("training_start")
         
@@ -1027,6 +1033,19 @@ class GPT2VQVAETrainer:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 gc.collect()
+
+                # DEBUG
+                if TRACK_MEMORY:
+                    # after the fifth epoch
+                    if epoch == 4:
+                        try:
+                            torch.cuda.memory._dump_snapshot(f"training_cuda_memory_tracking.pickle")
+                        except Exception as e:
+                            print("Failed to log memory tracking.")
+
+                        # Stop recording memory snapshot history.
+                        torch.cuda.memory._record_memory_history(enabled=None)
+
         
         except TrainingAbortedException as e:
             # Handle aborted training
@@ -3202,24 +3221,25 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         if not self.enhanced_codebook_tracking or not self.codebook_stats_history:
             return
         
-        try:
-            # Save enhanced statistics plots
-            stats_path = os.path.join(save_dir, f"enhanced_codebook_stats_epoch_{epoch}.png")
-            self._plot_enhanced_codebook_stats(stats_path)
+        # TODO REVERT DEBUG CHANGES
+        # try:
+        # Save enhanced statistics plots
+        stats_path = os.path.join(save_dir, f"enhanced_codebook_stats_epoch_{epoch}.png")
+        self._plot_enhanced_codebook_stats(stats_path)
+        
+        # Save diversity evolution plots
+        diversity_path = os.path.join(save_dir, f"codebook_diversity_evolution_epoch_{epoch}.png")
+        self._plot_diversity_evolution(diversity_path)
+        
+        print(f"Enhanced codebook plots saved to {save_dir}")
+        
+        # Clear cache after enhanced plotting
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
             
-            # Save diversity evolution plots
-            diversity_path = os.path.join(save_dir, f"codebook_diversity_evolution_epoch_{epoch}.png")
-            self._plot_diversity_evolution(diversity_path)
-            
-            print(f"Enhanced codebook plots saved to {save_dir}")
-            
-            # Clear cache after enhanced plotting
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            gc.collect()
-            
-        except Exception as e:
-            print(f"Warning: Failed to save enhanced codebook plots: {e}")
+        # except Exception as e:
+        #     print(f"Warning: Failed to save enhanced codebook plots: {e}")
     
     def _plot_enhanced_codebook_stats(self, save_path: str) -> None:
         """Plot enhanced codebook statistics over time."""
@@ -3236,11 +3256,11 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         reset_counter = [stats['reset_counter'] for stats in self.codebook_stats_history]
         
         # Extract rarely used codes data
-        codes_below_05 = [stats.get('codes_below_0.5_percent', 0) for stats in self.codebook_stats_history]
-        codes_below_1 = [stats.get('codes_below_1.0_percent', 0) for stats in self.codebook_stats_history]
-        codes_below_5 = [stats.get('codes_below_5.0_percent', 0) for stats in self.codebook_stats_history]
-        unused_codes = [stats.get('unused_codes', 0) for stats in self.codebook_stats_history]
-        
+        codes_below_05 = np.array([stats.get('codes_below_0.5_percent', 0) for stats in self.codebook_stats_history])
+        codes_below_1  = np.array([stats.get('codes_below_1.0_percent', 0) for stats in self.codebook_stats_history])
+        codes_below_5  = np.array([stats.get('codes_below_5.0_percent', 0) for stats in self.codebook_stats_history])
+        unused_codes   = np.array([stats.get('unused_codes',            0) for stats in self.codebook_stats_history])
+
         # Plot total usage
         axes[0, 0].plot(epochs, total_usage, marker='o')
         axes[0, 0].set_title('Total Codebook Usage')
