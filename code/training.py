@@ -1231,7 +1231,7 @@ class GPT2VQVAETrainer:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             print(f"Training history saved to {save_path}")
         
-        plt.show()
+        plt.close()
     
     def plot_memory_usage(self, save_path: Optional[str] = None):
         """Plot memory usage throughout training."""
@@ -1325,7 +1325,7 @@ class GPT2VQVAETrainer:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             print(f"Memory usage plot saved to {save_path}")
         
-        plt.show()
+        plt.close()
 
     def load_training_data(self, data_dir: str, max_samples: Optional[int] = None, num_thoughts: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -2317,8 +2317,7 @@ def create_codebook_usage_heatmap(counts: torch.Tensor,
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Codebook usage heatmap saved to: {save_path}")
     
-    # Show the plot
-    plt.show()
+    plt.close()
 
 def create_codebook_usage_timeline_plot(codebook_history: List[torch.Tensor], 
                                       num_embeddings: int,
@@ -2382,7 +2381,7 @@ def create_codebook_usage_timeline_plot(codebook_history: List[torch.Tensor],
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Codebook usage timeline plot saved to: {save_path}")
     
-    plt.show()
+    plt.close()
 
 def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to Any to handle both model types
                                     dataset: TensorDataset,  # More specific type
