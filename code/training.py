@@ -3063,6 +3063,9 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             print("Enhanced codebook tracking disabled")
         print("EnhancedGPT2VQVAE trainer initialized successfully.")
 
+        # Training phase tracking - no current use, but might be useful later
+        self.current_step = 0
+
     def train_epoch(self, train_loader, num_measurements_per_epoch, current_epoch=0):
         # Set max_reset_steps on the first epoch if it's still None
         if self.model.vector_quantizer.max_reset_steps is None:
@@ -3081,6 +3084,15 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         
         # Call the parent train_epoch method
         return super().train_epoch(train_loader, num_measurements_per_epoch, current_epoch)
+
+    def _update_weights(self):
+        """
+        Enhanced weight update that increments step counter.
+        """
+        # Call parent weight update
+        super()._update_weights()
+        # Increment step counter
+        self.current_step += 1
 
     def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None):
         """
@@ -3797,9 +3809,6 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         # Override optimizer with codebook-specific learning rates
         self._setup_codebook_optimizer()
         
-        # Training phase tracking
-        self.current_step = 0
-        
         print(f"PhasedEnhancedGPT2VQVAETrainer initialized with:")
         print(f"  - Initialization phase: 0 to {self.initialization_steps} steps (no-vq mode)")
         print(f"  - Reinitialization phase: {self.initialization_steps} to {self.quantization_start} steps")
@@ -4003,15 +4012,6 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         metrics = super().train_epoch(train_loader, num_measurements_per_epoch, current_epoch)
         
         return metrics
-    
-    def _update_weights(self):
-        """
-        Enhanced weight update that increments step counter.
-        """
-        # Call parent weight update
-        super()._update_weights()
-        # Increment step counter
-        self.current_step += 1
     
     def load_checkpoint(self, checkpoint_path: str):
         """
