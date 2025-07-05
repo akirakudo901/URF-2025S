@@ -3221,25 +3221,24 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         if not self.enhanced_codebook_tracking or not self.codebook_stats_history:
             return
         
-        # TODO REVERT DEBUG CHANGES
-        # try:
-        # Save enhanced statistics plots
-        stats_path = os.path.join(save_dir, f"enhanced_codebook_stats_epoch_{epoch}.png")
-        self._plot_enhanced_codebook_stats(stats_path)
-        
-        # Save diversity evolution plots
-        diversity_path = os.path.join(save_dir, f"codebook_diversity_evolution_epoch_{epoch}.png")
-        self._plot_diversity_evolution(diversity_path)
-        
-        print(f"Enhanced codebook plots saved to {save_dir}")
-        
-        # Clear cache after enhanced plotting
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
+        try:
+            # Save enhanced statistics plots
+            stats_path = os.path.join(save_dir, f"enhanced_codebook_stats_epoch_{epoch}.png")
+            self._plot_enhanced_codebook_stats(stats_path)
             
-        # except Exception as e:
-        #     print(f"Warning: Failed to save enhanced codebook plots: {e}")
+            # Save diversity evolution plots
+            diversity_path = os.path.join(save_dir, f"codebook_diversity_evolution_epoch_{epoch}.png")
+            self._plot_diversity_evolution(diversity_path)
+            
+            print(f"Enhanced codebook plots saved to {save_dir}")
+            
+            # Clear cache after enhanced plotting
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+            
+        except Exception as e:
+            print(f"Warning: Failed to save enhanced codebook plots: {e}")
     
     def _plot_enhanced_codebook_stats(self, save_path: str) -> None:
         """Plot enhanced codebook statistics over time."""
