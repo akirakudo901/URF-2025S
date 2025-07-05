@@ -21,6 +21,8 @@ from torch.amp.grad_scaler import GradScaler
 # from torch.cuda.amp import autocast, GradScaler
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
 import numpy as np
+from matplotlib.colors import ListedColormap
+import traceback
 
 # GPU memory monitoring
 try:
@@ -2242,8 +2244,6 @@ def create_codebook_usage_heatmap(counts: torch.Tensor,
     heatmap_data = counts_padded.reshape(rows, cols)
     
     # Create a custom colormap that makes zeros white and uses the original colormap for non-zero values
-    from matplotlib.colors import ListedColormap
-    import matplotlib.colors as mcolors
     
     # Get the original colormap
     original_cmap = plt.get_cmap(cmap)
@@ -2899,7 +2899,6 @@ def main():
         print("Please check that the configuration file and data files exist.")
     except Exception as e:
         print(f"Training error: {e}")
-        import traceback
         traceback.print_exc()
         
         # Save training visualizations before exiting
