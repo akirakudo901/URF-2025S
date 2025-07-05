@@ -375,8 +375,8 @@ class GPT2VQVAETrainer:
                 use_vq=self.training_config.get('use_vq', True)
             )
             
-            # Store results
-            self.codebook_history.append(counts)
+            # Store results - ensure counts are on CPU to prevent GPU memory accumulation
+            self.codebook_history.append(counts.cpu().detach())
             self.codebook_perplexities.append(perplexity)
             self.codebook_measurement_points.append(measurement_point)
             
@@ -387,6 +387,11 @@ class GPT2VQVAETrainer:
                   f"Unique codes: {unique_codes}/{self.model.vector_quantizer.num_embeddings} "
                   f"({unique_codes/self.model.vector_quantizer.num_embeddings*100:.1f}%), "
                   f"Perplexity: {perplexity:.2f}")
+            
+            # Clear cache after codebook tracking
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
             
         except Exception as e:
             print(f"Warning: Failed to track codebook usage: {e}")
@@ -420,6 +425,11 @@ class GPT2VQVAETrainer:
             )
             
             print(f"Codebook tracking plots saved to {save_dir}")
+            
+            # Clear cache after plotting
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
             
         except Exception as e:
             print(f"Warning: Failed to save codebook tracking plots: {e}")
@@ -1073,17 +1083,7 @@ class GPT2VQVAETrainer:
             
             
             
-            # Save training history and memory usage plots for aborted training
-            history_path = os.path.join(checkpoint_dir, f'training_history_aborted_epoch_{e.epoch}.png')
-            memory_path = os.path.join(checkpoint_dir, f'memory_usage_aborted_epoch_{e.epoch}.png')
-            
-            self.plot_training_history(history_path)
-            self.plot_memory_usage(memory_path)
-            
-            # Save codebook tracking plots for aborted training
-            if self.tracking_enabled:
-                codebook_dir = os.path.join(checkpoint_dir, 'codebook_tracking')
-                self.save_codebook_plots_func(codebook_dir, e.epoch)
+            # Note: All visualizations will be saved by save_training_visualizations below
             
             # Log final memory usage for aborted training
             self.log_memory_usage("training_aborted_end")
@@ -1096,6 +1096,9 @@ class GPT2VQVAETrainer:
                 torch.cuda.empty_cache()
             gc.collect()
             
+            # Save comprehensive training visualizations for aborted training
+            save_training_visualizations(self, prefix="aborted_training")
+            
             # Re-raise the exception to be caught by the main function
             raise
         
@@ -1103,6 +1106,9 @@ class GPT2VQVAETrainer:
         self.log_memory_usage("training_end")
         
         print(f"\nTraining completed! Best validation loss: {self.best_val_loss:.4f}")
+        
+        # Save comprehensive training visualizations
+        save_training_visualizations(self, prefix="training")
     
     def plot_training_history(self, save_path: Optional[str] = None):
         """
@@ -1571,6 +1577,8 @@ def load_config(config_path: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     
     return model_config, training_config
 
+
+
 def create_default_config(output_path: str, enhanced_vq: bool = False, phased_training: bool = False):
     """
     Create a default configuration file with memory optimizations.
@@ -1845,10 +1853,8 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
             num_examples = total_examples
         
         # Generate random indices for sampling
-        import random
-        random.seed(seed)  # For reproducible sampling
-        sample_indices = random.sample(range(total_examples), num_examples)
-        
+        torch.manual_seed(seed)  # For reproducible sampling
+        sample_indices = torch.randperm(total_examples)[:num_examples]
         # Sample the data using the random indices
         prompt_sequences = all_prompt_sequences[sample_indices]
         cot_sequences = all_cot_sequences[sample_indices]
@@ -1972,8 +1978,43 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
             gpt2_baseline_texts = []
             if gpt2_model is not None and tokenizer is not None:
                 try:
-                    # NEW START
-                    input_ids = prompt
+                    # OPTION 1: PASSES A PROMPT MASK WITHOUT REMOVING PADDING
+                    # input_ids = prompt
+                    # # Generate continuation (length: same as a single CoT sequence)
+                    # max_gen_len = cot_gt.shape[-1]
+                    # gpt2_outputs = gpt2_model.generate(
+                    #     input_ids=input_ids,
+                    #     max_length=input_ids.shape[1] + max_gen_len,
+                    #     do_sample=False,
+                    #     pad_token_id=tokenizer.eos_token_id,
+                    #     attention_mask=prompt_mask_ex
+                    # )
+                    # # Extract only the generated part (excluding the prompt)
+                    # generated_tokens = gpt2_outputs[0][input_ids.shape[1]:]
+                    # # Repeat the same baseline for each CoT sequence for fair comparison
+                    # for _ in range(num_thoughts):
+                    #     gpt2_baseline_texts.append(tokenizer.decode(generated_tokens, skip_special_tokens=True))
+                    # NEW END
+
+                    # OPTION 2: REMOVE ALL PROMPT PADDING AND INSERT "Let's think step by step."
+                    # Encode the prompt (remove padding)
+                    
+                    prompt_tokens = prompt[0]
+                    if prompt_mask_ex is not None:
+                        prompt_tokens = prompt_tokens[prompt_mask_ex[0].bool()]
+                    
+                    # Add "Let's think step by step." after the prompt
+                    step_by_step_text = "Let's think step by step."
+                    step_by_step_tokens = tokenizer.encode(step_by_step_text, add_special_tokens=False)
+                    
+                    # Combine prompt tokens with step-by-step tokens
+                    combined_tokens = torch.cat([
+                        prompt_tokens,
+                        torch.tensor(step_by_step_tokens, dtype=prompt_tokens.dtype, device=prompt_tokens.device)
+                    ])
+                    
+                    input_ids = combined_tokens.unsqueeze(0)
+                    
                     # Generate continuation (length: same as a single CoT sequence)
                     max_gen_len = cot_gt.shape[-1]
                     gpt2_outputs = gpt2_model.generate(
@@ -1982,32 +2023,11 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
                         do_sample=False,
                         pad_token_id=tokenizer.eos_token_id
                     )
-                    # Extract only the generated part (excluding the prompt)
+                    # Extract only the generated part (excluding the prompt + step-by-step text)
                     generated_tokens = gpt2_outputs[0][input_ids.shape[1]:]
                     # Repeat the same baseline for each CoT sequence for fair comparison
                     for _ in range(num_thoughts):
                         gpt2_baseline_texts.append(tokenizer.decode(generated_tokens, skip_special_tokens=True))
-                    # NEW END
-
-                    # ORIGINAL START
-                    # Encode the prompt (remove padding)
-                    # prompt_tokens = prompt[0]
-                    # if prompt_mask_ex is not None:
-                    #     prompt_tokens = prompt_tokens[prompt_mask_ex[0].bool()]
-                    # input_ids = prompt_tokens.unsqueeze(0)
-                    # # Generate continuation (length: same as a single CoT sequence)
-                    # max_gen_len = cot_gt.shape[-1]
-                    # gpt2_outputs = gpt2_model.generate(
-                    #     input_ids=input_ids,
-                    #     max_length=input_ids.shape[1] + max_gen_len,
-                    #     do_sample=False,
-                    #     pad_token_id=tokenizer.eos_token_id
-                    # )
-                    # # Extract only the generated part (excluding the prompt)
-                    # generated_tokens = gpt2_outputs[0][input_ids.shape[1]:]
-                    # # Repeat the same baseline for each CoT sequence for fair comparison
-                    # for _ in range(num_thoughts):
-                    #     gpt2_baseline_texts.append(tokenizer.decode(generated_tokens, skip_special_tokens=True))
                     
                     # ORIGINAL END
                 except Exception as e:
@@ -2431,23 +2451,29 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
                     )
                 
                 if indices is not None:
-                    all_indices.append(indices.flatten())
+                    # Move indices to CPU immediately to prevent GPU memory accumulation
+                    all_indices.append(indices.flatten().cpu())
                     
             except Exception as e:
                 print(f"Warning: Failed to compute indices for sample {idx}: {e}")
                 continue
+            
+            # Clear intermediate tensors
+            del prompts, cots, prompt_masks, cot_masks
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     
     if not all_indices:
         print("Warning: No valid indices computed from samples")
         return torch.zeros(model.vector_quantizer.num_embeddings, dtype=torch.long), 0.0
     
-    # Combine all indices
+    # Combine all indices (all should be on CPU now)
     combined_indices = torch.cat(all_indices, dim=0)
     
     # Compute usage counts using numpy's bincount
     counts = torch.from_numpy(
         np.bincount(
-            combined_indices.cpu().numpy(),
+            combined_indices.numpy(),
             minlength=model.vector_quantizer.num_embeddings
         )
     ).long()
@@ -2458,6 +2484,12 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
     if model_was_training:
         model.train()
     
+    # Clear intermediate tensors
+    del all_indices, combined_indices
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    # Ensure counts are on CPU to prevent GPU memory accumulation
     return counts, perplexity.item()
 
 def main():
@@ -2825,13 +2857,6 @@ def main():
             num_measurements_per_epoch=training_config.get('num_measurements_per_epoch', 20)
         )
         
-        # Save training history and memory usage
-        checkpoint_dir = training_config.get('checkpoint_dir', 'checkpoints')
-        history_path = os.path.join(checkpoint_dir, 'training_history.png')
-        memory_path = os.path.join(checkpoint_dir, 'memory_usage.png')
-        
-        trainer.plot_training_history(history_path)
-        trainer.plot_memory_usage(memory_path)
         
         print(f"Best model saved to: {trainer.best_model_path}")
         
@@ -2864,6 +2889,9 @@ def main():
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
+        
+        # Save training visualizations before re-raising the exception
+        save_training_visualizations(trainer, prefix="oom_error")
         raise
         
     except FileNotFoundError as e:
@@ -2873,6 +2901,11 @@ def main():
         print(f"Training error: {e}")
         import traceback
         traceback.print_exc()
+        
+        # Save training visualizations before exiting
+        if 'trainer' in locals():
+            print("Saving training results as figures.")
+            save_training_visualizations(trainer, prefix="error")
 
 class SimpleGPT2VQVAETrainer(GPT2VQVAETrainer):
     """
@@ -3049,6 +3082,22 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         # Call the parent train_epoch method
         return super().train_epoch(train_loader, num_measurements_per_epoch, current_epoch)
 
+    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None):
+        """
+        Enhanced checkpoint saving that includes phased training state.
+        
+        Args:
+            epoch: Current epoch
+            metrics: Training metrics
+            is_best: Whether this is the best model so far
+            checkpoint_path: Optional custom checkpoint path
+        """
+        # Call parent save_checkpoint with current_step info as kwargs
+        super().save_checkpoint(epoch, metrics, is_best, checkpoint_path, 
+                                **{
+                                    "current_step" : self.current_step
+                                    })
+
     def load_checkpoint(self, checkpoint_path: str):
         """
         Enhanced checkpoint loading that restores phased training state.
@@ -3088,9 +3137,25 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             codebook_stats = self.model.get_vector_quantizer_stats()
             diversity_metrics = self.model.get_embedding_diversity()
             
-            # Store results
-            self.codebook_stats_history.append(codebook_stats)
-            self.diversity_history.append(diversity_metrics)
+            # Store results - ensure tensors are moved to CPU to prevent GPU memory accumulation
+            # Convert any tensors in codebook_stats to CPU
+            cpu_codebook_stats = {}
+            for key, value in codebook_stats.items():
+                if isinstance(value, torch.Tensor):
+                    cpu_codebook_stats[key] = value.cpu().detach()
+                else:
+                    cpu_codebook_stats[key] = value
+            
+            # Convert any tensors in diversity_metrics to CPU
+            cpu_diversity_metrics = {}
+            for key, value in diversity_metrics.items():
+                if isinstance(value, torch.Tensor):
+                    cpu_diversity_metrics[key] = value.cpu().detach()
+                else:
+                    cpu_diversity_metrics[key] = value
+            
+            self.codebook_stats_history.append(cpu_codebook_stats)
+            self.diversity_history.append(cpu_diversity_metrics)
             
             # Print enhanced statistics
             print(f"\nEnhanced Codebook tracking (point {measurement_point}):")
@@ -3113,6 +3178,11 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             if 'ema_cluster_sizes' in codebook_stats:
                 ema_usage = (codebook_stats['ema_cluster_sizes'] > 0).sum().item()
                 print(f"  EMA active clusters: {ema_usage}/{self.model.vector_quantizer.num_embeddings}")
+            
+            # Clear cache after enhanced tracking
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
             
         except Exception as e:
             print(f"Warning: Failed to track enhanced codebook usage: {e}")
@@ -3142,6 +3212,11 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             self._plot_diversity_evolution(diversity_path)
             
             print(f"Enhanced codebook plots saved to {save_dir}")
+            
+            # Clear cache after enhanced plotting
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
             
         except Exception as e:
             print(f"Warning: Failed to save enhanced codebook plots: {e}")
@@ -3938,22 +4013,6 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         # Increment step counter
         self.current_step += 1
     
-    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None):
-        """
-        Enhanced checkpoint saving that includes phased training state.
-        
-        Args:
-            epoch: Current epoch
-            metrics: Training metrics
-            is_best: Whether this is the best model so far
-            checkpoint_path: Optional custom checkpoint path
-        """
-        # Call parent save_checkpoint with current_step info as kwargs
-        super().save_checkpoint(epoch, metrics, is_best, checkpoint_path, 
-                                **{
-                                    "current_step" : self.current_step
-                                    })
-    
     def load_checkpoint(self, checkpoint_path: str):
         """
         Enhanced checkpoint loading that restores phased training state.
@@ -3968,6 +4027,67 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         print(f"Current training phase: {self._determine_training_phase(self.current_step)}")
         
         return checkpoint
+
+def save_training_visualizations(trainer, save_dir: str = None, prefix: str = "training"):
+    """
+    Save comprehensive training visualizations including all available plots and metrics.
+    
+    Args:
+        trainer: The trainer instance with training data
+        save_dir: Directory to save visualizations (defaults to trainer's checkpoint directory)
+        prefix: Prefix for saved files
+    """
+    DEFAULT_FOLDER = './training_visualizations'
+    try:
+        if save_dir is None:
+            training_config = getattr(trainer, 'training_config', None)
+            if training_config is None:
+                save_dir = DEFAULT_FOLDER
+            else:
+                save_dir = training_config.get('checkpoint_dir', DEFAULT_FOLDER)
+        
+        os.makedirs(save_dir, exist_ok=True)
+        
+        print(f"\n📊 Saving comprehensive training visualizations to {save_dir}")
+        
+        # 1. Training history plots
+        history_path = os.path.join(save_dir, f"{prefix}_history.png")
+        trainer.plot_training_history(history_path)
+        
+        # 2. Memory usage plots
+        memory_path = os.path.join(save_dir, f"{prefix}_memory_usage.png")
+        trainer.plot_memory_usage(memory_path)
+        
+        # 3. Codebook tracking plots (if enabled)
+        if trainer.tracking_enabled:
+            codebook_dir = os.path.join(save_dir, f"{prefix}_codebook_tracking")
+            os.makedirs(codebook_dir, exist_ok=True)
+            
+            # Save current codebook plots
+            if hasattr(trainer, 'save_codebook_plots_func'):
+                trainer.save_codebook_plots_func(codebook_dir, len(trainer.train_losses))
+        
+        print(f"✅ All training visualizations saved successfully!")
+        print(f"   📈 Training history: {history_path}")
+        print(f"   💾 Memory usage: {memory_path}")
+        if trainer.tracking_enabled:
+            print(f"   🎯 Codebook tracking: {codebook_dir}")
+        
+    except Exception as e:
+        print(f"⚠️  Warning: Failed to save some training visualizations: {e}")
+        # Try to save at least basic plots
+        try:
+            if save_dir is None:
+                save_dir = getattr(trainer, 'checkpoint_dir', './training_visualizations')
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # Fallback: save basic training history
+            history_path = os.path.join(save_dir, f"{prefix}_history_fallback.png")
+            trainer.plot_training_history(history_path)
+            print(f"   📈 Basic training history saved: {history_path}")
+        except Exception as fallback_error:
+            print(f"   ❌ Failed to save even basic plots: {fallback_error}")
+
 
 if __name__ == "__main__":
     # Run main function for command-line training
