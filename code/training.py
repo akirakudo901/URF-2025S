@@ -564,7 +564,7 @@ class GPT2VQVAETrainer:
             cot_masks = cot_masks.to(self.device, non_blocking=True)
             
             # Forward pass and loss calculation
-            total_loss_batch, vq_loss, perplexity, indices = self._forward_pass(
+            total_loss_batch, vq_loss, perplexity, _ = self._forward_pass(
                 prompts, cots, prompt_masks, cot_masks
             )
             
@@ -693,7 +693,7 @@ class GPT2VQVAETrainer:
                 cot_masks = cot_masks.to(self.device, non_blocking=True)
                 
                 # Forward pass and loss calculation
-                total_loss_batch, vq_loss, perplexity, indices = self._forward_pass(
+                total_loss_batch, vq_loss, perplexity, _ = self._forward_pass(
                     prompts, cots, prompt_masks, cot_masks
                 )
                 
@@ -2215,16 +2215,6 @@ def create_codebook_usage_heatmap(counts: torch.Tensor,
     if counts.dim() > 1:
         counts = counts.flatten()
     
-    # Ensure we have the right number of counts
-    if counts.numel() < num_embeddings:
-        # Pad with zeros if needed
-        padded_counts = torch.zeros(num_embeddings, dtype=counts.dtype, device=counts.device)
-        padded_counts[:counts.numel()] = counts
-        counts = padded_counts
-    elif counts.numel() > num_embeddings:
-        # Truncate if needed
-        counts = counts[:num_embeddings]
-    
     counts_np = counts.cpu().numpy()
     
     # Create the heatmap
@@ -2456,11 +2446,11 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
             except Exception as e:
                 print(f"Warning: Failed to compute indices for sample {idx}: {e}")
                 continue
-            
-            # Clear intermediate tensors
-            del prompts, cots, prompt_masks, cot_masks
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            finally:
+                # Clear intermediate tensors
+                del prompts, cots, prompt_masks, cot_masks
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
     
     if not all_indices:
         print("Warning: No valid indices computed from samples")
