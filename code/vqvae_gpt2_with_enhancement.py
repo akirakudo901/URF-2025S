@@ -788,7 +788,7 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
                  # Vector Quantizer specific parameters
                  ema_decay=0.99, diversity_gamma=0.1, reset_threshold=0.1,
                  reset_frequency=1000, use_ema=True, max_reset_steps=None, reservoir_size=10000,
-                 reset_strategy='partial', use_batch_norm=False,
+                 reset_strategy='partial', use_batch_norm=True,
                  # Unified parameters (applied to both encoder and decoder if specified)
                  n_layer=12, n_head=12, n_inner=None, dropout=0.1, activation_function="gelu",
                  # Encoder-specific parameters (take precedence over unified if specified)
