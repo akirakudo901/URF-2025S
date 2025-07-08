@@ -3201,7 +3201,11 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
     - reset_threshold = 0.0 (no automatic resets)
     - use_ema = False (EMA disabled)
     """
-    def __init__(self, model_config: Dict[str, Any], training_config: Dict[str, Any], device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+    def __init__(self, 
+                 model_config: Dict[str, Any], 
+                 training_config: Dict[str, Any], 
+                 device: str = "cuda" if torch.cuda.is_available() else "cpu", 
+                 tracking_functions: Optional[Dict[str, Any]] = None):
         # Filter out enhanced VQ-VAE specific parameters for parent constructor
         enhanced_vq_params = {
             'ema_decay', 'diversity_gamma', 'reset_threshold', 
@@ -3218,11 +3222,11 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         self.original_model_config = model_config
         self.original_training_config = training_config
         
-        # Set up enhanced tracking functions
+        # Set up enhanced tracking functions, for those not provided
         enhanced_tracking_functions = {
-            'track_codebook_usage': self._enhanced_track_codebook_usage,
-            'save_codebook_plots': self._enhanced_save_codebook_plots,
-            'tracking_enabled': training_config.get('enhanced_codebook_tracking', True)
+            'track_codebook_usage': tracking_functions.get('track_codebook_usage', self._enhanced_track_codebook_usage),
+            'save_codebook_plots': tracking_functions.get('save_codebook_plots', self._enhanced_save_codebook_plots),
+            'tracking_enabled': tracking_functions.get('tracking_enabled', training_config.get('enhanced_codebook_tracking', True))
         }
         
         # Call parent constructor with filtered configs and enhanced tracking functions
@@ -4081,8 +4085,13 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         if self.codebook_lr_multiplier <= 0:
             raise ValueError("codebook_lr_multiplier must be positive")
         
+        # Replace the track codebook usage function with the phased version (which ignores the initialization stage)
+        phased_tracking_functions = {
+            'track_codebook_usage': self._phased_track_codebook_usage
+        }
+
         # Initialize parent trainer
-        super().__init__(model_config, training_config, device)
+        super().__init__(model_config, training_config, device, phased_tracking_functions)
         
         # Override optimizer with codebook-specific learning rates
         self._setup_codebook_optimizer()
@@ -4301,6 +4310,19 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         metrics = super().train_epoch(train_loader, num_measurements_per_epoch, current_epoch)
         
         return metrics
+
+    def _phased_track_codebook_usage(self, dataset: Any, measurement_point: int) -> None:
+        """
+        Enhanced codebook tracking with additional statistics.
+        
+        Args:
+            dataset: Dataset to sample from
+            measurement_point: Current measurement point index
+        """
+        if self._determine_training_phase(self.current_step) == "initialization": return
+        # Only call the parent's _enhanced_track_codebook_usage if we are out of the warm up phase
+        super()._enhanced_track_codebook_usage(dataset, measurement_point)
+        
     
     def load_checkpoint(self, checkpoint_path: str):
         """
