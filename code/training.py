@@ -2,6 +2,39 @@
 # Created: 2025/06/19
 # Last Updated: 2025/06/23
 
+"""
+Training script for GPT2VQVAE models with comprehensive memory profiling.
+
+This script includes PyTorch profiler integration to track memory usage in different parts of the training process.
+
+To enable profiling, add the following to your training_config:
+{
+    "profiler_enabled": true,
+    "profiler_schedule": {
+        "wait": 0,      # Wait 0 steps before starting
+        "warmup": 0,    # No warmup
+        "active": 6,    # Profile for 6 steps
+        "repeat": 1     # Repeat once
+    }
+}
+
+The profiler will track:
+- Forward pass operations (## forward_pass ##)
+- Backward pass operations (## backward_pass ##)
+- Optimizer steps (## optimizer_step ##)
+- Validation forward passes (## validation_forward ##)
+- Checkpoint saving (## save_checkpoint ##)
+- Codebook plot saving (## save_codebook_plots ##)
+- Training history plotting (## plot_training_history ##)
+- Memory usage plotting (## plot_memory_usage ##)
+- Training visualization saving (## save_training_visualizations ##)
+
+Profiler outputs:
+- Chrome trace file (.json.gz) for timeline analysis
+- Memory timeline HTML file for memory usage visualization
+- Files are saved with hostname and timestamp prefix
+"""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -23,6 +56,9 @@ from transformers import GPT2Tokenizer, GPT2LMHeadModel
 import numpy as np
 from matplotlib.colors import ListedColormap
 import traceback
+import socket
+from datetime import datetime
+from torch.autograd.profiler import record_function
 
 # GPU memory monitoring
 try:
@@ -40,7 +76,28 @@ from vqvae_gpt2 import GPT2VQVAE, compute_perplexity
 from vqvae_gpt2_simple import SimpleGPT2VQVAE
 from vqvae_gpt2_with_enhancement import EnhancedGPT2VQVAE
 
-TRACK_MEMORY = True
+TRACK_MEMORY = False
+TRACK_IN_EPOCH_MEMORY = False
+
+# Profiler configuration
+TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
+
+def trace_handler(prof: torch.profiler.profile):
+    """Handler for profiler traces - saves Chrome trace and memory timeline."""
+    # Prefix for file names
+    host_name = socket.gethostname()
+    timestamp = datetime.now().strftime(TIME_FORMAT_STR)
+    file_prefix = f"{host_name}_{timestamp}"
+
+    # Construct the trace file
+    print("Exporting chrome trace...", end="")
+    prof.export_chrome_trace(f"{file_prefix}.json.gz")
+    print("DONE!")
+
+    # Construct the memory timeline file
+    print("Exporting memory timeline...", end="")
+    prof.export_memory_timeline(f"{file_prefix}.html", device="cuda:0")
+    print("DONE!")
 
 class TrainingAbortedException(Exception):
     """
@@ -260,19 +317,26 @@ class GPT2VQVAETrainer:
         
         self.ensure_numeric_types(self.model_config)
         self.ensure_numeric_types(self.training_config)
+
+        # Memory monitoring
+        self.memory_stats = []
         
         # Log memory before model initialization
         if self.memory_monitor:
-            self.memory_monitor.log_memory_usage("before_model_init")
-            self.memory_monitor.log_pytorch_memory_usage("before_model_init")
+            # TODO SEE IF IT WORKS CORRECTLY
+            self.log_memory_usage("before_model_init")
+            # self.memory_monitor.log_memory_usage("before_model_init")
+            # self.memory_monitor.log_pytorch_memory_usage("before_model_init")
         
         # Initialize model
         self.model = GPT2VQVAE(**model_config).to(device)
         
         # Log memory after model weights loaded to GPU
         if self.memory_monitor:
-            self.memory_monitor.log_memory_usage("after_model_weights_loaded")
-            self.memory_monitor.log_pytorch_memory_usage("after_model_weights_loaded")
+            # TODO SEE IF IT WORKS CORRECTLY
+            self.log_memory_usage("after_model_weights_loaded")
+            # self.memory_monitor.log_memory_usage("after_model_weights_loaded")
+            # self.memory_monitor.log_pytorch_memory_usage("after_model_weights_loaded")
         
         # Enable gradient checkpointing if specified
         if self.use_gradient_checkpointing:
@@ -293,8 +357,10 @@ class GPT2VQVAETrainer:
         
         # Log memory before optimizer initialization
         if self.memory_monitor:
-            self.memory_monitor.log_memory_usage("before_optimizer_init")
-            self.memory_monitor.log_pytorch_memory_usage("before_optimizer_init")
+            # TODO SEE IF IT WORKS CORRECTLY
+            self.log_memory_usage("before_optimizer_init")
+            # self.memory_monitor.log_memory_usage("before_optimizer_init")
+            # self.memory_monitor.log_pytorch_memory_usage("before_optimizer_init")
         
         # Initialize optimizer
         self.optimizer = optim.AdamW(
@@ -306,8 +372,10 @@ class GPT2VQVAETrainer:
         
         # Log memory after optimizer initialization
         if self.memory_monitor:
-            self.memory_monitor.log_memory_usage("after_optimizer_init")
-            self.memory_monitor.log_pytorch_memory_usage("after_optimizer_init")
+            # TODO SEE IF IT WORKS CORRECTLY
+            self.log_memory_usage("after_optimizer_init")
+            # self.memory_monitor.log_memory_usage("after_optimizer_init")
+            # self.memory_monitor.log_pytorch_memory_usage("after_optimizer_init")
         
         # Initialize mixed precision training
         if self.use_mixed_precision:
@@ -345,9 +413,6 @@ class GPT2VQVAETrainer:
         # Best model tracking
         self.best_val_loss = float('inf')
         self.best_model_path = None
-        
-        # Memory monitoring
-        self.memory_stats = []
         
         # Initialize gradient checkpointing as disabled by default
         self._gradient_checkpointing_enabled = False
@@ -392,13 +457,16 @@ class GPT2VQVAETrainer:
                   f"({unique_codes/self.model.vector_quantizer.num_embeddings*100:.1f}%), "
                   f"Perplexity: {perplexity:.2f}")
             
-            # Clear cache after codebook tracking
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            gc.collect()
+            # Explicitly delete GPU tensors to prevent memory accumulation
+            del counts
             
         except Exception as e:
             print(f"Warning: Failed to track codebook usage: {e}")
+        finally:
+            # Ensure cleanup even on error
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
     
     def _default_save_codebook_plots(self, save_dir: str, epoch: int) -> None:
         """Default codebook plotting function for base trainer."""
@@ -559,38 +627,69 @@ class GPT2VQVAETrainer:
         progress_bar = tqdm(train_loader, desc="Training")
         
         for batch_idx, (prompts, cots, prompt_masks, cot_masks) in enumerate(progress_bar):
+            # TODO DEBUG PURPOSE
+            if TRACK_IN_EPOCH_MEMORY:
+                self.log_memory_usage(f"before batch {batch_idx}")
+            
+            # Profiler step if enabled
+            # if hasattr(self, 'profiler_enabled') and self.profiler_enabled and self.profiler_context is not None:
+            #     self.profiler_context.step()
             # Move to device
             prompts = prompts.to(self.device, non_blocking=True)
             cots = cots.to(self.device, non_blocking=True)
             prompt_masks = prompt_masks.to(self.device, non_blocking=True)
             cot_masks = cot_masks.to(self.device, non_blocking=True)
+
+            # TODO DEBUG PURPOSE
+            if TRACK_IN_EPOCH_MEMORY:
+                self.log_memory_usage(f"after data loading, batch {batch_idx}")
             
             # Forward pass and loss calculation
-            total_loss_batch, vq_loss, perplexity, _ = self._forward_pass(
-                prompts, cots, prompt_masks, cot_masks
-            )
+            with record_function("## forward_pass ##"):
+                total_loss_batch, vq_loss, perplexity, _ = self._forward_pass(
+                    prompts, cots, prompt_masks, cot_masks
+                )
+            
+            # TODO DEBUG PURPOSE
+            if TRACK_IN_EPOCH_MEMORY:
+                self.log_memory_usage(f"after forward pass, batch {batch_idx}")
             
             # Scale loss and backward pass
-            scaled_loss = total_loss_batch / self.gradient_accumulation_steps
-            if self.use_mixed_precision and self.scaler is not None:
-                self.scaler.scale(scaled_loss).backward()
-            else:
-                scaled_loss.backward()
+            with record_function("## backward_pass ##"):
+                scaled_loss = total_loss_batch / self.gradient_accumulation_steps
+                if self.use_mixed_precision and self.scaler is not None:
+                    self.scaler.scale(scaled_loss).backward()
+                else:
+                    scaled_loss.backward()
             
+            # TODO DEBUG PURPOSE
+            if TRACK_IN_EPOCH_MEMORY:
+                self.log_memory_usage(f"after backward pass, batch {batch_idx}")
+
             accumulation_steps += 1
             
             # Update weights every gradient_accumulation_steps
             if accumulation_steps % self.gradient_accumulation_steps == 0:
-                self._update_weights()
+                with record_function("## optimizer_step ##"):
+                    self._update_weights()
+                # TODO DEBUG PURPOSE
+                if TRACK_IN_EPOCH_MEMORY:
+                    self.log_memory_usage(f"after weight update, batch {batch_idx}")
+
+            
+            # Extract scalar values and detach tensors to prevent memory accumulation
+            total_loss_batch_item = total_loss_batch.item()
+            vq_loss_item = vq_loss.item()
+            perplexity_item = perplexity.item()
             
             # Update metrics
-            total_loss += total_loss_batch.item()
-            total_vq_loss += vq_loss.item()
-            total_perplexity += perplexity.item()
+            total_loss += total_loss_batch_item
+            total_vq_loss += vq_loss_item
+            total_perplexity += perplexity_item
             num_batches += 1
             
             # Update perplexity monitoring
-            recent_perplexities.append(perplexity.item())
+            recent_perplexities.append(perplexity_item)
             if len(recent_perplexities) > perplexity_window_size:
                 recent_perplexities.pop(0)
             
@@ -622,41 +721,76 @@ class GPT2VQVAETrainer:
                         metrics=final_metrics,
                         final_perplexity=avg_perplexity
                     )
-            
+
             # Log detailed metrics at regular intervals
             if batch_idx % measurement_interval == 0:
-                detailed_losses.append(total_loss_batch.item())
-                detailed_vq_losses.append(vq_loss.item())
-                detailed_perplexities.append(perplexity.item())
+                # TODO DEBUG PURPOSE
+                if TRACK_IN_EPOCH_MEMORY:
+                    self.log_memory_usage(f"before detailed info, batch {batch_idx}")
+
+                detailed_losses.append(total_loss_batch_item)
+                detailed_vq_losses.append(vq_loss_item)
+                detailed_perplexities.append(perplexity_item)
                 detailed_batch_indices.append(batch_idx)
                 
                 # Track codebook usage at measurement intervals
                 if self.tracking_enabled:
+
+                    # TODO DEBUG PURPOSE
+                    if TRACK_IN_EPOCH_MEMORY:
+                        self.log_memory_usage(f"before getting the dataset, batch {batch_idx}")
+
                     # Get the dataset from the data loader
                     dataset: Any = train_loader.dataset
                     if hasattr(dataset, 'dataset'):  # Handle SubsetRandomSampler case
                         dataset = dataset.dataset
+
+                    # TODO DEBUG PURPOSE
+                    if TRACK_IN_EPOCH_MEMORY:
+                        self.log_memory_usage(f"after getting the dataset, batch {batch_idx}")
+
                     self.track_codebook_usage_func(dataset, batch_idx)
+
+                    # TODO DEBUG PURPOSE
+                    if TRACK_IN_EPOCH_MEMORY:
+                        self.log_memory_usage(f"after running codebook usage function, batch {batch_idx}")
+                    
+                
+                # TODO DEBUG PURPOSE
+                if TRACK_IN_EPOCH_MEMORY:
+                    self.log_memory_usage(f"after detailed info, batch {batch_idx}")
             
             # Update progress bar
             acc_step = (accumulation_steps % self.gradient_accumulation_steps) + 1
             current_avg_perplexity = sum(recent_perplexities) / len(recent_perplexities) if recent_perplexities else 0
             progress_bar.set_postfix({
-                'loss': f"{total_loss_batch.item():.4f}",
-                'vq_loss': f"{vq_loss.item():.4f}",
-                'perplexity': f"{perplexity.item():.2f}",
+                'loss': f"{total_loss_batch_item:.4f}",
+                'vq_loss': f"{vq_loss_item:.4f}",
+                'perplexity': f"{perplexity_item:.2f}",
                 'avg_perplexity': f"{current_avg_perplexity:.2f}",
                 'accum_steps': f"{acc_step}/{self.gradient_accumulation_steps}"
             })
+
+            # TODO DEBUG PURPOSE
+            if TRACK_IN_EPOCH_MEMORY:
+                self.log_memory_usage(f"after getting the dataset, batch {batch_idx}")
             
-            # Clear cache periodically
-            if batch_idx % 10 == 0:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                gc.collect()
+            # Explicitly delete intermediate tensors to prevent memory accumulation
+            del total_loss_batch, vq_loss, perplexity, scaled_loss
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
         
+        # TODO DEBUG PURPOSE
+        if TRACK_IN_EPOCH_MEMORY:
+            self.log_memory_usage(f"before getting average metrics, batch {batch_idx}")
+
         # Calculate averages
         avg_metrics = self._get_average_metrics(total_loss, total_vq_loss, total_perplexity, num_batches)
+        
+        # TODO DEBUG PURPOSE
+        if TRACK_IN_EPOCH_MEMORY:
+            self.log_memory_usage(f"after getting average metrics, batch {batch_idx}")
         
         # Return both detailed and average metrics
         return {
@@ -687,7 +821,10 @@ class GPT2VQVAETrainer:
         num_batches = 0
         
         with torch.no_grad():
-            for prompts, cots, prompt_masks, cot_masks in tqdm(val_loader, desc="Validation"):
+            for batch_idx, (prompts, cots, prompt_masks, cot_masks) in enumerate(tqdm(val_loader, desc="Validation")):
+                # Profiler step if enabled
+                # if hasattr(self, 'profiler_enabled') and self.profiler_enabled and self.profiler_context is not None:
+                #     self.profiler_context.step()
                 # Move to device
                 prompts = prompts.to(self.device, non_blocking=True)
                 cots = cots.to(self.device, non_blocking=True)
@@ -695,9 +832,10 @@ class GPT2VQVAETrainer:
                 cot_masks = cot_masks.to(self.device, non_blocking=True)
                 
                 # Forward pass and loss calculation
-                total_loss_batch, vq_loss, perplexity, _ = self._forward_pass(
-                    prompts, cots, prompt_masks, cot_masks
-                )
+                with record_function("## validation_forward ##"):
+                    total_loss_batch, vq_loss, perplexity, _ = self._forward_pass(
+                        prompts, cots, prompt_masks, cot_masks
+                    )
                 
                 # Update metrics
                 total_loss += total_loss_batch.item()
@@ -907,6 +1045,7 @@ class GPT2VQVAETrainer:
             num_measurements_per_epoch: Number of metrics saved per epoch
             seed: Random seed for reproducible train/validation split
         """
+
         # FOR DEBUG
         if TRACK_MEMORY:
             torch.cuda.memory._record_memory_history(max_entries=10000)
@@ -966,11 +1105,30 @@ class GPT2VQVAETrainer:
             self.load_checkpoint(resume_from)
             start_epoch = len(self.train_losses)
         
-        # Training loop
+        # Training loop with profiler
         try:
+            # Set up profiler for this epoch if enabled
+            self.profiler_context = None
+            if self.profiler_enabled:
+                print(f"Start profiler tracking.")
+                self.profiler_context = torch.profiler.profile(
+                    activities=self.profiler_activities,
+                    schedule=torch.profiler.schedule(**self.profiler_schedule),
+                    record_shapes=True,
+                    profile_memory=True,
+                    with_stack=True,
+                    on_trace_ready=trace_handler,
+                )
+                self.profiler_context.__enter__()
+
             for epoch in range(start_epoch, self.training_config['num_epochs']):
                 print(f"\nEpoch {epoch + 1}/{self.training_config['num_epochs']}")
                 print("-" * 50)
+
+                # Take a profiler step
+                if hasattr(self, 'profiler_enabled') and self.profiler_enabled and self.profiler_context is not None:
+                    self.profiler_context.step()
+            
                 
                 # Log memory before epoch
                 self.log_memory_usage(f"epoch_{epoch+1}_start")
@@ -1018,16 +1176,19 @@ class GPT2VQVAETrainer:
                 is_best = val_metrics['loss'] < self.best_val_loss
                 if is_best:
                     self.best_val_loss = val_metrics['loss']
-                    self.save_checkpoint(epoch + 1, val_metrics, True)
+                    with record_function("## save_checkpoint ##"):
+                        self.save_checkpoint(epoch + 1, val_metrics, True)
                 
                 if (epoch + 1) % self.training_config.get('save_every', 5) == 0:
-                    self.save_checkpoint(epoch + 1, val_metrics, False)
+                    with record_function("## save_checkpoint ##"):
+                        self.save_checkpoint(epoch + 1, val_metrics, False)
                 
                 # Save codebook tracking plots
                 if self.tracking_enabled:
-                    checkpoint_dir = self.training_config.get('checkpoint_dir', 'checkpoints')
-                    codebook_dir = os.path.join(checkpoint_dir, 'codebook_tracking')
-                    self.save_codebook_plots_func(codebook_dir, epoch + 1)
+                    with record_function("## save_codebook_plots ##"):
+                        checkpoint_dir = self.training_config.get('checkpoint_dir', 'checkpoints')
+                        codebook_dir = os.path.join(checkpoint_dir, 'codebook_tracking')
+                        self.save_codebook_plots_func(codebook_dir, epoch + 1)
                 
                 # Clear cache after each epoch
                 if torch.cuda.is_available():
@@ -1036,15 +1197,22 @@ class GPT2VQVAETrainer:
 
                 # DEBUG
                 if TRACK_MEMORY:
-                    # after the fifth epoch
-                    if epoch == 4:
+                    # after the third epoch and repeated
+                    if (epoch + 1) % 3 == 0:
                         try:
-                            torch.cuda.memory._dump_snapshot(f"training_cuda_memory_tracking.pickle")
+                            torch.cuda.memory._dump_snapshot(f"training_cuda_memory_tracking_epoch{epoch+1}.pickle")
                         except Exception as e:
                             print("Failed to log memory tracking.")
+            
+            # Clean up profiler if active
+            if self.profiler_context is not None:
+                self.profiler_context.__exit__(None, None, None)
+                self.profiler_context = None
+                print(f"Profiler completed for epoch {epoch}")
 
-                        # Stop recording memory snapshot history.
-                        torch.cuda.memory._record_memory_history(enabled=None)
+            if TRACK_MEMORY:
+                # Stop recording memory snapshot history.
+                torch.cuda.memory._record_memory_history(enabled=None)
 
         
         except TrainingAbortedException as e:
@@ -1090,14 +1258,16 @@ class GPT2VQVAETrainer:
             # Save as a special "aborted" checkpoint if we've trained enough batches
             if total_batches_trained >= minimum_batches:
                 aborted_checkpoint_path = os.path.join(checkpoint_dir, f'aborted_training_epoch_{e.epoch}.pt')
-                self.save_checkpoint(e.epoch, dummy_val_metrics, is_best=False, checkpoint_path=aborted_checkpoint_path)
+                with record_function("## save_checkpoint ##"):
+                    self.save_checkpoint(e.epoch, dummy_val_metrics, is_best=False, checkpoint_path=aborted_checkpoint_path)
                 print(f"Aborted training checkpoint saved (trained {total_batches_trained} batches, threshold: {minimum_batches})")
 
                 # Also save as best model if it's better than previous best
                 if e.metrics['avg_loss'] < self.best_val_loss:
                     self.best_val_loss = e.metrics['avg_loss']
                     best_aborted_path = os.path.join(checkpoint_dir, f'best_model_aborted_epoch_{e.epoch}.pt')
-                    self.save_checkpoint(e.epoch, dummy_val_metrics, is_best=True, checkpoint_path=best_aborted_path)
+                    with record_function("## save_checkpoint ##"):
+                        self.save_checkpoint(e.epoch, dummy_val_metrics, is_best=True, checkpoint_path=best_aborted_path)
                     print(f"New best model (from aborted training) saved to: {best_aborted_path}")
             else:
                 print(f"Skipping checkpoint save - only trained {total_batches_trained} batches, need at least {minimum_batches}")
@@ -1254,9 +1424,10 @@ class GPT2VQVAETrainer:
     
     def plot_memory_usage(self, save_path: Optional[str] = None):
         """Plot memory usage throughout training."""
-        if not self.memory_stats:
-            print("No memory statistics available")
-            return
+        with record_function("## plot_memory_usage ##"):
+            if not self.memory_stats:
+                print("No memory statistics available")
+                return
         
         # Check if we have GPU memory stats (indicates memory_monitor was used)
         has_gpu_stats = 'gpu_total_gb' in self.memory_stats[0]
@@ -1360,8 +1531,10 @@ class GPT2VQVAETrainer:
         """
         # Log memory before loading data
         if self.memory_monitor:
-            self.memory_monitor.log_memory_usage("before_data_loading")
-            self.memory_monitor.log_pytorch_memory_usage("before_data_loading")
+            # TODO SEE IF IT WORKS CORRECTLY
+            self.log_memory_usage("before_data_loading")
+            # self.memory_monitor.log_memory_usage("before_data_loading")
+            # self.memory_monitor.log_pytorch_memory_usage("before_data_loading")
         
         required_files = [
             "prompt_sequences.pt",
@@ -1600,7 +1773,7 @@ def load_config(config_path: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
 
 
-def create_default_config(output_path: str, enhanced_vq: bool = False, phased_training: bool = False):
+def create_default_config(output_path: str, enhanced_vq: bool = False, phased_training: bool = False, memory_optimized_tracking: bool = False):
     """
     Create a default configuration file with memory optimizations.
     
@@ -1692,6 +1865,34 @@ def create_default_config(output_path: str, enhanced_vq: bool = False, phased_tr
             # Enhanced codebook tracking
             'enhanced_codebook_tracking': True,  # Enable enhanced codebook monitoring
         })
+        
+        # Add memory-optimized tracking configuration if requested
+        if memory_optimized_tracking:
+            training_config.update({
+                # Granular codebook tracking control for memory optimization
+                'codebook_tracking_config': {
+                    'track_usage_stats': True,        # Track basic usage statistics
+                    'track_diversity_metrics': False, # Disable diversity metrics (expensive)
+                    'track_ema_stats': False,         # Disable EMA statistics (expensive)
+                    'track_reset_stats': True,        # Track reset statistics
+                    'track_reservoir_stats': False,   # Disable reservoir statistics
+                    'save_tracking_history': False,   # Don't save history to save memory
+                    'print_tracking_info': True,      # Still print basic info
+                }
+            })
+        else:
+            # Default tracking configuration (all enabled)
+            training_config.update({
+                'codebook_tracking_config': {
+                    'track_usage_stats': True,
+                    'track_diversity_metrics': True,
+                    'track_ema_stats': True,
+                    'track_reset_stats': True,
+                    'track_reservoir_stats': True,
+                    'save_tracking_history': True,
+                    'print_tracking_info': True,
+                }
+            })
         
         # Add phased training parameters if requested
         if phased_training:
@@ -2460,7 +2661,10 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
                 
                 if indices is not None:
                     # Move indices to CPU immediately to prevent GPU memory accumulation
-                    all_indices.append(indices.flatten().cpu())
+                    indices_cpu = indices.flatten().cpu()
+                    all_indices.append(indices_cpu)
+                    # Explicitly delete GPU tensor
+                    del indices
                     
             except Exception as e:
                 print(f"Warning: Failed to compute indices for sample {idx}: {e}")
@@ -3003,7 +3207,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             'ema_decay', 'diversity_gamma', 'reset_threshold', 
             'reset_frequency', 'use_ema', 'reset_stop_fraction',
             # for further enhancement
-            'max_reset_steps', 'reservoir_size', 'reset_strategy'
+            'max_reset_steps', 'reservoir_size', 'reset_strategy', 'use_batch_norm'
         }
         
         # Create filtered configs for parent constructor
@@ -3053,13 +3257,36 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             self.model.gradient_checkpointing_enable()
             print("Gradient checkpointing enabled for EnhancedGPT2VQVAE")
         
-        # Enhanced codebook tracking
+        # Enhanced codebook tracking with granular control
         self.enhanced_codebook_tracking = training_config.get('enhanced_codebook_tracking', True)
-        self.codebook_stats_history = []
-        self.diversity_history = []
+        
+        # Granular tracking flags for memory optimization
+        tracking_config = training_config.get('codebook_tracking_config', {})
+        self.track_usage_stats = tracking_config.get('track_usage_stats', True)
+        self.track_diversity_metrics = tracking_config.get('track_diversity_metrics', True)
+        self.track_ema_stats = tracking_config.get('track_ema_stats', True)
+        self.track_reset_stats = tracking_config.get('track_reset_stats', True)
+        self.track_reservoir_stats = tracking_config.get('track_reservoir_stats', True)
+        self.save_tracking_history = tracking_config.get('save_tracking_history', True)
+        self.print_tracking_info = tracking_config.get('print_tracking_info', True)
+        
+        # Initialize tracking history only if needed
+        if self.enhanced_codebook_tracking and self.save_tracking_history:
+            self.codebook_stats_history = []
+            self.diversity_history = []
+        else:
+            self.codebook_stats_history = None
+            self.diversity_history = None
         
         if self.enhanced_codebook_tracking:
-            print("Enhanced codebook tracking enabled")
+            print("Enhanced codebook tracking enabled with granular control:")
+            print(f"  - Usage stats: {self.track_usage_stats}")
+            print(f"  - Diversity metrics: {self.track_diversity_metrics}")
+            print(f"  - EMA stats: {self.track_ema_stats}")
+            print(f"  - Reset stats: {self.track_reset_stats}")
+            print(f"  - Reservoir stats: {self.track_reservoir_stats}")
+            print(f"  - Save history: {self.save_tracking_history}")
+            print(f"  - Print info: {self.print_tracking_info}")
             print(f"EMA decay: {model_config.get('ema_decay', 0.99)}")
             print(f"Diversity gamma: {model_config.get('diversity_gamma', 0.1)}")
             print(f"Reset threshold: {model_config.get('reset_threshold', 0.1)}")
@@ -3072,6 +3299,23 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
 
         # Training phase tracking - no current use, but might be useful later
         self.current_step = 0
+        
+        # Profiler configuration
+        self.profiler_enabled = training_config.get('profiler_enabled', False)
+        self.profiler_schedule = training_config.get('profiler_schedule', {
+            'wait': 0,      
+            'warmup': 1,    
+            'active': 2,    
+            'repeat': 1     
+        })
+        self.profiler_activities = [
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ]
+        
+        if self.profiler_enabled:
+            print("PyTorch profiler enabled")
+            print(f"Profiler schedule: {self.profiler_schedule}")
 
     def train_epoch(self, train_loader, num_measurements_per_epoch, current_epoch=0):
         # Set max_reset_steps on the first epoch if it's still None
@@ -3152,51 +3396,76 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             return
         
         try:
-            # Get enhanced codebook statistics
-            codebook_stats = self.model.get_vector_quantizer_stats()
-            diversity_metrics = self.model.get_embedding_diversity()
+            # Initialize stats dictionaries
+            codebook_stats = {}
+            diversity_metrics = {}
             
-            # Store results - ensure tensors are moved to CPU to prevent GPU memory accumulation
-            # Convert any tensors in codebook_stats to CPU
-            cpu_codebook_stats = {}
-            for key, value in codebook_stats.items():
-                if isinstance(value, torch.Tensor):
-                    cpu_codebook_stats[key] = value.cpu().detach()
-                else:
-                    cpu_codebook_stats[key] = value
+            # Get codebook statistics based on tracking flags
+            if self.track_usage_stats or self.track_ema_stats or self.track_reset_stats or self.track_reservoir_stats:
+                codebook_stats = self.model.get_vector_quantizer_stats()
             
-            # Convert any tensors in diversity_metrics to CPU
-            cpu_diversity_metrics = {}
-            for key, value in diversity_metrics.items():
-                if isinstance(value, torch.Tensor):
-                    cpu_diversity_metrics[key] = value.cpu().detach()
-                else:
-                    cpu_diversity_metrics[key] = value
+            # Get diversity metrics only if needed
+            if self.track_diversity_metrics:
+                diversity_metrics = self.model.get_embedding_diversity()
             
-            self.codebook_stats_history.append(cpu_codebook_stats)
-            self.diversity_history.append(cpu_diversity_metrics)
+            # Store results only if history saving is enabled
+            if self.save_tracking_history:
+                # Convert any tensors in codebook_stats to CPU
+                cpu_codebook_stats = {}
+                for key, value in codebook_stats.items():
+                    if isinstance(value, torch.Tensor):
+                        cpu_codebook_stats[key] = value.cpu().detach()
+                    else:
+                        cpu_codebook_stats[key] = value
+                
+                # Convert any tensors in diversity_metrics to CPU
+                cpu_diversity_metrics = {}
+                for key, value in diversity_metrics.items():
+                    if isinstance(value, torch.Tensor):
+                        cpu_diversity_metrics[key] = value.cpu().detach()
+                    else:
+                        cpu_diversity_metrics[key] = value
+                
+                self.codebook_stats_history.append(cpu_codebook_stats)
+                self.diversity_history.append(cpu_diversity_metrics)
             
-            # Print enhanced statistics
-            print(f"\nEnhanced Codebook tracking (point {measurement_point}):")
-            print(f"  Total usage: {codebook_stats['total_usage']}")
-            print(f"  Unused codes: {codebook_stats['unused_codes']}/{self.model.vector_quantizer.num_embeddings} "
-                  f"({codebook_stats['unused_ratio']*100:.1f}%)")
-            print(f"  Reset counter: {codebook_stats['reset_counter']}")
-            
-            # Print rarely used codes statistics
-            codes_below_05 = codebook_stats.get('codes_below_0.5_percent', 0)
-            codes_below_1 = codebook_stats.get('codes_below_1.0_percent', 0)
-            codes_below_5 = codebook_stats.get('codes_below_5.0_percent', 0)
-            print(f"  Codes below 0.5%: {codes_below_05}")
-            print(f"  Codes below 1.0%: {codes_below_1}")
-            print(f"  Codes below 5.0%: {codes_below_5}")
-            
-            print(f"  Mean similarity: {diversity_metrics['mean_similarity']:.4f}")
-            print(f"  Embedding norm mean: {diversity_metrics['embedding_norm_mean']:.4f}")
-            
-            if 'ema_cluster_sizes' in codebook_stats:
-                ema_usage = (codebook_stats['ema_cluster_sizes'] > 0).sum().item()
-                print(f"  EMA active clusters: {ema_usage}/{self.model.vector_quantizer.num_embeddings}")
+            # Print enhanced statistics only if enabled
+            if self.print_tracking_info:
+                print(f"\nEnhanced Codebook tracking (point {measurement_point}):")
+                
+                # Print usage statistics
+                if self.track_usage_stats and codebook_stats:
+                    print(f"  Total usage: {codebook_stats.get('total_usage', 'N/A')}")
+                    print(f"  Unused codes: {codebook_stats.get('unused_codes', 'N/A')}/{self.model.vector_quantizer.num_embeddings} "
+                          f"({codebook_stats.get('unused_ratio', 0)*100:.1f}%)")
+                    
+                    # Print rarely used codes statistics
+                    codes_below_05 = codebook_stats.get('codes_below_0.5_percent', 0)
+                    codes_below_1 = codebook_stats.get('codes_below_1.0_percent', 0)
+                    codes_below_5 = codebook_stats.get('codes_below_5.0_percent', 0)
+                    print(f"  Codes below 0.5%: {codes_below_05}")
+                    print(f"  Codes below 1.0%: {codes_below_1}")
+                    print(f"  Codes below 5.0%: {codes_below_5}")
+                
+                # Print reset statistics
+                if self.track_reset_stats and codebook_stats:
+                    print(f"  Reset counter: {codebook_stats.get('reset_counter', 'N/A')}")
+                
+                # Print diversity metrics
+                if self.track_diversity_metrics and diversity_metrics:
+                    print(f"  Mean similarity: {diversity_metrics.get('mean_similarity', 0):.4f}")
+                    print(f"  Embedding norm mean: {diversity_metrics.get('embedding_norm_mean', 0):.4f}")
+                
+                # Print EMA statistics
+                if self.track_ema_stats and codebook_stats and 'ema_cluster_sizes' in codebook_stats:
+                    ema_usage = (codebook_stats['ema_cluster_sizes'] > 0).sum().item()
+                    print(f"  EMA active clusters: {ema_usage}/{self.model.vector_quantizer.num_embeddings}")
+                
+                # Print reservoir statistics
+                if self.track_reservoir_stats and codebook_stats:
+                    reservoir_size = codebook_stats.get('reservoir_size', 'N/A')
+                    reservoir_count = codebook_stats.get('reservoir_count', 'N/A')
+                    print(f"  Reservoir size: {reservoir_size}, count: {reservoir_count}")
             
             # Clear cache after enhanced tracking
             if torch.cuda.is_available():
@@ -3217,18 +3486,20 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         # First, call the parent class's default codebook plotting
         super()._default_save_codebook_plots(save_dir, epoch)
         
-        # Then, save the enhanced codebook plots
-        if not self.enhanced_codebook_tracking or not self.codebook_stats_history:
+        # Then, save the enhanced codebook plots only if tracking is enabled and history exists
+        if not self.enhanced_codebook_tracking or not self.save_tracking_history or not self.codebook_stats_history:
             return
         
         try:
-            # Save enhanced statistics plots
-            stats_path = os.path.join(save_dir, f"enhanced_codebook_stats_epoch_{epoch}.png")
-            self._plot_enhanced_codebook_stats(stats_path)
+            # Save enhanced statistics plots only if we have usage/reset/EMA stats
+            if self.track_usage_stats or self.track_reset_stats or self.track_ema_stats:
+                stats_path = os.path.join(save_dir, f"enhanced_codebook_stats_epoch_{epoch}.png")
+                self._plot_enhanced_codebook_stats(stats_path)
             
-            # Save diversity evolution plots
-            diversity_path = os.path.join(save_dir, f"codebook_diversity_evolution_epoch_{epoch}.png")
-            self._plot_diversity_evolution(diversity_path)
+            # Save diversity evolution plots only if diversity tracking is enabled
+            if self.track_diversity_metrics and self.diversity_history:
+                diversity_path = os.path.join(save_dir, f"codebook_diversity_evolution_epoch_{epoch}.png")
+                self._plot_diversity_evolution(diversity_path)
             
             print(f"Enhanced codebook plots saved to {save_dir}")
             
@@ -3242,7 +3513,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
     
     def _plot_enhanced_codebook_stats(self, save_path: str) -> None:
         """Plot enhanced codebook statistics over time."""
-        if not self.codebook_stats_history:
+        if not self.codebook_stats_history or not self.save_tracking_history:
             return
         
         # Create a larger figure to accommodate more plots
@@ -3323,7 +3594,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
     
     def _plot_diversity_evolution(self, save_path: str) -> None:
         """Plot codebook diversity metrics over time."""
-        if not self.diversity_history:
+        if not self.diversity_history or not self.save_tracking_history:
             return
         
         fig, axes = plt.subplots(2, 2, figsize=(15, 10))
@@ -3866,8 +4137,19 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
             }
         ]
         
+        # CRITICAL FIX: Clear old optimizer state before recreating
+        if hasattr(self, 'optimizer') and self.optimizer is not None:
+            # Clear the old optimizer's state to prevent memory accumulation
+            self.optimizer.state.clear()
+            # Explicitly delete the old optimizer to free memory
+            del self.optimizer
+        
         # Recreate optimizer with parameter groups
         self.optimizer = optim.AdamW(param_groups)
+        
+        # CRITICAL FIX: Clear any existing scheduler state before recreating
+        if hasattr(self, 'scheduler') and self.scheduler is not None:
+            del self.scheduler
         
         # Recreate scheduler if it exists
         if self.training_config.get('use_lr_scheduler', True):
@@ -4044,56 +4326,59 @@ def save_training_visualizations(trainer, save_dir: str = None, prefix: str = "t
         save_dir: Directory to save visualizations (defaults to trainer's checkpoint directory)
         prefix: Prefix for saved files
     """
-    DEFAULT_FOLDER = './training_visualizations'
-    try:
-        if save_dir is None:
-            training_config = getattr(trainer, 'training_config', None)
-            if training_config is None:
-                save_dir = DEFAULT_FOLDER
-            else:
-                save_dir = training_config.get('checkpoint_dir', DEFAULT_FOLDER)
-        
-        os.makedirs(save_dir, exist_ok=True)
-        
-        print(f"\n📊 Saving comprehensive training visualizations to {save_dir}")
-        
-        # 1. Training history plots
-        history_path = os.path.join(save_dir, f"{prefix}_history.png")
-        trainer.plot_training_history(history_path)
-        
-        # 2. Memory usage plots
-        memory_path = os.path.join(save_dir, f"{prefix}_memory_usage.png")
-        trainer.plot_memory_usage(memory_path)
-        
-        # 3. Codebook tracking plots (if enabled)
-        if trainer.tracking_enabled:
-            codebook_dir = os.path.join(save_dir, f"{prefix}_codebook_tracking")
-            os.makedirs(codebook_dir, exist_ok=True)
-            
-            # Save current codebook plots
-            if hasattr(trainer, 'save_codebook_plots_func'):
-                trainer.save_codebook_plots_func(codebook_dir, len(trainer.train_losses))
-        
-        print(f"✅ All training visualizations saved successfully!")
-        print(f"   📈 Training history: {history_path}")
-        print(f"   💾 Memory usage: {memory_path}")
-        if trainer.tracking_enabled:
-            print(f"   🎯 Codebook tracking: {codebook_dir}")
-        
-    except Exception as e:
-        print(f"⚠️  Warning: Failed to save some training visualizations: {e}")
-        # Try to save at least basic plots
+    with record_function("## save_training_visualizations ##"):
+        DEFAULT_FOLDER = './training_visualizations'
         try:
             if save_dir is None:
-                save_dir = getattr(trainer, 'checkpoint_dir', './training_visualizations')
+                training_config = getattr(trainer, 'training_config', None)
+                if training_config is None:
+                    save_dir = DEFAULT_FOLDER
+                else:
+                    save_dir = training_config.get('checkpoint_dir', DEFAULT_FOLDER)
+            
             os.makedirs(save_dir, exist_ok=True)
             
-            # Fallback: save basic training history
-            history_path = os.path.join(save_dir, f"{prefix}_history_fallback.png")
-            trainer.plot_training_history(history_path)
-            print(f"   📈 Basic training history saved: {history_path}")
-        except Exception as fallback_error:
-            print(f"   ❌ Failed to save even basic plots: {fallback_error}")
+            print(f"\n📊 Saving comprehensive training visualizations to {save_dir}")
+            
+            # 1. Training history plots
+            history_path = os.path.join(save_dir, f"{prefix}_history.png")
+            with record_function("## plot_training_history ##"):
+                trainer.plot_training_history(history_path)
+            
+            # 2. Memory usage plots
+            memory_path = os.path.join(save_dir, f"{prefix}_memory_usage.png")
+            trainer.plot_memory_usage(memory_path)
+            
+            # 3. Codebook tracking plots (if enabled)
+            if trainer.tracking_enabled:
+                codebook_dir = os.path.join(save_dir, f"{prefix}_codebook_tracking")
+                os.makedirs(codebook_dir, exist_ok=True)
+                
+                # Save current codebook plots
+                if hasattr(trainer, 'save_codebook_plots_func'):
+                    trainer.save_codebook_plots_func(codebook_dir, len(trainer.train_losses))
+            
+            print(f"✅ All training visualizations saved successfully!")
+            print(f"   📈 Training history: {history_path}")
+            print(f"   💾 Memory usage: {memory_path}")
+            if trainer.tracking_enabled:
+                print(f"   🎯 Codebook tracking: {codebook_dir}")
+            
+        except Exception as e:
+            print(f"⚠️  Warning: Failed to save some training visualizations: {e}")
+            # Try to save at least basic plots
+            try:
+                if save_dir is None:
+                    save_dir = getattr(trainer, 'checkpoint_dir', './training_visualizations')
+                os.makedirs(save_dir, exist_ok=True)
+                
+                # Fallback: save basic training history
+                history_path = os.path.join(save_dir, f"{prefix}_history_fallback.png")
+                with record_function("## plot_training_history ##"):
+                    trainer.plot_training_history(history_path)
+                print(f"   📈 Basic training history saved: {history_path}")
+            except Exception as fallback_error:
+                print(f"   ❌ Failed to save even basic plots: {fallback_error}")
 
 
 if __name__ == "__main__":
