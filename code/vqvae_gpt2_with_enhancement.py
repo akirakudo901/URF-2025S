@@ -286,8 +286,8 @@ class EnhancedVectorQuantizer(nn.Module):
         # Create one-hot encoding for EMA updates
         encodings = torch.zeros(encoding_indices.shape[0], self.num_embeddings, 
                                device=flat_input.device)
-        encodings.scatter_(1, encoding_indices.unsqueeze(1), 1)
-        
+        encodings.scatter_(1, encoding_indices.unsqueeze(1), 1).detach()
+
         # Update EMA cluster sizes
         ema_decay_val = self._ema_decay.item()
         self._ema_cluster_size.mul_(ema_decay_val).add_( # [num_embeddings]
@@ -298,9 +298,9 @@ class EnhancedVectorQuantizer(nn.Module):
         n = torch.sum(self._ema_cluster_size).item()
         # below, matmul is the sum of all latents mapped to each code
         self._ema_w.mul_(ema_decay_val).add_(                           # [num_embeddings x emb_dim]
-            (1 - ema_decay_val) * torch.matmul(encodings.T, flat_input) 
+            (1 - ema_decay_val) * torch.matmul(encodings.T, flat_input).detach()
         )
-        
+
         # Normalize EMA weights
         if n > 0:
             # Add small epsilon to prevent division by zero
