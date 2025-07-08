@@ -2,7 +2,7 @@
 # This configuration includes enhanced vector quantizer features:
 # - EMA (Exponential Moving Average) updates for codebook learning
 # - Diversity-promoting loss to encourage uniform codebook usage  
-# - Automatic codebook reset mechanisms for unused embeddings
+# - Automatic codebook reset mechanisms for unused embeddings, only used at the early stage of training
 # - Enhanced monitoring and statistics for codebook health
 #
 # The enhanced codebook training scheme reduces to normal VQ-VAE when:
@@ -22,7 +22,7 @@ model_config:
   # ============================================================================
   # VQ-VAE Specific Parameters
   # ============================================================================
-  num_embeddings: 256       # VQ codebook size
+  num_embeddings: 512       # VQ codebook size
   commitment_cost: 0.25     # VQ commitment cost
   aggregation_hidden_dim: 1024  # Aggregation MLP hidden dimension
   num_thoughts: 2          # Number of parallel sequences
@@ -32,10 +32,10 @@ model_config:
   # ============================================================================
   ema_decay: 0.99           # EMA decay rate for codebook updates
   diversity_gamma: 0.5      # Weight for diversity-promoting loss
-  reset_threshold: 0.01      # Threshold for codebook reset (usage ratio)
-  reset_frequency: 500     # Frequency of codebook reset checks
+  reset_threshold: 0.005      # Threshold for codebook reset (usage ratio)
+  reset_frequency: 100     # Frequency of codebook reset checks
   use_ema: true             # Whether to use EMA updates
-  # reset_stop_fraction: 0.2
+  reset_stop_fraction: 0 # was originally 0.1 -> made a mistake and set it to 0.5
   
   # ============================================================================
   # Pretrained Model Settings
@@ -66,7 +66,7 @@ training_config:
   # ============================================================================
   # Basic Training Parameters
   # ============================================================================
-  learning_rate: 1e-8     # Learning rate
+  learning_rate: 1e-6     # Learning rate
   num_epochs: 20            # Number of training epochs
   batch_size: 32             # Batch size (reduced for memory efficiency)
   val_split: 0.1            # Fraction of data for validation
@@ -83,7 +83,7 @@ training_config:
   # Learning Rate Scheduler
   # ============================================================================
   use_lr_scheduler: true    # Whether to use learning rate scheduler
-  min_lr: 1.0e-010          # Minimum learning rate for cosine annealing
+  min_lr: 1.0e-08         # Minimum learning rate for cosine annealing
   
   # ============================================================================
   # Loss Function Parameters
@@ -97,7 +97,7 @@ training_config:
   # ============================================================================
   use_mixed_precision: true           # Enable mixed precision training
   gradient_accumulation_steps: 1      # Effective batch size = batch_size * gradient_accumulation_steps
-  use_gradient_checkpointing: false    # Enable gradient checkpointing for memory efficiency
+  use_gradient_checkpointing: true    # Enable gradient checkpointing for memory efficiency
   use_dynamic_batching: false         # Enable for variable sequence lengths
   max_tokens_per_batch: 8192          # For dynamic batching
   max_samples: null                   # Limit samples for debugging (set to number for testing)
@@ -112,7 +112,7 @@ training_config:
   # Checkpoint and Saving Settings
   # ============================================================================
   save_every: 1                       # Save checkpoint every N epochs
-  checkpoint_dir: checkpoints/enhanced/two_thoughts/run_0  # Directory for saving checkpoints
+  checkpoint_dir: checkpoints/enhanced/two_thoughts/only_early_reset  # Directory for saving checkpoints
   minimum_batches_for_checkpoint: 200 # Minimum number of batches trained before saving aborted checkpoint
   
   # ============================================================================

@@ -35,6 +35,7 @@ model_config:
   reset_threshold: 0.1      # Threshold for codebook reset (usage ratio)
   reset_frequency: 1000     # Frequency of codebook reset checks
   use_ema: true             # Whether to use EMA updates
+  # reset_stop_fraction: 0.2
   
   # ============================================================================
   # Pretrained Model Settings

@@ -1,9 +1,15 @@
-# Enhanced GPT2VQVAE Configuration
-# This configuration includes enhanced vector quantizer features:
-# - EMA (Exponential Moving Average) updates for codebook learning
-# - Diversity-promoting loss to encourage uniform codebook usage  
-# - Automatic codebook reset mechanisms for unused embeddings
-# - Enhanced monitoring and statistics for codebook health
+# Phased Enhanced GPT2VQVAE Configuration
+# This configuration implements a phased training approach:
+#
+# 1. Initialization Phase (0 to initialization_steps):
+#    - Train using no-vq mode to learn good representations
+#    
+# 2. Reinitialization Phase (initialization_steps to quantization_start):
+#    - Every r_reestim steps, fully reinitialize codebook using KMeans on reservoir samples
+#    - Continue training with VQ enabled
+#    
+# 3. Normal Training Phase (after quantization_start):
+#    - Standard VQ-VAE training with all enhancements
 #
 # The enhanced codebook training scheme reduces to normal VQ-VAE when:
 # - ema_decay = 0.0 (no EMA updates)
@@ -22,21 +28,24 @@ model_config:
   # ============================================================================
   # VQ-VAE Specific Parameters
   # ============================================================================
-  num_embeddings: 256       # VQ codebook size
+  num_embeddings: 1024       # VQ codebook size
   commitment_cost: 0.25     # VQ commitment cost
   aggregation_hidden_dim: 1024  # Aggregation MLP hidden dimension
-  num_thoughts: 2          # Number of parallel sequences
+  num_thoughts: 8          # Number of parallel sequences
   
   # ============================================================================
   # Enhanced Vector Quantizer Parameters
   # ============================================================================
   ema_decay: 0.99           # EMA decay rate for codebook updates
-  diversity_gamma: 0.5      # Weight for diversity-promoting loss
-  reset_threshold: 0.01      # Threshold for codebook reset (usage ratio)
-  reset_frequency: 500     # Frequency of codebook reset checks
+  diversity_gamma: 0.1      # Weight for diversity-promoting loss
+  reset_threshold: 0.1      # Threshold for codebook reset (usage ratio)
+  reset_frequency: 1000     # Frequency of codebook reset checks
   use_ema: true             # Whether to use EMA updates
-  # reset_stop_fraction: 0.2
-  
+  reset_stop_fraction: 0.2  # Fraction of training during which resets are allowed
+  max_reset_steps: null
+  reservoir_size: 10000
+  use_batch_norm: true
+
   # ============================================================================
   # Pretrained Model Settings
   # ============================================================================
@@ -66,9 +75,9 @@ training_config:
   # ============================================================================
   # Basic Training Parameters
   # ============================================================================
-  learning_rate: 1e-8     # Learning rate
-  num_epochs: 20            # Number of training epochs
-  batch_size: 32             # Batch size (reduced for memory efficiency)
+  learning_rate: 1e-4       # Learning rate
+  num_epochs: 10            # Number of training epochs
+  batch_size: 8            # Batch size (reduced for memory efficiency)
   val_split: 0.1            # Fraction of data for validation
   
   # ============================================================================
@@ -83,12 +92,12 @@ training_config:
   # Learning Rate Scheduler
   # ============================================================================
   use_lr_scheduler: true    # Whether to use learning rate scheduler
-  min_lr: 1.0e-010          # Minimum learning rate for cosine annealing
+  min_lr: 1e-6             # Minimum learning rate for cosine annealing
   
   # ============================================================================
   # Loss Function Parameters
   # ============================================================================
-  vq_loss_weight: 3e-2      # Weight for VQ loss component
+  vq_loss_weight: 1.0       # Weight for VQ loss component
   quantize_cot_only: true  # Only quantize chain-of-thought sequences
   pad_token_id: 50256      # Token ID for padding (eos_token for GPT2TokenizerFast)
   
@@ -97,7 +106,7 @@ training_config:
   # ============================================================================
   use_mixed_precision: true           # Enable mixed precision training
   gradient_accumulation_steps: 1      # Effective batch size = batch_size * gradient_accumulation_steps
-  use_gradient_checkpointing: false    # Enable gradient checkpointing for memory efficiency
+  use_gradient_checkpointing: true    # Enable gradient checkpointing for memory efficiency
   use_dynamic_batching: false         # Enable for variable sequence lengths
   max_tokens_per_batch: 8192          # For dynamic batching
   max_samples: null                   # Limit samples for debugging (set to number for testing)
@@ -112,7 +121,7 @@ training_config:
   # Checkpoint and Saving Settings
   # ============================================================================
   save_every: 1                       # Save checkpoint every N epochs
-  checkpoint_dir: checkpoints/enhanced/two_thoughts/run_0  # Directory for saving checkpoints
+  checkpoint_dir: checkpoints/phased/eight_thoughts  # Directory for saving checkpoints
   minimum_batches_for_checkpoint: 200 # Minimum number of batches trained before saving aborted checkpoint
   
   # ============================================================================
@@ -122,6 +131,17 @@ training_config:
   enhanced_codebook_tracking: true    # Enable enhanced codebook monitoring
   
   # ============================================================================
+  # Phased Training Parameters
+  # ============================================================================
+  # one epoch = 1491 (based on calculation)
+  initialization_steps: 1491          # Steps to train in no-vq mode
+  r_reestim: 125                     # Frequency of codebook reinitialization
+  quantization_start: 2982           # Step to start normal VQ training
+  codebook_lr_multiplier: 1.0        # Codebook learning rate multiplier
+  
+  # ============================================================================
   # Data Configuration
   # ============================================================================
-  data_dir: data/GSM8K/128_128/batch_2               # Directory containing training data
+  data_dir: data/GSM8K/128_128/batch_8  # Directory containing training data 
+
+  profiler_enabled: False

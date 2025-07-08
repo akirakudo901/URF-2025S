@@ -33,8 +33,12 @@ model_config:
   ema_decay: 0.99           # EMA decay rate for codebook updates
   diversity_gamma: 0.5      # Weight for diversity-promoting loss
   reset_threshold: 0.05      # Threshold for codebook reset (usage ratio)
-  reset_frequency: 333     # Frequency of codebook reset checks
+  reset_frequency: 50     # Frequency of codebook reset checks
   use_ema: true             # Whether to use EMA updates
+  reset_stop_fraction: 0.5
+  max_reset_steps: null
+  reservoir_size: 10000
+  use_batch_norm: true
   
   # ============================================================================
   # Pretrained Model Settings
@@ -66,8 +70,8 @@ training_config:
   # Basic Training Parameters
   # ============================================================================
   learning_rate: 1e-6     # Learning rate
-  num_epochs: 1            # Number of training epochs
-  batch_size: 64             # Batch size (reduced for memory efficiency)
+  num_epochs: 5            # Number of training epochs
+  batch_size: 32             # Batch size (reduced for memory efficiency)
   val_split: 0.1            # Fraction of data for validation
   
   # ============================================================================
@@ -99,7 +103,7 @@ training_config:
   use_gradient_checkpointing: true    # Enable gradient checkpointing for memory efficiency
   use_dynamic_batching: false         # Enable for variable sequence lengths
   max_tokens_per_batch: 8192          # For dynamic batching
-  max_samples: null                   # Limit samples for debugging (set to number for testing)
+  max_samples: 1600                   # Limit samples for debugging (set to number for testing)
   
   # ============================================================================
   # Perplexity Threshold Monitoring
@@ -111,15 +115,15 @@ training_config:
   # Checkpoint and Saving Settings
   # ============================================================================
   save_every: 1                       # Save checkpoint every N epochs
-  checkpoint_dir: checkpoints/enhanced/test  # Directory for saving checkpoints
+  checkpoint_dir: checkpoints/enhanced/phased_test  # Directory for saving checkpoints
   minimum_batches_for_checkpoint: 200 # Minimum number of batches trained before saving aborted checkpoint
   
   # ============================================================================
   # Monitoring and Logging
   # ============================================================================
-  num_measurements_per_epoch: 20      # Number of detailed metrics per epoch
+  num_measurements_per_epoch: 2      # Number of detailed metrics per epoch
   enhanced_codebook_tracking: true    # Enable enhanced codebook monitoring
-  codebook_sample_size: 3
+  codebook_sample_size: 10
   
   # ============================================================================
   # Data Configuration
