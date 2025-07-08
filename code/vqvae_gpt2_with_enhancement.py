@@ -492,10 +492,11 @@ class EnhancedVectorQuantizer(nn.Module):
         encodings.scatter_(1, encoding_indices.unsqueeze(1), 1)
         
         # Training-specific updates
-        current_usage = torch.bincount(encoding_indices, minlength=self.num_embeddings)
+        current_usage = encodings.sum(dim=0).detach()
+        
         if self.training:
             # Add to reservoir for future re-initialization
-            self.reservoir_sampler.add_samples(inputs.detach().clone().cpu())
+            self.reservoir_sampler.add_samples(normalized_inputs.detach().clone().cpu())
             
             # Update EMA statistics
             self._update_ema(normalized_inputs, encoding_indices)
