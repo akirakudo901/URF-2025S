@@ -219,6 +219,8 @@ class EnhancedVectorQuantizer(nn.Module):
             self.batch_norm = nn.BatchNorm1d(embedding_dim, momentum=0.01, eps=1e-5)
         else:
             self.batch_norm = None
+        # Ensure embedding weight requires_grad is set correctly
+        self.embedding.weight.requires_grad = not self.use_ema
     
     def _perform_kmeans_clustering(self, samples, num_clusters, device):
         """
@@ -452,9 +454,11 @@ class EnhancedVectorQuantizer(nn.Module):
         def compute_loss(quantized, inputs, encoding_indices):
             # Standard VQ-VAE losses
             e_latent_loss = F.mse_loss(quantized.detach(), inputs)
-            q_latent_loss = F.mse_loss(quantized, inputs.detach())
-            vq_loss = q_latent_loss + self.commitment_cost * e_latent_loss
-            
+            if self.use_ema:
+                vq_loss = self.commitment_cost * e_latent_loss
+            else:
+                q_latent_loss = F.mse_loss(quantized, inputs.detach())
+                vq_loss = q_latent_loss + self.commitment_cost * e_latent_loss
             # Additional losses
             diversity_loss = self._compute_diversity_loss(encoding_indices)
             regularization_loss = self._compute_regularization_loss(self.embedding.weight)
@@ -499,7 +503,8 @@ class EnhancedVectorQuantizer(nn.Module):
             self.reservoir_sampler.add_samples(normalized_inputs.detach().clone().cpu())
             
             # Update EMA statistics
-            self._update_ema(normalized_inputs, encoding_indices)
+            if self.use_ema:
+                self._update_ema(normalized_inputs, encoding_indices)
             
             # Update training usage counts and reset counter
             self._usage_counts += current_usage
@@ -682,6 +687,7 @@ class EnhancedVectorQuantizer(nn.Module):
     def disable_ema(self):
         """Disable EMA updates."""
         self.use_ema = False
+        self.embedding.weight.requires_grad = True
         print("EMA updates disabled")
     
     def enable_ema(self, decay=None):
@@ -692,6 +698,7 @@ class EnhancedVectorQuantizer(nn.Module):
             decay (float, optional): New EMA decay rate
         """
         self.use_ema = True
+        self.embedding.weight.requires_grad = False
         if decay is not None:
             self.set_ema_decay(decay)
         print("EMA updates enabled")
