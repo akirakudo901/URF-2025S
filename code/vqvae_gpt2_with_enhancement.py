@@ -496,7 +496,7 @@ class EnhancedVectorQuantizer(nn.Module):
         encodings.scatter_(1, encoding_indices.unsqueeze(1), 1)
         
         # Training-specific updates
-        current_usage = encodings.sum(dim=0).detach()
+        current_usage = encodings.sum(dim=0).detach().long()
         
         if self.training:
             # Add to reservoir for future re-initialization
