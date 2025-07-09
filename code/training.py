@@ -1123,26 +1123,32 @@ class GPT2VQVAETrainer:
         return checkpoint
     
     def train(self, 
-              prompt_sequences: torch.Tensor,
-              cot_sequences: torch.Tensor,
-              prompt_mask: torch.Tensor,
-              cot_mask: torch.Tensor,
-              val_split: float = 0.1,
+              train_prompt_sequences: torch.Tensor,
+              train_cot_sequences: torch.Tensor,
+              train_prompt_mask: torch.Tensor,
+              train_cot_mask: torch.Tensor,
+              test_prompt_sequences: torch.Tensor,
+              test_cot_sequences: torch.Tensor,
+              test_prompt_mask: torch.Tensor,
+              test_cot_mask: torch.Tensor,
               resume_from: Optional[str] = None,
               num_measurements_per_epoch: Optional[int] = None,
               seed: int = 42):
         """
-        Train the model with memory optimizations.
+        Train the model with memory optimizations using pre-split train and test data.
         
         Args:
-            prompt_sequences: Training prompt sequences
-            cot_sequences: Training CoT sequences
-            prompt_mask: Training prompt masks
-            cot_mask: Training CoT masks
-            val_split: Fraction of data to use for validation
+            train_prompt_sequences: Training prompt sequences
+            train_cot_sequences: Training CoT sequences
+            train_prompt_mask: Training prompt masks
+            train_cot_mask: Training CoT masks
+            test_prompt_sequences: Test prompt sequences
+            test_cot_sequences: Test CoT sequences
+            test_prompt_mask: Test prompt masks
+            test_cot_mask: Test CoT masks
             resume_from: Path to checkpoint to resume from
             num_measurements_per_epoch: Number of metrics saved per epoch
-            seed: Random seed for reproducible train/validation split
+            seed: Random seed for reproducibility
         """
 
         # Start timing
@@ -1155,18 +1161,18 @@ class GPT2VQVAETrainer:
         # Log initial memory usage
         self.log_memory_usage("training_start")
         
-        # Create dataset and split into train/validation using PyTorch's random_split
-        dataset = TensorDataset(prompt_sequences, cot_sequences, prompt_mask, cot_mask)
+        # Create train and test datasets directly from provided tensors
+        train_dataset = TensorDataset(train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask)
+        test_dataset = TensorDataset(test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask)
         
-        # Calculate split sizes
-        num_samples = len(dataset)
-        val_size = int(num_samples * val_split)
-        train_size = num_samples - val_size    
+        # Validate dataset sizes
+        train_size = len(train_dataset)
+        test_size = len(test_dataset)
 
         if train_size == 0:
-            raise Exception(f"The training dataset has size 0 given : {num_samples} samples, val_split={val_split}.")
-        elif val_size == 0:
-            raise Exception(f"The validation dataset has size 0 given : {num_samples} samples, val_split={val_split}.")
+            raise Exception(f"The training dataset has size 0.")
+        elif test_size == 0:
+            raise Exception(f"The test dataset has size 0.")
         
         if num_measurements_per_epoch is None:
             num_measurements_per_epoch = self.training_config.get("num_measurements_per_epoch", 25)
@@ -1178,15 +1184,8 @@ class GPT2VQVAETrainer:
         assert num_measurements_per_epoch is not None
         num_measurements_per_epoch = int(num_measurements_per_epoch)
         
-        # Use PyTorch's random_split for reproducible train/validation split
-        train_dataset, val_dataset = random_split(
-            dataset, 
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(seed)  # Use provided seed for reproducibility
-        )
-        
         print(f"Training samples: {train_size}")
-        print(f"Validation samples: {val_size}")
+        print(f"Test samples: {test_size}")
         
         # Create data loaders with memory optimizations
         train_loader = self.create_data_loader(
@@ -1195,8 +1194,8 @@ class GPT2VQVAETrainer:
             shuffle=True
         )
         
-        val_loader = self.create_data_loader(
-            val_dataset,
+        test_loader = self.create_data_loader(
+            test_dataset,
             batch_size=self.training_config['batch_size'], 
             shuffle=False
         )
@@ -1249,11 +1248,11 @@ class GPT2VQVAETrainer:
                 # Log memory after training
                 self.log_memory_usage(f"epoch_{epoch+1}_after_train")
                 
-                # Validate
-                val_metrics = self.validate(val_loader)
+                # Test
+                test_metrics = self.validate(test_loader)
                 
-                # Log memory after validation
-                self.log_memory_usage(f"epoch_{epoch+1}_after_val")
+                # Log memory after testing
+                self.log_memory_usage(f"epoch_{epoch+1}_after_test")
                 
                 # Update learning rate
                 if self.scheduler:
@@ -1261,7 +1260,7 @@ class GPT2VQVAETrainer:
                 
                 # Store epoch-level metrics
                 self.train_losses.append(train_metrics['avg_loss'])
-                self.val_losses.append(val_metrics['loss'])
+                self.val_losses.append(test_metrics['loss'])
                 self.vq_losses.append(train_metrics['avg_vq_loss'])
                 self.perplexities.append(train_metrics['avg_perplexity'])
                 
@@ -1273,21 +1272,21 @@ class GPT2VQVAETrainer:
                 
                 # Print metrics
                 print(f"Train Loss: {train_metrics['avg_loss']:.4f}")
-                print(f"Val Loss: {val_metrics['loss']:.4f}")
+                print(f"Test Loss: {test_metrics['loss']:.4f}")
                 print(f"VQ Loss: {train_metrics['avg_vq_loss']:.4f}")
                 print(f"Perplexity: {train_metrics['avg_perplexity']:.2f}")
                 print(f"Learning Rate: {self.optimizer.param_groups[0]['lr']:.6f}")
                 
                 # Save checkpoint
-                is_best = val_metrics['loss'] < self.best_val_loss
+                is_best = test_metrics['loss'] < self.best_val_loss
                 if is_best:
-                    self.best_val_loss = val_metrics['loss']
+                    self.best_val_loss = test_metrics['loss']
                     with record_function("## save_checkpoint ##"):
-                        self.save_checkpoint(epoch + 1, val_metrics, True)
+                        self.save_checkpoint(epoch + 1, test_metrics, True)
                 
                 if (epoch + 1) % self.training_config.get('save_every', 5) == 0:
                     with record_function("## save_checkpoint ##"):
-                        self.save_checkpoint(epoch + 1, val_metrics, False)
+                        self.save_checkpoint(epoch + 1, test_metrics, False)
                 
                 # Save codebook tracking plots
                 if self.tracking_enabled:
@@ -1662,17 +1661,18 @@ class GPT2VQVAETrainer:
         
         plt.close()
 
-    def load_training_data(self, data_dir: str, max_samples: Optional[int] = None, num_thoughts: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def load_training_data(self, data_dir: str, max_samples: Optional[int] = None, num_thoughts: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Load training data with memory-efficient loading and truncate based on num_thoughts.
+        Load training and test data with memory-efficient loading and truncate based on num_thoughts.
         
         Args:
-            data_dir: Directory containing the preprocessed data files
+            data_dir: Directory containing the preprocessed data files (with train/ and test/ subdirectories)
             max_samples: Maximum number of samples to load (for debugging/memory constraints)
             num_thoughts: Number of parallel sequences to use (truncates dataset if needed)
             
         Returns:
-            Tuple of (prompt_sequences, cot_sequences, prompt_mask, cot_mask)
+            Tuple of (train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask,
+                     test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask)
         """
         # Log memory before loading data
         if self.memory_monitor:
@@ -1681,6 +1681,10 @@ class GPT2VQVAETrainer:
             # self.memory_monitor.log_memory_usage("before_data_loading")
             # self.memory_monitor.log_pytorch_memory_usage("before_data_loading")
         
+        # Define train and test directories
+        train_dir = os.path.join(data_dir, "train")
+        test_dir = os.path.join(data_dir, "test")
+        
         required_files = [
             "prompt_sequences.pt",
             "cot_sequences_tensor.pt", 
@@ -1688,107 +1692,193 @@ class GPT2VQVAETrainer:
             "cot_mask.pt"
         ]
         
-        # Check if all required files exist
+        # Check if train and test directories exist
+        if not os.path.exists(train_dir):
+            raise FileNotFoundError(f"Train directory not found: {train_dir}")
+        if not os.path.exists(test_dir):
+            raise FileNotFoundError(f"Test directory not found: {test_dir}")
+        
+        # Check if all required files exist in both directories
         missing_files = []
-        for file_name in required_files:
-            file_path = os.path.join(data_dir, file_name)
-            if not os.path.exists(file_path):
-                missing_files.append(file_name)
+        for split_dir, split_name in [(train_dir, "train"), (test_dir, "test")]:
+            for file_name in required_files:
+                file_path = os.path.join(split_dir, file_name)
+                if not os.path.exists(file_path):
+                    missing_files.append(f"{split_name}/{file_name}")
         
         if missing_files:
-            raise FileNotFoundError(f"Missing data files in {data_dir}: {missing_files}")
+            raise FileNotFoundError(f"Missing data files: {missing_files}")
         
-        # Load tensors with memory mapping if available
+        # Load train tensors with memory mapping if available
         try:
-            # Try to use memory mapping for large files
-            prompt_sequences = torch.load(os.path.join(data_dir, "prompt_sequences.pt"), map_location='cpu')
-            cot_sequences = torch.load(os.path.join(data_dir, "cot_sequences_tensor.pt"), map_location='cpu')
-            prompt_mask = torch.load(os.path.join(data_dir, "prompt_mask.pt"), map_location='cpu')
-            cot_mask = torch.load(os.path.join(data_dir, "cot_mask.pt"), map_location='cpu')
+            print(f"Loading train data from {train_dir}...")
+            train_prompt_sequences = torch.load(os.path.join(train_dir, "prompt_sequences.pt"), map_location='cpu')
+            train_cot_sequences = torch.load(os.path.join(train_dir, "cot_sequences_tensor.pt"), map_location='cpu')
+            train_prompt_mask = torch.load(os.path.join(train_dir, "prompt_mask.pt"), map_location='cpu')
+            train_cot_mask = torch.load(os.path.join(train_dir, "cot_mask.pt"), map_location='cpu')
         except Exception as e:
-            print(f"Warning: Could not use memory mapping: {e}")
+            print(f"Warning: Could not use memory mapping for train data: {e}")
             # Fallback to regular loading
-            prompt_sequences = torch.load(os.path.join(data_dir, "prompt_sequences.pt"))
-            cot_sequences = torch.load(os.path.join(data_dir, "cot_sequences_tensor.pt"))
-            prompt_mask = torch.load(os.path.join(data_dir, "prompt_mask.pt"))
-            cot_mask = torch.load(os.path.join(data_dir, "cot_mask.pt"))
+            train_prompt_sequences = torch.load(os.path.join(train_dir, "prompt_sequences.pt"))
+            train_cot_sequences = torch.load(os.path.join(train_dir, "cot_sequences_tensor.pt"))
+            train_prompt_mask = torch.load(os.path.join(train_dir, "prompt_mask.pt"))
+            train_cot_mask = torch.load(os.path.join(train_dir, "cot_mask.pt"))
         
-        print(f"Original data shapes:")
-        print(f"  prompt_sequences: {prompt_sequences.shape}")
-        print(f"  cot_sequences: {cot_sequences.shape}")
-        print(f"  prompt_mask: {prompt_mask.shape}")
-        print(f"  cot_mask: {cot_mask.shape}")
+        # Load test tensors with memory mapping if available
+        try:
+            print(f"Loading test data from {test_dir}...")
+            test_prompt_sequences = torch.load(os.path.join(test_dir, "prompt_sequences.pt"), map_location='cpu')
+            test_cot_sequences = torch.load(os.path.join(test_dir, "cot_sequences_tensor.pt"), map_location='cpu')
+            test_prompt_mask = torch.load(os.path.join(test_dir, "prompt_mask.pt"), map_location='cpu')
+            test_cot_mask = torch.load(os.path.join(test_dir, "cot_mask.pt"), map_location='cpu')
+        except Exception as e:
+            print(f"Warning: Could not use memory mapping for test data: {e}")
+            # Fallback to regular loading
+            test_prompt_sequences = torch.load(os.path.join(test_dir, "prompt_sequences.pt"))
+            test_cot_sequences = torch.load(os.path.join(test_dir, "cot_sequences_tensor.pt"))
+            test_prompt_mask = torch.load(os.path.join(test_dir, "prompt_mask.pt"))
+            test_cot_mask = torch.load(os.path.join(test_dir, "cot_mask.pt"))
         
-        # Validate and reorganize based on num_thoughts
+        print(f"Train data shapes:")
+        print(f"  prompt_sequences: {train_prompt_sequences.shape}")
+        print(f"  cot_sequences: {train_cot_sequences.shape}")
+        print(f"  prompt_mask: {train_prompt_mask.shape}")
+        print(f"  cot_mask: {train_cot_mask.shape}")
+        
+        print(f"Test data shapes:")
+        print(f"  prompt_sequences: {test_prompt_sequences.shape}")
+        print(f"  cot_sequences: {test_cot_sequences.shape}")
+        print(f"  prompt_mask: {test_prompt_mask.shape}")
+        print(f"  cot_mask: {test_cot_mask.shape}")
+        
+        # Validate and reorganize based on num_thoughts for both train and test
         if num_thoughts is not None:
-            current_num_thoughts = cot_sequences.shape[1]  # Should be the second dimension
-            print(f"Current num_thoughts in dataset: {current_num_thoughts}")
+            # Check train data
+            train_current_num_thoughts = train_cot_sequences.shape[1]
+            test_current_num_thoughts = test_cot_sequences.shape[1]
+            
+            print(f"Current num_thoughts in train dataset: {train_current_num_thoughts}")
+            print(f"Current num_thoughts in test dataset: {test_current_num_thoughts}")
             print(f"Requested num_thoughts: {num_thoughts}")
             
-            if current_num_thoughts < num_thoughts:
-                raise ValueError(f"Dataset only has {current_num_thoughts} parallel sequences, "
+            if train_current_num_thoughts < num_thoughts or test_current_num_thoughts < num_thoughts:
+                raise ValueError(f"Dataset only has {min(train_current_num_thoughts, test_current_num_thoughts)} parallel sequences, "
                                f"but model requires {num_thoughts}. Please regenerate dataset with more sequences.")
             
-            if current_num_thoughts > num_thoughts:
-                # Calculate how many multiples of num_thoughts can fit within current_num_thoughts
-                num_batches = current_num_thoughts // num_thoughts
-                remainder = current_num_thoughts % num_thoughts
-                
-                if remainder > 0:
-                    print(f"Warning: {current_num_thoughts} is not perfectly divisible by {num_thoughts}")
-                    print(f"Will use {num_batches * num_thoughts} sequences (dropping {remainder} sequences)")
-                
-                print(f"Reorganizing dataset: {current_num_thoughts} sequences → {num_batches} batches of {num_thoughts} sequences each")
-                
-                # Calculate new dataset size (each original sample becomes num_batches samples)
-                original_batch_size = prompt_sequences.shape[0]
-                new_batch_size = original_batch_size * num_batches
-                usable_sequences = num_batches * num_thoughts
-                
-                def reorganize_sequence_pair(sequence_1d, sequence_2d):
-                    """Helper to reorganize a pair of prompt/cot sequences or masks"""
-                    # Repeat 1D sequence to [batch_size * num_batches, seq_len] 
-                    sequence_1d = sequence_1d.unsqueeze(1).repeat(1, num_batches, 1).reshape(-1, sequence_1d.size(-1))
-                    
-                    # Reshape 2D sequence to [batch_size * num_batches, num_thoughts, seq_len]
-                    sequence_2d = sequence_2d[:, :usable_sequences, :]  # Remove remainder
-                    sequence_2d = sequence_2d.view(original_batch_size, num_batches, num_thoughts, -1)
-                    sequence_2d = sequence_2d.transpose(1, 2).contiguous().view(new_batch_size, num_thoughts, -1)
-                    
-                    return sequence_1d, sequence_2d
-                
-                # Reorganize sequences and masks
-                prompt_sequences, cot_sequences = reorganize_sequence_pair(prompt_sequences, cot_sequences)
-                prompt_mask, cot_mask = reorganize_sequence_pair(prompt_mask, cot_mask)
-                
-                print(f"Reorganized data shapes:")
-                print(f"  prompt_sequences: {prompt_sequences.shape}")
-                print(f"  cot_sequences: {cot_sequences.shape}")
-                print(f"  prompt_mask: {prompt_mask.shape}")
-                print(f"  cot_mask: {cot_mask.shape}")
-                print(f"  Dataset size increased from {original_batch_size} to {new_batch_size} samples")
+            # Process train data if needed
+            if train_current_num_thoughts > num_thoughts:
+                train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask = self._reorganize_sequences(
+                    train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, num_thoughts, "train"
+                )
+            
+            # Process test data if needed
+            if test_current_num_thoughts > num_thoughts:
+                test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask = self._reorganize_sequences(
+                    test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask, num_thoughts, "test"
+                )
         
         # Limit samples if specified
         if max_samples is not None:
-            prompt_sequences = prompt_sequences[:max_samples]
-            cot_sequences = cot_sequences[:max_samples]
-            prompt_mask = prompt_mask[:max_samples]
-            cot_mask = cot_mask[:max_samples]
-        print(f"Final data shapes:")
+            train_prompt_sequences = train_prompt_sequences[:max_samples]
+            train_cot_sequences = train_cot_sequences[:max_samples]
+            train_prompt_mask = train_prompt_mask[:max_samples]
+            train_cot_mask = train_cot_mask[:max_samples]
+            
+            test_prompt_sequences = test_prompt_sequences[:max_samples]
+            test_cot_sequences = test_cot_sequences[:max_samples]
+            test_prompt_mask = test_prompt_mask[:max_samples]
+            test_cot_mask = test_cot_mask[:max_samples]
+        
+        print(f"Final train data shapes:")
+        print(f"  prompt_sequences: {train_prompt_sequences.shape}")
+        print(f"  cot_sequences: {train_cot_sequences.shape}")
+        print(f"  prompt_mask: {train_prompt_mask.shape}")
+        print(f"  cot_mask: {train_cot_mask.shape}")
+        
+        print(f"Final test data shapes:")
+        print(f"  prompt_sequences: {test_prompt_sequences.shape}")
+        print(f"  cot_sequences: {test_cot_sequences.shape}")
+        print(f"  prompt_mask: {test_prompt_mask.shape}")
+        print(f"  cot_mask: {test_cot_mask.shape}")
+        
+        # Calculate memory usage
+        train_memory_gb = (
+            train_prompt_sequences.element_size() * train_prompt_sequences.numel() +
+            train_cot_sequences.element_size() * train_cot_sequences.numel() +
+            train_prompt_mask.element_size() * train_prompt_mask.numel() +
+            train_cot_mask.element_size() * train_cot_mask.numel()
+        ) / 1e9
+        
+        test_memory_gb = (
+            test_prompt_sequences.element_size() * test_prompt_sequences.numel() +
+            test_cot_sequences.element_size() * test_cot_sequences.numel() +
+            test_prompt_mask.element_size() * test_prompt_mask.numel() +
+            test_cot_mask.element_size() * test_cot_mask.numel()
+        ) / 1e9
+        
+        total_memory_gb = train_memory_gb + test_memory_gb
+        
+        print(f"Train data memory usage: {train_memory_gb:.2f} GB")
+        print(f"Test data memory usage: {test_memory_gb:.2f} GB")
+        print(f"Total data memory usage: {total_memory_gb:.2f} GB")
+        
+        return train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, \
+               test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask
+
+    def _reorganize_sequences(self, prompt_sequences, cot_sequences, prompt_mask, cot_mask, num_thoughts, split_name):
+        """
+        Helper method to reorganize sequences when num_thoughts is specified.
+        
+        Args:
+            prompt_sequences: Prompt sequences tensor
+            cot_sequences: CoT sequences tensor
+            prompt_mask: Prompt mask tensor
+            cot_mask: CoT mask tensor
+            num_thoughts: Number of parallel sequences to use
+            split_name: Name of the split (train/test) for logging
+            
+        Returns:
+            Tuple of reorganized tensors
+        """
+        current_num_thoughts = cot_sequences.shape[1]
+        
+        # Calculate how many multiples of num_thoughts can fit within current_num_thoughts
+        num_batches = current_num_thoughts // num_thoughts
+        remainder = current_num_thoughts % num_thoughts
+        
+        if remainder > 0:
+            print(f"Warning: {split_name} dataset has {current_num_thoughts} sequences, not perfectly divisible by {num_thoughts}")
+            print(f"Will use {num_batches * num_thoughts} sequences (dropping {remainder} sequences)")
+        
+        print(f"Reorganizing {split_name} dataset: {current_num_thoughts} sequences → {num_batches} batches of {num_thoughts} sequences each")
+        
+        # Calculate new dataset size (each original sample becomes num_batches samples)
+        original_batch_size = prompt_sequences.shape[0]
+        new_batch_size = original_batch_size * num_batches
+        usable_sequences = num_batches * num_thoughts
+        
+        def reorganize_sequence_pair(sequence_1d, sequence_2d):
+            """Helper to reorganize a pair of prompt/cot sequences or masks"""
+            # Repeat 1D sequence to [batch_size * num_batches, seq_len] 
+            sequence_1d = sequence_1d.unsqueeze(1).repeat(1, num_batches, 1).reshape(-1, sequence_1d.size(-1))
+            
+            # Reshape 2D sequence to [batch_size * num_batches, num_thoughts, seq_len]
+            sequence_2d = sequence_2d[:, :usable_sequences, :]  # Remove remainder
+            sequence_2d = sequence_2d.view(original_batch_size, num_batches, num_thoughts, -1)
+            sequence_2d = sequence_2d.transpose(1, 2).contiguous().view(new_batch_size, num_thoughts, -1)
+            
+            return sequence_1d, sequence_2d
+        
+        # Reorganize sequences and masks
+        prompt_sequences, cot_sequences = reorganize_sequence_pair(prompt_sequences, cot_sequences)
+        prompt_mask, cot_mask = reorganize_sequence_pair(prompt_mask, cot_mask)
+        
+        print(f"Reorganized {split_name} data shapes:")
         print(f"  prompt_sequences: {prompt_sequences.shape}")
         print(f"  cot_sequences: {cot_sequences.shape}")
         print(f"  prompt_mask: {prompt_mask.shape}")
         print(f"  cot_mask: {cot_mask.shape}")
-        
-        # Calculate memory usage
-        total_memory_gb = (
-            prompt_sequences.element_size() * prompt_sequences.numel() +
-            cot_sequences.element_size() * cot_sequences.numel() +
-            prompt_mask.element_size() * prompt_mask.numel() +
-            cot_mask.element_size() * cot_mask.numel()
-        ) / 1e9
-        
-        print(f"Total data memory usage: {total_memory_gb:.2f} GB")
+        print(f"  {split_name} dataset size increased from {original_batch_size} to {new_batch_size} samples")
         
         return prompt_sequences, cot_sequences, prompt_mask, cot_mask
 
@@ -3209,27 +3299,31 @@ def main():
             else:
                 trainer = GPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
 
-        # Load data using memory-efficient method with num_thoughts truncation
-        prompt_sequences, cot_sequences, prompt_mask, cot_mask = trainer.load_training_data(
+        # Load training and test data using memory-efficient method with num_thoughts truncation
+        train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, \
+        test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask = trainer.load_training_data(
             data_dir, max_samples=max_samples, num_thoughts=num_thoughts
         )
         
-        # Validate model-data compatibility
-        validate_model_data_compatibility(model_config, prompt_sequences, cot_sequences, prompt_mask, cot_mask)
-        
-        # Get validation split from config
-        val_split = training_config.get('val_split', 0.1)
+        # Validate model-data compatibility for both train and test sets
+        print("Validating train data compatibility...")
+        validate_model_data_compatibility(model_config, train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask)
+        print("Validating test data compatibility...")
+        validate_model_data_compatibility(model_config, test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask)
         
         # Start training
         print("Starting training...")
         print(f"Perplexity threshold monitoring: {training_config.get('perplexity_threshold', 1.5)} (window size: {training_config.get('perplexity_window_size', 20)})")
         print(f"Minimum batches for aborted checkpoint: {training_config.get('minimum_batches_for_checkpoint', 200)}")
         trainer.train(
-            prompt_sequences=prompt_sequences,
-            cot_sequences=cot_sequences,
-            prompt_mask=prompt_mask,
-            cot_mask=cot_mask,
-            val_split=val_split,
+            train_prompt_sequences=train_prompt_sequences,
+            train_cot_sequences=train_cot_sequences,
+            train_prompt_mask=train_prompt_mask,
+            train_cot_mask=train_cot_mask,
+            test_prompt_sequences=test_prompt_sequences,
+            test_cot_sequences=test_cot_sequences,
+            test_prompt_mask=test_prompt_mask,
+            test_cot_mask=test_cot_mask,
             resume_from=args.resume_from,
             num_measurements_per_epoch=training_config.get('num_measurements_per_epoch', 20)
         )
