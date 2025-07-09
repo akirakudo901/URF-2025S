@@ -2140,42 +2140,110 @@ def compute_reconstruction_loss(output_logits: torch.Tensor,
     
     return recon_loss
 
+def generate_gpt2_baseline_texts(prompt: torch.Tensor, 
+                                prompt_mask: torch.Tensor,
+                                cot_gt: torch.Tensor,
+                                num_thoughts: int,
+                                tokenizer,
+                                gpt2_model) -> List[str]:
+    """
+    Generate GPT2 baseline texts for comparison with the model outputs.
+    
+    Args:
+        prompt: Prompt tensor [1, prompt_length]
+        prompt_mask: Prompt mask tensor [1, prompt_length]
+        cot_gt: Ground truth CoT tensor [1, num_thoughts, cot_length]
+        num_thoughts: Number of CoT sequences
+        tokenizer: GPT2 tokenizer
+        gpt2_model: Pre-trained GPT2 model
+        
+    Returns:
+        List of GPT2 baseline texts, one for each CoT sequence
+    """
+    gpt2_baseline_texts = []
+    if gpt2_model is not None and tokenizer is not None:
+        try:
+            # Remove prompt padding and add "Let's think step by step."
+            prompt_tokens = prompt[0]
+            if prompt_mask is not None:
+                prompt_tokens = prompt_tokens[prompt_mask[0].bool()]
+            
+            # Add "Let's think step by step." after the prompt
+            step_by_step_text = "Let's think step by step."
+            step_by_step_tokens = tokenizer.encode(step_by_step_text, add_special_tokens=False)
+            
+            # Combine prompt tokens with step-by-step tokens
+            combined_tokens = torch.cat([
+                prompt_tokens,
+                torch.tensor(step_by_step_tokens, dtype=prompt_tokens.dtype, device=prompt_tokens.device)
+            ])
+            
+            input_ids = combined_tokens.unsqueeze(0)
+            
+            # Generate continuation (length: same as a single CoT sequence)
+            max_gen_len = cot_gt.shape[-1]
+            gpt2_outputs = gpt2_model.generate(
+                input_ids=input_ids,
+                max_length=input_ids.shape[1] + max_gen_len,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id
+            )
+            # Extract only the generated part (excluding the prompt + step-by-step text)
+            generated_tokens = gpt2_outputs[0][input_ids.shape[1]:]
+            # Repeat the same baseline for each CoT sequence for fair comparison
+            for _ in range(num_thoughts):
+                gpt2_baseline_texts.append(tokenizer.decode(generated_tokens, skip_special_tokens=True))
+            
+        except Exception as e:
+            print(f"GPT2 baseline generation failed: {e}")
+            gpt2_baseline_texts = ["FAILED"] * num_thoughts
+    else:
+        gpt2_baseline_texts = ["FAILED"] * num_thoughts
+    
+    return gpt2_baseline_texts
+
 def demonstrate_model_from_checkpoint(checkpoint_path: str, 
-                                    model_config: Dict[str, Any],
                                     data_dir: str,
                                     num_examples: int = 3,
                                     device: str = "cuda" if torch.cuda.is_available() else "cpu",
                                     use_vq: bool = True,
                                     model_type: str = "GPT2VQVAE",
-                                    seed: int = 42):
+                                    seed: int = 42,
+                                    **kwargs):
     """
-    Demonstrate GPT2VQVAE or SimpleGPT2VQVAE model generation capabilities from a checkpoint.
+    Demonstrate GPT2VQVAE, EnhancedGPT2VQVAE, or SimpleGPT2VQVAE model generation capabilities from a checkpoint.
+    
+    This function automatically loads the model configuration from the checkpoint file,
+    eliminating the need to manually specify model_config.
     
     Args:
         checkpoint_path: Path to the checkpoint file
-        model_config: Model configuration dictionary
         data_dir: Directory containing training data
         num_examples: Number of examples to generate
         device: Device to run the model on
         use_vq: Whether to use vector quantization (for SimpleGPT2VQVAE)
-        model_type: Type of model to use ("GPT2VQVAE" or "SimpleGPT2VQVAE")
+        model_type: Type of model to use ("GPT2VQVAE", "EnhancedGPT2VQVAE", or "SimpleGPT2VQVAE")
         seed: Random seed for sampling examples (default: 42)
+        **kwargs: Additional arguments to override checkpoint configuration
     """
     print(f"Loading {model_type} model from checkpoint: {checkpoint_path}")
     
-    # Initialize model based on type
-    if model_type == "EnhancedGPT2VQVAE":
-        model = EnhancedGPT2VQVAE(**model_config).to(device)
-        print(f"Initialized EnhancedGPT2VQVAE model")
-    elif model_type == "SimpleGPT2VQVAE":
-        model = SimpleGPT2VQVAE(**model_config).to(device)
-        print(f"Initialized SimpleGPT2VQVAE model with use_vq={use_vq}")
-    else:
-        model = GPT2VQVAE(**model_config).to(device)
-        print(f"Initialized GPT2VQVAE model")
+    # Load model using the new from_checkpoint method
+    try:
+        if model_type == "EnhancedGPT2VQVAE":
+            model = EnhancedGPT2VQVAE.from_checkpoint(checkpoint_path, device=device, **kwargs)
+            print(f"Successfully loaded EnhancedGPT2VQVAE model")
+        elif model_type == "SimpleGPT2VQVAE":
+            model = SimpleGPT2VQVAE.from_checkpoint(checkpoint_path, device=device, **kwargs)
+            print(f"Successfully loaded SimpleGPT2VQVAE model with use_vq={use_vq}")
+        else:
+            model = GPT2VQVAE.from_checkpoint(checkpoint_path, device=device, **kwargs)
+            print(f"Successfully loaded GPT2VQVAE model")
+    except Exception as e:
+        print(f"Error loading model from checkpoint: {e}")
+        print("Make sure the checkpoint file exists and contains the required model configuration.")
+        return
     
-    # Load checkpoint
-    model.load_checkpoint(checkpoint_path, device=device)
     model.eval()
     
     # Get num_embeddings and num_thoughts from model configuration
@@ -2342,66 +2410,9 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
                 indices_ar = None
 
             # Generate baseline using pre-trained GPT2
-            gpt2_baseline_texts = []
-            if gpt2_model is not None and tokenizer is not None:
-                try:
-                    # OPTION 1: PASSES A PROMPT MASK WITHOUT REMOVING PADDING
-                    # input_ids = prompt
-                    # # Generate continuation (length: same as a single CoT sequence)
-                    # max_gen_len = cot_gt.shape[-1]
-                    # gpt2_outputs = gpt2_model.generate(
-                    #     input_ids=input_ids,
-                    #     max_length=input_ids.shape[1] + max_gen_len,
-                    #     do_sample=False,
-                    #     pad_token_id=tokenizer.eos_token_id,
-                    #     attention_mask=prompt_mask_ex
-                    # )
-                    # # Extract only the generated part (excluding the prompt)
-                    # generated_tokens = gpt2_outputs[0][input_ids.shape[1]:]
-                    # # Repeat the same baseline for each CoT sequence for fair comparison
-                    # for _ in range(num_thoughts):
-                    #     gpt2_baseline_texts.append(tokenizer.decode(generated_tokens, skip_special_tokens=True))
-                    # NEW END
-
-                    # OPTION 2: REMOVE ALL PROMPT PADDING AND INSERT "Let's think step by step."
-                    # Encode the prompt (remove padding)
-                    
-                    prompt_tokens = prompt[0]
-                    if prompt_mask_ex is not None:
-                        prompt_tokens = prompt_tokens[prompt_mask_ex[0].bool()]
-                    
-                    # Add "Let's think step by step." after the prompt
-                    step_by_step_text = "Let's think step by step."
-                    step_by_step_tokens = tokenizer.encode(step_by_step_text, add_special_tokens=False)
-                    
-                    # Combine prompt tokens with step-by-step tokens
-                    combined_tokens = torch.cat([
-                        prompt_tokens,
-                        torch.tensor(step_by_step_tokens, dtype=prompt_tokens.dtype, device=prompt_tokens.device)
-                    ])
-                    
-                    input_ids = combined_tokens.unsqueeze(0)
-                    
-                    # Generate continuation (length: same as a single CoT sequence)
-                    max_gen_len = cot_gt.shape[-1]
-                    gpt2_outputs = gpt2_model.generate(
-                        input_ids=input_ids,
-                        max_length=input_ids.shape[1] + max_gen_len,
-                        do_sample=False,
-                        pad_token_id=tokenizer.eos_token_id
-                    )
-                    # Extract only the generated part (excluding the prompt + step-by-step text)
-                    generated_tokens = gpt2_outputs[0][input_ids.shape[1]:]
-                    # Repeat the same baseline for each CoT sequence for fair comparison
-                    for _ in range(num_thoughts):
-                        gpt2_baseline_texts.append(tokenizer.decode(generated_tokens, skip_special_tokens=True))
-                    
-                    # ORIGINAL END
-                except Exception as e:
-                    print(f"GPT2 baseline generation failed: {e}")
-                    gpt2_baseline_texts = ["FAILED"] * num_thoughts
-            else:
-                gpt2_baseline_texts = ["FAILED"] * num_thoughts
+            gpt2_baseline_texts = generate_gpt2_baseline_texts(
+                prompt, prompt_mask, cot_gt, num_thoughts, tokenizer, gpt2_model
+            )
             
             # Display side-by-side comparison for each CoT sequence
             print(f"\n{'='*120}")
@@ -2854,7 +2865,7 @@ def main():
     Main function for command-line training with memory optimizations.
     """
     parser = argparse.ArgumentParser(description='Train GPT2VQVAE model with memory optimizations and perplexity threshold monitoring')
-    parser.add_argument('--config', '-c', type=str, required=True,
+    parser.add_argument('--config', '-c', type=str, #not required anymore as it will be skipped when demonstrating
                        help='Path to configuration file (YAML or JSON)')
     parser.add_argument('--data-dir', type=str, default=None,
                        help='Override data directory from config')
@@ -2874,9 +2885,9 @@ def main():
                        help='Demonstrate model generation from checkpoint (provide checkpoint path)')
     parser.add_argument('--demonstrate-custom', type=str, default=None,
                        help='Demonstrate model generation from checkpoint using custom prompt-CoT files (provide checkpoint path)')
-    parser.add_argument('--prompt-file', type=str, default='test_prompt.txt',
+    parser.add_argument('--prompt-file', type=str, default='test/test_prompt.txt',
                        help='Path to file containing custom prompt (used with --demonstrate-custom)')
-    parser.add_argument('--cot-file', type=str, default='test_cot.txt',
+    parser.add_argument('--cot-file', type=str, default='test/test_cot.txt',
                        help='Path to file containing custom CoT (used with --demonstrate-custom)')
     parser.add_argument('--num-examples', type=int, default=3,
                        help='Number of examples to generate in demonstration mode')
@@ -2942,6 +2953,10 @@ def main():
         print("Error: --phased requires --enhanced to be enabled")
         print("Please use both --enhanced and --phased flags together")
         return
+
+    if not args.config and not (args.demonstrate or args.demonstrate_custom):
+        print("Error: --config required unless --demonstrate or --demonstrate-custom is specified")
+        return
     
     # Check for nvidia-ml-py3 availability
     if args.monitor_gpu_memory and not NVML_AVAILABLE:
@@ -2957,11 +2972,13 @@ def main():
     
     try:
         # Load configuration
-        print(f"Loading configuration from: {args.config}")
-        model_config, training_config = load_config(args.config)
-
-        # Set run name to be used for push notifications
-        run_name = os.path.basename(args.config)
+        if args.config:
+            print(f"Loading configuration from: {args.config}")
+            model_config, training_config = load_config(args.config)
+            # Set run name to be used for push notifications
+            run_name = os.path.basename(args.config)
+        else:
+            model_config, training_config = {}, {}
         
         # Override data directory if specified
         if args.data_dir:
@@ -3120,13 +3137,13 @@ def main():
             print(f"Using model type: {model_type}")
             demonstrate_model_from_checkpoint(
                 checkpoint_path=args.demonstrate,
-                model_config=model_config,
                 data_dir=data_dir,
                 num_examples=args.num_examples,
                 device=device,
                 use_vq=training_config.get('use_vq', True),
                 model_type=model_type,
-                seed=args.demo_seed
+                seed=args.demo_seed, 
+                **model_config
             )
             return  # Exit after demonstration
         
@@ -3144,12 +3161,12 @@ def main():
             print(f"CoT file: {args.cot_file}")
             demonstrate_custom_prompt_cot(
                 checkpoint_path=args.demonstrate_custom,
-                model_config=model_config,
                 prompt_file=args.prompt_file,
                 cot_file=args.cot_file,
                 device=device,
                 use_vq=training_config.get('use_vq', True),
-                model_type=model_type
+                model_type=model_type,
+                **model_config
             )
             return  # Exit after demonstration
         
@@ -3371,10 +3388,6 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         filtered_model_config = {k: v for k, v in model_config.items() if k not in enhanced_vq_params}
         filtered_training_config = {k: v for k, v in training_config.items() if k != 'enhanced_codebook_tracking'}
         
-        # Store original configs for enhanced features
-        self.original_model_config = model_config
-        self.original_training_config = training_config
-        
         # Set up enhanced tracking functions, for those not provided
         enhanced_tracking_functions = {
             'track_codebook_usage': tracking_functions.get('track_codebook_usage', self._enhanced_track_codebook_usage),
@@ -3385,8 +3398,12 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         # Call parent constructor with filtered configs and enhanced tracking functions
         super().__init__(filtered_model_config, filtered_training_config, device, enhanced_tracking_functions, run_name)
 
-        self.ensure_numeric_types(self.original_model_config)
-        self.ensure_numeric_types(self.original_training_config)
+        # Store original configs for enhanced features
+        self.model_config = model_config
+        self.training_config = training_config
+        
+        self.ensure_numeric_types(self.model_config)
+        self.ensure_numeric_types(self.training_config)
         
         # Manage some model_config entries
         if 'max_reset_steps' not in model_config:
@@ -3449,7 +3466,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             print(f"Reset threshold: {model_config.get('reset_threshold', 0.1)}")
             print(f"Reset frequency: {model_config.get('reset_frequency', 1000)}")
             print(f"Use EMA: {model_config.get('use_ema', True)}")
-            print(f"Reset stop fraction: {self.original_model_config.get('reset_stop_fraction', 0.2)}")
+            print(f"Reset stop fraction: {self.model_config.get('reset_stop_fraction', 0.2)}")
         else:
             print("Enhanced codebook tracking disabled")
         print("EnhancedGPT2VQVAE trainer initialized successfully.")
@@ -3466,7 +3483,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             total_training_steps = num_epochs * steps_per_epoch
             
             # Calculate max_reset_steps from reset_stop_fraction
-            reset_stop_fraction = self.original_model_config.get('reset_stop_fraction', 0.2)
+            reset_stop_fraction = self.model_config.get('reset_stop_fraction', 0.2)
             max_reset_steps = int(reset_stop_fraction * total_training_steps)
             
             # Set max_reset_steps on the vector quantizer
@@ -3810,55 +3827,67 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         self.model.enable_ema(decay)
 
 def demonstrate_custom_prompt_cot(checkpoint_path: str,
-                                 model_config: Dict[str, Any],
                                  prompt_file: str = "test_prompt.txt",
                                  cot_file: str = "test_cot.txt",
                                  device: str = "cuda" if torch.cuda.is_available() else "cpu",
                                  use_vq: bool = True,
-                                 model_type: str = "GPT2VQVAE"):
+                                 model_type: str = "GPT2VQVAE",
+                                 **kwargs):
     """
-    Demonstrate GPT2VQVAE or SimpleGPT2VQVAE model generation capabilities from a checkpoint
+    Demonstrate GPT2VQVAE, EnhancedGPT2VQVAE, or SimpleGPT2VQVAE model generation capabilities from a checkpoint
     using custom prompt and CoT from plain text files.
+    
+    This function automatically loads the model configuration from the checkpoint file,
+    eliminating the need to manually specify model_config.
     
     Args:
         checkpoint_path: Path to the checkpoint file
-        model_config: Model configuration dictionary
         prompt_file: Path to file containing the prompt in plain text
         cot_file: Path to file containing the CoT in plain text
         device: Device to run the model on
         use_vq: Whether to use vector quantization (for SimpleGPT2VQVAE)
-        model_type: Type of model to use ("GPT2VQVAE" or "SimpleGPT2VQVAE")
+        model_type: Type of model to use ("GPT2VQVAE", "EnhancedGPT2VQVAE", or "SimpleGPT2VQVAE")
+        **kwargs: Additional arguments to override checkpoint configuration
     """
     print(f"Loading {model_type} model from checkpoint: {checkpoint_path}")
     
-    # Initialize model based on type
-    if model_type == "EnhancedGPT2VQVAE":
-        model = EnhancedGPT2VQVAE(**model_config).to(device)
-        print(f"Initialized EnhancedGPT2VQVAE model")
-    elif model_type == "SimpleGPT2VQVAE":
-        model = SimpleGPT2VQVAE(**model_config).to(device)
-        print(f"Initialized SimpleGPT2VQVAE model with use_vq={use_vq}")
-    else:
-        model = GPT2VQVAE(**model_config).to(device)
-        print(f"Initialized GPT2VQVAE model")
+    # Load model using the new from_checkpoint method
+    try:
+        if model_type == "EnhancedGPT2VQVAE":
+            model = EnhancedGPT2VQVAE.from_checkpoint(checkpoint_path, device=device, **kwargs)
+            print(f"Successfully loaded EnhancedGPT2VQVAE model")
+        elif model_type == "SimpleGPT2VQVAE":
+            model = SimpleGPT2VQVAE.from_checkpoint(checkpoint_path, device=device, **kwargs)
+            print(f"Successfully loaded SimpleGPT2VQVAE model with use_vq={use_vq}")
+        else:
+            model = GPT2VQVAE.from_checkpoint(checkpoint_path, device=device, **kwargs)
+            print(f"Successfully loaded GPT2VQVAE model")
+    except Exception as e:
+        print(f"Error loading model from checkpoint: {e}")
+        print("Make sure the checkpoint file exists and contains the required model configuration.")
+        return
     
-    # Load checkpoint
-    model.load_checkpoint(checkpoint_path, device=device)
     model.eval()
     
     # Get num_embeddings and num_thoughts from model configuration
-    num_embeddings = model_config.get('num_embeddings', 512)
-    num_thoughts = 1 if model_type == "SimpleGPT2VQVAE" else model_config.get('num_thoughts', 32)
+    num_embeddings = model.vector_quantizer.num_embeddings
+    num_thoughts = 1 if model_type == "SimpleGPT2VQVAE" else model.num_thoughts
     print(f"Model configured for {num_thoughts} parallel CoT sequences and {num_embeddings} embeddings")
     
-    # Load tokenizer
+    # Load tokenizer and GPT2 model for baseline comparison
     try:
         tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
         tokenizer.pad_token = tokenizer.eos_token
         print("Loaded GPT2 tokenizer")
+        
+        # Load pre-trained GPT2 model for baseline comparison
+        gpt2_model = GPT2LMHeadModel.from_pretrained('gpt2').to(device)
+        gpt2_model.eval()
+        print("Loaded pre-trained GPT2 model for baseline comparison")
     except Exception as e:
-        print(f"Warning: Could not load tokenizer: {e}")
+        print(f"Warning: Could not load GPT2 model/tokenizer: {e}")
         tokenizer = None
+        gpt2_model = None
     
     # Load prompt and CoT from files
     print(f"Loading prompt from: {prompt_file}")
@@ -3900,7 +3929,7 @@ def demonstrate_custom_prompt_cot(checkpoint_path: str,
         print(f"CoT tokens: {cot_tokens.shape} (length: {cot_length})")
         
         # Check sequence length limits
-        n_positions = model_config.get('n_positions', 1024)
+        n_positions = model.encoder_config.n_positions
         total_length = prompt_length + cot_length
         
         if total_length > n_positions:
@@ -4017,6 +4046,11 @@ def demonstrate_custom_prompt_cot(checkpoint_path: str,
             vq_loss_ar = None
             perplexity_ar = None
             indices_ar = None
+
+        # Generate baseline using pre-trained GPT2
+        gpt2_baseline_texts = generate_gpt2_baseline_texts(
+            prompt, prompt_mask_ex, cot_gt, num_thoughts, tokenizer, gpt2_model
+        )
         
         # Display results
         print(f"\n{'='*120}")
