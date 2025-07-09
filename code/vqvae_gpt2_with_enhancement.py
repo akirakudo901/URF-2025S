@@ -1160,3 +1160,99 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             bool: True if batch normalization is enabled, False otherwise
         """
         return self.vector_quantizer.is_batch_norm_enabled()
+    
+    @classmethod
+    def from_checkpoint(cls, checkpoint_path: str, device: Optional[str] = None, **kwargs):
+        """
+        Initialize and load an EnhancedGPT2VQVAE model from a checkpoint file.
+        
+        This method extends the parent from_checkpoint method to handle enhanced-specific
+        configuration parameters like EMA decay, diversity gamma, reset thresholds, etc.
+        
+        Args:
+            checkpoint_path (str): Path to the checkpoint file
+            device (str, optional): Device to load the model on (if None, uses 'cuda' if available, else 'cpu')
+            **kwargs: Additional arguments to override the checkpoint configuration
+            
+        Returns:
+            EnhancedGPT2VQVAE: Fully initialized and loaded model
+            
+        Raises:
+            FileNotFoundError: If checkpoint file doesn't exist
+            KeyError: If checkpoint is missing required configuration
+            ValueError: If configuration is invalid
+            
+        Example:
+            >>> # Load enhanced model with checkpoint configuration
+            >>> model = EnhancedGPT2VQVAE.from_checkpoint('checkpoints/enhanced_model_epoch_10.pt')
+            
+            >>> # Load enhanced model with overridden parameters
+            >>> model = EnhancedGPT2VQVAE.from_checkpoint(
+            ...     'checkpoints/enhanced_model_epoch_10.pt',
+            ...     device='cpu',
+            ...     ema_decay=0.95,
+            ...     use_ema=False
+            ... )
+        """
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        # Load checkpoint to extract configuration
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        
+        if 'model_config' not in checkpoint:
+            raise KeyError(f"Checkpoint file {checkpoint_path} does not contain 'model_config'")
+        
+        # Extract model configuration from checkpoint
+        model_config = checkpoint['model_config'].copy()
+        
+        # Check if this is an enhanced model checkpoint by looking for enhanced configuration
+        is_enhanced_checkpoint = False
+        enhanced_config = {}
+        
+        # Check for enhanced configuration in the checkpoint
+        enhanced_keys = ['ema_decay', 'diversity_gamma', 'reset_threshold', 'reset_frequency', 
+                           'use_ema', 'max_reset_steps', 'reservoir_size', 'reset_strategy', 'use_batch_norm']
+        if 'enhanced_config' in checkpoint:
+            enhanced_config = checkpoint['enhanced_config'].copy()
+            is_enhanced_checkpoint = True
+            print("Detected enhanced model checkpoint with enhanced configuration")
+        elif any(key in model_config for key in enhanced_keys):
+            # Extract enhanced parameters from model_config if they exist
+            enhanced_config = {key: model_config.pop(key) for key in enhanced_keys if key in model_config}
+            is_enhanced_checkpoint = bool(enhanced_config)
+            if is_enhanced_checkpoint:
+                print("Detected enhanced model checkpoint with enhanced parameters in model_config")
+        
+        # Handle enhanced-specific overrides
+        enhanced_overrides = {}
+        
+        for key in enhanced_keys:
+            if key in kwargs:
+                enhanced_overrides[key] = kwargs.pop(key)
+        
+        # Update enhanced configuration with overrides
+        enhanced_config.update(enhanced_overrides)
+        
+        # If this was an enhanced checkpoint, ensure we have the enhanced parameters
+        if is_enhanced_checkpoint:
+            # Merge enhanced configuration into model_config for initialization
+            model_config.update(enhanced_config)
+        else:
+            # This might be a regular GPT2VQVAE checkpoint, use default enhanced parameters
+            print("Warning: Loading regular GPT2VQVAE checkpoint into EnhancedGPT2VQVAE model")
+            print("Using default enhanced parameters. Consider using GPT2VQVAE.from_checkpoint() for regular checkpoints.")
+        
+        # Override with any remaining kwargs
+        model_config.update(kwargs)
+        
+        # Use parent's implementation for the rest
+        model = cls._from_checkpoint_impl(checkpoint_path, device, model_config, **kwargs)
+        
+        # Print enhanced configuration summary
+        if enhanced_config:
+            print("Enhanced configuration:")
+            for key, value in enhanced_config.items():
+                print(f"  {key}: {value}")
+        
+        return model

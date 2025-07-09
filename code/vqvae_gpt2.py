@@ -1213,6 +1213,104 @@ class GPT2VQVAE(nn.Module):
         print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
         print("Checkpoint loaded successfully. Configuration validation completed.")
 
+    @classmethod
+    def from_checkpoint(cls, checkpoint_path: str, device: Optional[str] = None, **kwargs):
+        """
+        Initialize and load a GPT2VQVAE model from a checkpoint file.
+        
+        This static method:
+        1. Loads the checkpoint to extract model configuration
+        2. Initializes a new model instance with the extracted configuration
+        3. Loads the model weights from the checkpoint
+        4. Returns the fully loaded model
+        
+        Args:
+            checkpoint_path (str): Path to the checkpoint file
+            device (str, optional): Device to load the model on (if None, uses 'cuda' if available, else 'cpu')
+            **kwargs: Additional arguments to override the checkpoint configuration
+            
+        Returns:
+            GPT2VQVAE: Fully initialized and loaded model
+            
+        Raises:
+            FileNotFoundError: If checkpoint file doesn't exist
+            KeyError: If checkpoint is missing required configuration
+            ValueError: If configuration is invalid
+            
+        Example:
+            >>> # Load model with checkpoint configuration
+            >>> model = GPT2VQVAE.from_checkpoint('checkpoints/model_epoch_10.pt')
+            
+            >>> # Load model with overridden parameters
+            >>> model = GPT2VQVAE.from_checkpoint(
+            ...     'checkpoints/model_epoch_10.pt',
+            ...     device='cpu',
+            ...     use_pretrained_encoder=False
+            ... )
+        """
+        return cls._from_checkpoint_impl(checkpoint_path, device, **kwargs)
+    
+    @classmethod
+    def _from_checkpoint_impl(cls, checkpoint_path: str, device: Optional[str] = None, 
+                             model_config: Optional[dict] = None, **kwargs):
+        """
+        Internal implementation of from_checkpoint that can be overridden by subclasses.
+        
+        Args:
+            checkpoint_path (str): Path to the checkpoint file
+            device (str, optional): Device to load the model on
+            model_config (dict, optional): Pre-processed model configuration
+            **kwargs: Additional arguments to override the checkpoint configuration
+            
+        Returns:
+            Model instance: Fully initialized and loaded model
+        """
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        # Load checkpoint to extract configuration if not provided
+        if model_config is None:
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            
+            if 'model_config' not in checkpoint:
+                raise KeyError(f"Checkpoint file {checkpoint_path} does not contain 'model_config'")
+            
+            # Extract model configuration from checkpoint
+            model_config = checkpoint['model_config'].copy()
+        else:
+            # If model_config is provided, we still need to load the checkpoint for weights
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+        
+        # Override with any provided kwargs
+        model_config.update(kwargs)
+        
+        # Validate required configuration fields
+        required_fields = ['vocab_size', 'd_model', 'num_embeddings', 'commitment_cost', 
+                           'aggregation_hidden_dim', 'num_thoughts', 'n_positions', 
+                           'encoder_n_layer', 'encoder_n_head', 'encoder_n_inner',
+                           'encoder_dropout', 'encoder_activation_function',
+                           'decoder_n_layer', 'decoder_n_head', 'decoder_n_inner',
+                           'decoder_dropout', 'decoder_activation_function']
+        missing_fields = [field for field in required_fields if field not in model_config]
+        if missing_fields:
+            raise ValueError(f"Missing required model configuration fields: {missing_fields}")
+        
+        # Initialize model with extracted configuration
+        print(f"Initializing {cls.__name__} model from checkpoint configuration...")
+        model = cls(**model_config)
+        
+        # Move model to specified device
+        model = model.to(device)
+        
+        # Load model weights
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        print(f"Successfully loaded {cls.__name__} model from checkpoint: {checkpoint_path}")
+        print(f"Model loaded on device: {device}")
+        print(f"Checkpoint epoch: {checkpoint.get('epoch', 'unknown')}")
+        
+        return model
+
 def create_cross_attention_mask(query_length, key_length, device, dtype=torch.float32):
     """
     Create a cross-attention mask for memory attention.
