@@ -59,6 +59,13 @@ import traceback
 import socket
 from datetime import datetime
 from torch.autograd.profiler import record_function
+import json
+import sys
+import os
+
+# Add the current directory to the path to import phone_notification
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from phone_notification import send_notification
 
 # GPU memory monitoring
 try:
@@ -78,6 +85,7 @@ from vqvae_gpt2_with_enhancement import EnhancedGPT2VQVAE
 
 TRACK_MEMORY = False
 TRACK_IN_EPOCH_MEMORY = False
+SEND_NOTIFICATION = True
 
 # Profiler configuration
 TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
@@ -278,7 +286,8 @@ class GPT2VQVAETrainer:
                  model_config: Dict[str, Any],
                  training_config: Dict[str, Any],
                  device: str = "cuda" if torch.cuda.is_available() else "cpu",
-                 tracking_functions: Optional[Dict[str, Any]] = None):
+                 tracking_functions: Optional[Dict[str, Any]] = None, 
+                 run_name : Optional[str] = "ANONYM_RUN"):
         """
         Initialize the trainer.
         
@@ -290,10 +299,12 @@ class GPT2VQVAETrainer:
                 - 'track_codebook_usage': Function to track codebook usage
                 - 'save_codebook_plots': Function to save codebook plots
                 - 'tracking_enabled': Boolean to enable/disable tracking
+            run_name: Optional string for the name of the run, as texted via send_notification.
         """
         self.model_config = model_config
         self.training_config = training_config
         self.device = device
+        self.run_name = run_name
         
         # Set up tracking functions (default to base class methods)
         if tracking_functions is None:
@@ -428,6 +439,23 @@ class GPT2VQVAETrainer:
             print(f"Codebook tracking enabled with custom functions")
         else:
             print("Codebook tracking disabled")
+        
+        # Profiler configuration
+        self.profiler_enabled = training_config.get('profiler_enabled', False)
+        self.profiler_schedule = training_config.get('profiler_schedule', {
+            'wait': 0,      
+            'warmup': 1,    
+            'active': 2,    
+            'repeat': 1     
+        })
+        self.profiler_activities = [
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ]
+        
+        if self.profiler_enabled:
+            print("PyTorch profiler enabled")
+            print(f"Profiler schedule: {self.profiler_schedule}")
     
     def _default_track_codebook_usage(self, dataset: Any, measurement_point: int) -> None:
         """Default codebook tracking function for base trainer."""
@@ -903,6 +931,77 @@ class GPT2VQVAETrainer:
             'perplexity': total_perplexity / num_batches
         }
     
+    def send_training_start_phone_notification(self) -> bool:
+        """
+        Send a formatted phone notification when training has started.
+        
+        Args:
+            auth_info_path: Path to the auth info YAML file (optional)
+            
+        Returns:
+            bool: True if notification was sent successfully, False otherwise
+        """
+        try:
+            # Format the message
+            message = f"Training Started for {self.run_name}!\n"
+            return send_notification(message)
+
+        except Exception as e:
+            print(f"Error sending training completion phone notification: {e}")
+            return False
+
+    def send_training_completion_phone_notification(self, final_metrics: Dict[str, float], 
+                                                  training_duration: Optional[float] = None,
+                                                  aborted: bool = False) -> bool:
+        """
+        Send a formatted phone notification when training is complete.
+        
+        Args:
+            final_metrics: Dictionary containing final training metrics
+            training_duration: Duration of training in seconds (optional)
+            aborted: Whether training was aborted (default: False)
+            auth_info_path: Path to the auth info YAML file (optional)
+            
+        Returns:
+            bool: True if notification was sent successfully, False otherwise
+        """
+        try:
+            # Format the message
+            if aborted:
+                message = f"🛑 Training Aborted for {self.run_name}!\n\n"
+            else:
+                message = f"🎉 Training Complete for {self.run_name}!\n\n"
+            
+            # Add basic metrics
+            if 'loss' in final_metrics:
+                message += f"Final Loss: {final_metrics['loss']:.4f}\n"
+            if 'vq_loss' in final_metrics:
+                message += f"VQ Loss: {final_metrics['vq_loss']:.4f}\n"
+            if 'perplexity' in final_metrics:
+                message += f"Perplexity: {final_metrics['perplexity']:.2f}\n"
+            
+            # Add training duration if provided
+            if training_duration is not None:
+                hours = int(training_duration // 3600)
+                minutes = int((training_duration % 3600) // 60)
+                seconds = int(training_duration % 60)
+                message += f"Duration: {hours:02d}:{minutes:02d}:{seconds:02d}\n"
+            
+            # Add additional information
+            message += f"Model: {self.model_config.get('model_type', 'GPT2VQVAE')}\n"
+            message += f"Device: {self.device}\n"
+            message += f"Best Val Loss: {self.best_val_loss:.4f}\n"
+            message += f"Epochs: {len(self.train_losses)}\n"
+            
+            # Send the phone notification
+            return send_notification(message)
+            
+        except Exception as e:
+            print(f"Error sending training completion phone notification: {e}")
+            return False
+    
+
+    
     def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None, **kwargs):
         """
         Save model checkpoint.
@@ -1046,6 +1145,9 @@ class GPT2VQVAETrainer:
             seed: Random seed for reproducible train/validation split
         """
 
+        # Start timing
+        training_start_time = datetime.now()
+
         # FOR DEBUG
         if TRACK_MEMORY:
             torch.cuda.memory._record_memory_history(max_entries=10000)
@@ -1107,6 +1209,10 @@ class GPT2VQVAETrainer:
         
         # Training loop with profiler
         try:
+            # Send message that training has started
+            if SEND_NOTIFICATION:
+                self.send_training_start_phone_notification()
+
             # Set up profiler for this epoch if enabled
             self.profiler_context = None
             if self.profiler_enabled:
@@ -1287,6 +1393,25 @@ class GPT2VQVAETrainer:
                 torch.cuda.empty_cache()
             gc.collect()
             
+            # Calculate training duration for aborted training
+            training_end_time = datetime.now()
+            training_duration = (training_end_time - training_start_time).total_seconds()
+            
+            # Get final metrics from the aborted epoch
+            final_metrics = {
+                'loss': e.metrics['avg_loss'],
+                'vq_loss': e.metrics['avg_vq_loss'],
+                'perplexity': e.metrics['avg_perplexity']
+            }
+            
+            # Send the phone notification with aborted status
+            if SEND_NOTIFICATION:
+                _ = self.send_training_completion_phone_notification(
+                    final_metrics=final_metrics,
+                    training_duration=training_duration,
+                    aborted=True
+                )
+            
             # Save comprehensive training visualizations for aborted training
             save_training_visualizations(self, prefix="aborted_training")
             
@@ -1296,7 +1421,27 @@ class GPT2VQVAETrainer:
         # Log final memory usage
         self.log_memory_usage("training_end")
         
+        # Calculate training duration
+        training_end_time = datetime.now()
+        training_duration = (training_end_time - training_start_time).total_seconds()
+        
         print(f"\nTraining completed! Best validation loss: {self.best_val_loss:.4f}")
+        print(f"Training duration: {training_duration:.2f} seconds ({training_duration/3600:.2f} hours)")
+        
+        
+        # Get final metrics from the last validation
+        final_metrics = {
+            'loss': self.val_losses[-1] if self.val_losses else 0.0,
+            'vq_loss': self.vq_losses[-1] if self.vq_losses else 0.0,
+            'perplexity': self.perplexities[-1] if self.perplexities else 0.0
+        }
+        
+        # Send the phone notification
+        if SEND_NOTIFICATION:
+            _ = self.send_training_completion_phone_notification(
+                final_metrics=final_metrics,
+                training_duration=training_duration
+            )
         
         # Save comprehensive training visualizations
         save_training_visualizations(self, prefix="training")
@@ -2814,6 +2959,9 @@ def main():
         # Load configuration
         print(f"Loading configuration from: {args.config}")
         model_config, training_config = load_config(args.config)
+
+        # Set run name to be used for push notifications
+        run_name = os.path.basename(args.config)
         
         # Override data directory if specified
         if args.data_dir:
@@ -3025,24 +3173,24 @@ def main():
             model_config['use_pretrained_encoder'] = False
             model_config['use_pretrained_decoder'] = False
             if args.phased:
-                trainer = PhasedEnhancedGPT2VQVAETrainer(model_config, training_config, device=device)
+                trainer = PhasedEnhancedGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
             elif args.enhanced:
-                trainer = EnhancedGPT2VQVAETrainer(model_config, training_config, device=device)
+                trainer = EnhancedGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
             elif args.simple:
-                trainer = SimpleGPT2VQVAETrainer(model_config, training_config, device=device)
+                trainer = SimpleGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
             else:
-                trainer = GPT2VQVAETrainer(model_config, training_config, device=device)
+                trainer = GPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
             print(f"Resuming from checkpoint: {args.resume_from}")
             trainer.load_checkpoint(args.resume_from)
         else:
             if args.phased:
-                trainer = PhasedEnhancedGPT2VQVAETrainer(model_config, training_config, device=device)
+                trainer = PhasedEnhancedGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
             elif args.enhanced:
-                trainer = EnhancedGPT2VQVAETrainer(model_config, training_config, device=device)
+                trainer = EnhancedGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
             elif args.simple:
-                trainer = SimpleGPT2VQVAETrainer(model_config, training_config, device=device)
+                trainer = SimpleGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
             else:
-                trainer = GPT2VQVAETrainer(model_config, training_config, device=device)
+                trainer = GPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
 
         # Load data using memory-efficient method with num_thoughts truncation
         prompt_sequences, cot_sequences, prompt_mask, cot_mask = trainer.load_training_data(
@@ -3122,8 +3270,12 @@ class SimpleGPT2VQVAETrainer(GPT2VQVAETrainer):
     """
     Trainer for SimpleGPT2VQVAE, inherits from GPT2VQVAETrainer but uses SimpleGPT2VQVAE as the model.
     """
-    def __init__(self, model_config: Dict[str, Any], training_config: Dict[str, Any], device: str = "cuda" if torch.cuda.is_available() else "cpu"):
-        super().__init__(model_config, training_config, device)
+    def __init__(self, 
+                 model_config: Dict[str, Any], 
+                 training_config: Dict[str, Any], 
+                 device: str = "cuda" if torch.cuda.is_available() else "cpu", 
+                 run_name : Optional[str] = "ANONYM_RUN"):
+        super().__init__(model_config, training_config, device, run_name)
 
         self.ensure_numeric_types(model_config)
         self.ensure_numeric_types(training_config)
@@ -3205,7 +3357,8 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
                  model_config: Dict[str, Any], 
                  training_config: Dict[str, Any], 
                  device: str = "cuda" if torch.cuda.is_available() else "cpu", 
-                 tracking_functions: Optional[Dict[str, Any]] = None):
+                 tracking_functions: Optional[Dict[str, Any]] = None, 
+                 run_name : Optional[str] = "ANONYM_RUN"):
         # Filter out enhanced VQ-VAE specific parameters for parent constructor
         enhanced_vq_params = {
             'ema_decay', 'diversity_gamma', 'reset_threshold', 
@@ -3230,7 +3383,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         }
         
         # Call parent constructor with filtered configs and enhanced tracking functions
-        super().__init__(filtered_model_config, filtered_training_config, device, enhanced_tracking_functions)
+        super().__init__(filtered_model_config, filtered_training_config, device, enhanced_tracking_functions, run_name)
 
         self.ensure_numeric_types(self.original_model_config)
         self.ensure_numeric_types(self.original_training_config)
@@ -3303,23 +3456,6 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
 
         # Training phase tracking - no current use, but might be useful later
         self.current_step = 0
-        
-        # Profiler configuration
-        self.profiler_enabled = training_config.get('profiler_enabled', False)
-        self.profiler_schedule = training_config.get('profiler_schedule', {
-            'wait': 0,      
-            'warmup': 1,    
-            'active': 2,    
-            'repeat': 1     
-        })
-        self.profiler_activities = [
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-        ]
-        
-        if self.profiler_enabled:
-            print("PyTorch profiler enabled")
-            print(f"Profiler schedule: {self.profiler_schedule}")
 
     def train_epoch(self, train_loader, num_measurements_per_epoch, current_epoch=0):
         # Set max_reset_steps on the first epoch if it's still None
@@ -4056,8 +4192,11 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
        - Standard VQ-VAE training with all enhancements
     """
     
-    def __init__(self, model_config: Dict[str, Any], training_config: Dict[str, Any], 
-                 device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+    def __init__(self, 
+                 model_config: Dict[str, Any], 
+                 training_config: Dict[str, Any], 
+                 device: str = "cuda" if torch.cuda.is_available() else "cpu", 
+                 run_name : Optional[str] = "ANONYM_RUN"):
         """
         Initialize the phased trainer.
         
@@ -4068,6 +4207,7 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
                 - r_reestim: Frequency of codebook reinitialization during reinitialization phase
                 - quantization_start: Step at which to start normal VQ training
             device: Device to train on
+            run_name: Optional string for the name of the run, as texted via send_notification.
         """
         # Extract phased training parameters
         self.initialization_steps = training_config.get('initialization_steps', 1500)
@@ -4091,7 +4231,7 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         }
 
         # Initialize parent trainer
-        super().__init__(model_config, training_config, device, phased_tracking_functions)
+        super().__init__(model_config, training_config, device, phased_tracking_functions, run_name)
         
         # Override optimizer with codebook-specific learning rates
         self._setup_codebook_optimizer()
