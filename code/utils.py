@@ -161,7 +161,8 @@ def get_dataset_stats(prompts: List[List[int]],
     
     return stats
 
-def process_dataset(prompts, cot_sequences, pad_token_id, cots_per_batch: Optional[int] = None):
+def process_dataset(prompts, cot_sequences, pad_token_id, cots_per_batch: Optional[int] = None, 
+                   max_prompt_len: Optional[int] = None, max_cot_len: Optional[int] = None):
     """
     Process a dataset and create batches for training.
     
@@ -172,6 +173,8 @@ def process_dataset(prompts, cot_sequences, pad_token_id, cots_per_batch: Option
         cots_per_batch (int, optional): Number of CoTs to aggregate together per prompt. 
                                        If None, uses all available CoTs. If specified, creates
                                        multiple batches per prompt and discards incomplete batches.
+        max_prompt_len (int, optional): Maximum prompt length to pad to. If None, uses max length in dataset
+        max_cot_len (int, optional): Maximum CoT length to pad to. If None, uses max length in dataset
     
     Returns:
         tuple: (prompt_sequences, cot_sequences, prompt_mask, cot_mask)
@@ -187,11 +190,11 @@ def process_dataset(prompts, cot_sequences, pad_token_id, cots_per_batch: Option
     
     # Process data with batching if specified
     if cots_per_batch is not None:
-        return _process_dataset_with_batching(prompts, cot_sequences, pad_token_id, cots_per_batch)
+        return _process_dataset_with_batching(prompts, cot_sequences, pad_token_id, cots_per_batch, max_prompt_len, max_cot_len)
     else:
-        return _process_dataset_standard(prompts, cot_sequences, pad_token_id)
+        return _process_dataset_standard(prompts, cot_sequences, pad_token_id, max_prompt_len, max_cot_len)
 
-def _process_dataset_standard(prompts, cot_sequences, pad_token_id):
+def _process_dataset_standard(prompts, cot_sequences, pad_token_id, max_prompt_len: Optional[int] = None, max_cot_len: Optional[int] = None):
     """
     Process dataset using the original method (all CoTs per prompt).
     Due to the nature of padding, could be quite wasteful in space.
@@ -200,9 +203,28 @@ def _process_dataset_standard(prompts, cot_sequences, pad_token_id):
     
     # Find dimensions
     M = max(len(cots) for cots in cot_sequences)
-    max_prompt_len = max(len(prompt) for prompt in prompts)
-    max_cot_len = max(len(cot) for cots in cot_sequences for cot in cots)
     
+    # Always calculate the true max lengths from the dataset
+    dataset_max_prompt_len = max(len(prompt) for prompt in prompts) if prompts else 0
+    dataset_max_cot_len = max((len(cot) for cots in cot_sequences for cot in cots), default=0)
+    
+    # If user provided max lengths, check that they are not less than the dataset max
+    if max_prompt_len is not None:
+        if max_prompt_len < dataset_max_prompt_len:
+            raise ValueError(
+                f"Provided max_prompt_len ({max_prompt_len}) is less than the maximum prompt length in the dataset ({dataset_max_prompt_len})"
+            )
+    else:
+        max_prompt_len = dataset_max_prompt_len
+
+    if max_cot_len is not None:
+        if max_cot_len < dataset_max_cot_len:
+            raise ValueError(
+                f"Provided max_cot_len ({max_cot_len}) is less than the maximum CoT length in the dataset ({dataset_max_cot_len})"
+            )
+    else:
+        max_cot_len = dataset_max_cot_len
+
     # Pre-allocate tensors
     prompt_sequences = torch.full((P, max_prompt_len), pad_token_id, dtype=torch.long)
     cot_sequences_tensor = torch.full((P, M, max_cot_len), pad_token_id, dtype=torch.long)
@@ -232,7 +254,8 @@ def _process_dataset_standard(prompts, cot_sequences, pad_token_id):
         
     return prompt_sequences, cot_sequences_tensor, prompt_mask, cot_mask
 
-def _process_dataset_with_batching(prompts, cot_sequences, pad_token_id, cots_per_batch):
+def _process_dataset_with_batching(prompts, cot_sequences, pad_token_id, cots_per_batch, 
+                                 max_prompt_len: Optional[int] = None, max_cot_len: Optional[int] = None):
     """
     Process dataset with batching - create multiple batches per prompt.
     """
@@ -254,13 +277,15 @@ def _process_dataset_with_batching(prompts, cot_sequences, pad_token_id, cots_pe
             batched_cot_sequences.append(batch_cots)
     
     # Now process the batched data using standard method
-    return _process_dataset_standard(batched_prompts, batched_cot_sequences, pad_token_id)
+    return _process_dataset_standard(batched_prompts, batched_cot_sequences, pad_token_id, max_prompt_len, max_cot_len)
 
 def save_tensors_in_usable_form(file_path: str, 
                                output_dir: str,
                                max_prompt_length: Optional[int] = None,
                                max_cot_length: Optional[int] = None,
-                               min_qualifying_cots: int = 8):
+                               min_qualifying_cots: int = 8,
+                               test_split_ratio: float = 0.1,
+                               random_seed: int = 42):
     """
     Example usage of the parquet reading and tensor conversion functions.
     
@@ -270,6 +295,8 @@ def save_tensors_in_usable_form(file_path: str,
         max_prompt_length (int, optional): Maximum allowed prompt length. If None, uses longest prompt
         max_cot_length (int, optional): Maximum allowed CoT length. If None, uses (1024 - max_prompt_length)
         min_qualifying_cots (int): Minimum number of qualifying CoTs required per prompt. Defaults to 8
+        test_split_ratio (float): Ratio of prompts to use for test set. Defaults to 0.1 (10%)
+        random_seed (int): Random seed for reproducible train/test split. Defaults to 42
     """
     try:
         # Read and convert to tensors
@@ -299,6 +326,8 @@ def save_tensors_in_usable_form(file_path: str,
         print(f"\nUsing max_prompt_length: {max_prompt_length}")
         print(f"Using max_cot_length: {max_cot_length}")
         print(f"Using min_qualifying_cots: {min_qualifying_cots}")
+        print(f"Using test_split_ratio: {test_split_ratio}")
+        print(f"Using random_seed: {random_seed}")
         
         # Filter prompts and track exclusions
         filtered_prompts = []
@@ -376,6 +405,59 @@ def save_tensors_in_usable_form(file_path: str,
             else:
                 print(f"  {key}: {value}")
         
+        # Split data into train and test sets
+        print(f"\nSplitting data into train and test sets...")
+        np.random.seed(random_seed)
+        
+        # Create indices for all filtered prompts
+        num_filtered_prompts = len(filtered_prompts)
+        all_indices = np.arange(num_filtered_prompts)
+        
+        # Shuffle indices
+        np.random.shuffle(all_indices)
+        
+        # Calculate split point
+        test_size = int(num_filtered_prompts * test_split_ratio)
+        
+        # Split indices
+        test_indices = all_indices[:test_size]
+        train_indices = all_indices[test_size:]
+        
+        # Create train and test datasets
+        train_prompts = [filtered_prompts[i] for i in train_indices]
+        train_cot_sequences = [filtered_cot_sequences[i] for i in train_indices]
+        
+        test_prompts = [filtered_prompts[i] for i in test_indices]
+        test_cot_sequences = [filtered_cot_sequences[i] for i in test_indices]
+        
+        print(f"Train set: {len(train_prompts):,} prompts")
+        print(f"Test set: {len(test_prompts):,} prompts")
+        print(f"Train/Test split: {len(train_prompts)}/{len(test_prompts)} ({len(train_prompts)/num_filtered_prompts:.1%}/{len(test_prompts)/num_filtered_prompts:.1%})")
+        
+        # Calculate maximum lengths across both train and test datasets
+        print(f"\nCalculating maximum lengths across train and test datasets...")
+        
+        # Find maximum prompt length across both datasets
+        train_max_prompt_len = max(len(prompt) for prompt in train_prompts) if train_prompts else 0
+        test_max_prompt_len = max(len(prompt) for prompt in test_prompts) if test_prompts else 0
+        max_prompt_len_across_splits = max(train_max_prompt_len, test_max_prompt_len)
+        
+        # Find maximum CoT length across both datasets
+        train_max_cot_len = max(len(cot) for cots in train_cot_sequences for cot in cots) if train_cot_sequences else 0
+        test_max_cot_len = max(len(cot) for cots in test_cot_sequences for cot in cots) if test_cot_sequences else 0
+        max_cot_len_across_splits = max(train_max_cot_len, test_max_cot_len)
+        
+        print(f"Train max prompt length: {train_max_prompt_len}")
+        print(f"Test max prompt length: {test_max_prompt_len}")
+        print(f"Max prompt length across splits: {max_prompt_len_across_splits}")
+        print(f"Train max CoT length: {train_max_cot_len}")
+        print(f"Test max CoT length: {test_max_cot_len}")
+        print(f"Max CoT length across splits: {max_cot_len_across_splits}")
+        
+        print(f"Uniform padding will be applied during tensor processing:")
+        print(f"  Target prompt length: {max_prompt_len_across_splits}")
+        print(f"  Target CoT length: {max_cot_len_across_splits}")
+        
         # Define different batch sizes to create
         cots_per_batch_values = [1, 2, 4, 8, 16]
         
@@ -392,88 +474,183 @@ def save_tensors_in_usable_form(file_path: str,
             print(f"PROCESSING: cots_per_batch = {cots_per_batch}")
             print(f"{'='*60}")
             
-            # Create subdirectory for this batch size
-            batch_dir = os.path.join(output_dir, f"batch_{cots_per_batch}")
-            os.makedirs(batch_dir, exist_ok=True)
+            # Create subdirectories for train and test sets
+            train_batch_dir = os.path.join(output_dir, f"batch_{cots_per_batch}", "train")
+            test_batch_dir = os.path.join(output_dir, f"batch_{cots_per_batch}", "test")
+            os.makedirs(train_batch_dir, exist_ok=True)
+            os.makedirs(test_batch_dir, exist_ok=True)
             
-            # Process into training format with batching
-            prompt_sequences, cot_sequences_tensor, prompt_mask, cot_mask = process_dataset(
-                filtered_prompts, filtered_cot_sequences, pad_token_id=eos_token_id, cots_per_batch=cots_per_batch
+            # Process train set into training format with batching
+            print(f"Processing train set...")
+            train_prompt_sequences, train_cot_sequences_tensor, train_prompt_mask, train_cot_mask = process_dataset(
+                train_prompts, train_cot_sequences, pad_token_id=eos_token_id, cots_per_batch=cots_per_batch,
+                max_prompt_len=max_prompt_len_across_splits, max_cot_len=max_cot_len_across_splits
             )
             
-            print(f"Training tensors shape (batch_size={cots_per_batch}):")
-            print(f"  prompt_sequences: {prompt_sequences.shape}")
-            print(f"  cot_sequences_tensor: {cot_sequences_tensor.shape}")
-            print(f"  prompt_mask: {prompt_mask.shape}")
-            print(f"  cot_mask: {cot_mask.shape}")
+            # Process test set into training format with batching
+            print(f"Processing test set...")
+            test_prompt_sequences, test_cot_sequences_tensor, test_prompt_mask, test_cot_mask = process_dataset(
+                test_prompts, test_cot_sequences, pad_token_id=eos_token_id, cots_per_batch=cots_per_batch,
+                max_prompt_len=max_prompt_len_across_splits, max_cot_len=max_cot_len_across_splits
+            )
             
-            # Save tensors
-            print(f"Saving tensors to {batch_dir}...")
-            torch.save(prompt_sequences, os.path.join(batch_dir, "prompt_sequences.pt"))
-            torch.save(cot_sequences_tensor, os.path.join(batch_dir, "cot_sequences_tensor.pt"))
-            torch.save(prompt_mask, os.path.join(batch_dir, "prompt_mask.pt"))
-            torch.save(cot_mask, os.path.join(batch_dir, "cot_mask.pt"))
+            print(f"Train tensors shape (batch_size={cots_per_batch}):")
+            print(f"  prompt_sequences: {train_prompt_sequences.shape}")
+            print(f"  cot_sequences_tensor: {train_cot_sequences_tensor.shape}")
+            print(f"  prompt_mask: {train_prompt_mask.shape}")
+            print(f"  cot_mask: {train_cot_mask.shape}")
             
-            # Calculate batch statistics
-            num_batches = prompt_sequences.shape[0]
-            total_cot_sequences = cot_sequences_tensor.shape[0] * cot_sequences_tensor.shape[1]
+            print(f"Test tensors shape (batch_size={cots_per_batch}):")
+            print(f"  prompt_sequences: {test_prompt_sequences.shape}")
+            print(f"  cot_sequences_tensor: {test_cot_sequences_tensor.shape}")
+            print(f"  prompt_mask: {test_prompt_mask.shape}")
+            print(f"  cot_mask: {test_cot_mask.shape}")
+            
+            # Save train tensors
+            print(f"Saving train tensors to {train_batch_dir}...")
+            torch.save(train_prompt_sequences, os.path.join(train_batch_dir, "prompt_sequences.pt"))
+            torch.save(train_cot_sequences_tensor, os.path.join(train_batch_dir, "cot_sequences_tensor.pt"))
+            torch.save(train_prompt_mask, os.path.join(train_batch_dir, "prompt_mask.pt"))
+            torch.save(train_cot_mask, os.path.join(train_batch_dir, "cot_mask.pt"))
+            
+            # Save test tensors
+            print(f"Saving test tensors to {test_batch_dir}...")
+            torch.save(test_prompt_sequences, os.path.join(test_batch_dir, "prompt_sequences.pt"))
+            torch.save(test_cot_sequences_tensor, os.path.join(test_batch_dir, "cot_sequences_tensor.pt"))
+            torch.save(test_prompt_mask, os.path.join(test_batch_dir, "prompt_mask.pt"))
+            torch.save(test_cot_mask, os.path.join(test_batch_dir, "cot_mask.pt"))
+            
+            # Calculate batch statistics for train and test sets
+            train_num_batches = train_prompt_sequences.shape[0]
+            train_total_cot_sequences = train_cot_sequences_tensor.shape[0] * train_cot_sequences_tensor.shape[1]
+            
+            test_num_batches = test_prompt_sequences.shape[0]
+            test_total_cot_sequences = test_cot_sequences_tensor.shape[0] * test_cot_sequences_tensor.shape[1]
             
             batch_stats = {
                 'cots_per_batch': cots_per_batch,
-                'num_batches': num_batches,
-                'total_cot_sequences': total_cot_sequences,
-                'tensor_shapes': {
-                    'prompt_sequences': prompt_sequences.shape,
-                    'cot_sequences_tensor': cot_sequences_tensor.shape,
-                    'prompt_mask': prompt_mask.shape,
-                    'cot_mask': cot_mask.shape
+                'train': {
+                    'num_batches': train_num_batches,
+                    'total_cot_sequences': train_total_cot_sequences,
+                    'tensor_shapes': {
+                        'prompt_sequences': train_prompt_sequences.shape,
+                        'cot_sequences_tensor': train_cot_sequences_tensor.shape,
+                        'prompt_mask': train_prompt_mask.shape,
+                        'cot_mask': train_cot_mask.shape
+                    }
+                },
+                'test': {
+                    'num_batches': test_num_batches,
+                    'total_cot_sequences': test_total_cot_sequences,
+                    'tensor_shapes': {
+                        'prompt_sequences': test_prompt_sequences.shape,
+                        'cot_sequences_tensor': test_cot_sequences_tensor.shape,
+                        'prompt_mask': test_prompt_mask.shape,
+                        'cot_mask': test_cot_mask.shape
+                    }
                 }
             }
             
             batch_results[f"batch_{cots_per_batch}"] = batch_stats
             
-            # Save batch-specific statistics
-            batch_stats_file = os.path.join(batch_dir, "batch_stats.json")
+            # Save batch-specific statistics for train and test
+            train_batch_stats_file = os.path.join(train_batch_dir, "batch_stats.json")
+            test_batch_stats_file = os.path.join(test_batch_dir, "batch_stats.json")
             import json
-            with open(batch_stats_file, 'w') as f:
-                json.dump(batch_stats, f, indent=2)
             
-            # Calculate padding ratio for this batch
+            # Save train stats
+            train_stats = {
+                'cots_per_batch': cots_per_batch,
+                'split': 'train',
+                'num_batches': batch_stats['train']['num_batches'],
+                'total_cot_sequences': batch_stats['train']['total_cot_sequences'],
+                'tensor_shapes': batch_stats['train']['tensor_shapes']
+            }
+            with open(train_batch_stats_file, 'w') as f:
+                json.dump(train_stats, f, indent=2)
+            
+            # Save test stats
+            test_stats = {
+                'cots_per_batch': cots_per_batch,
+                'split': 'test',
+                'num_batches': batch_stats['test']['num_batches'],
+                'total_cot_sequences': batch_stats['test']['total_cot_sequences'],
+                'tensor_shapes': batch_stats['test']['tensor_shapes']
+            }
+            with open(test_batch_stats_file, 'w') as f:
+                json.dump(test_stats, f, indent=2)
+            
+            # Calculate padding ratio for train and test sets
             print(f"Calculating padding ratio for batch {cots_per_batch}...")
             try:
-                padding_results = calculate_padding_ratio(batch_dir)
-                batch_stats['padding_ratio'] = padding_results['total_padding_ratio']
-                batch_stats['prompt_padding_ratio'] = padding_results['prompt_padding_ratio']
-                batch_stats['cot_padding_ratio'] = padding_results['cot_padding_ratio']
+                train_padding_results = calculate_padding_ratio(train_batch_dir)
+                test_padding_results = calculate_padding_ratio(test_batch_dir)
                 
-                # Update the batch stats file with padding information
-                with open(batch_stats_file, 'w') as f:
-                    json.dump(batch_stats, f, indent=2)
+                batch_stats['train']['padding_ratio'] = train_padding_results['total_padding_ratio']
+                batch_stats['train']['prompt_padding_ratio'] = train_padding_results['prompt_padding_ratio']
+                batch_stats['train']['cot_padding_ratio'] = train_padding_results['cot_padding_ratio']
                 
-                print(f"Batch {cots_per_batch} padding ratio: {padding_results['total_padding_ratio']:.4f} ({padding_results['total_padding_ratio']*100:.2f}%)")
+                batch_stats['test']['padding_ratio'] = test_padding_results['total_padding_ratio']
+                batch_stats['test']['prompt_padding_ratio'] = test_padding_results['prompt_padding_ratio']
+                batch_stats['test']['cot_padding_ratio'] = test_padding_results['cot_padding_ratio']
+                
+                # Update the batch stats files with padding information
+                train_stats.update({
+                    'padding_ratio': train_padding_results['total_padding_ratio'],
+                    'prompt_padding_ratio': train_padding_results['prompt_padding_ratio'],
+                    'cot_padding_ratio': train_padding_results['cot_padding_ratio']
+                })
+                with open(train_batch_stats_file, 'w') as f:
+                    json.dump(train_stats, f, indent=2)
+                
+                test_stats.update({
+                    'padding_ratio': test_padding_results['total_padding_ratio'],
+                    'prompt_padding_ratio': test_padding_results['prompt_padding_ratio'],
+                    'cot_padding_ratio': test_padding_results['cot_padding_ratio']
+                })
+                with open(test_batch_stats_file, 'w') as f:
+                    json.dump(test_stats, f, indent=2)
+                
+                print(f"Batch {cots_per_batch} train padding ratio: {train_padding_results['total_padding_ratio']:.4f} ({train_padding_results['total_padding_ratio']*100:.2f}%)")
+                print(f"Batch {cots_per_batch} test padding ratio: {test_padding_results['total_padding_ratio']:.4f} ({test_padding_results['total_padding_ratio']*100:.2f}%)")
             except Exception as e:
                 print(f"Warning: Could not calculate padding ratio for batch {cots_per_batch}: {e}")
-                batch_stats['padding_ratio'] = None
-                batch_stats['prompt_padding_ratio'] = None
-                batch_stats['cot_padding_ratio'] = None
+                batch_stats['train']['padding_ratio'] = None
+                batch_stats['train']['prompt_padding_ratio'] = None
+                batch_stats['train']['cot_padding_ratio'] = None
+                batch_stats['test']['padding_ratio'] = None
+                batch_stats['test']['prompt_padding_ratio'] = None
+                batch_stats['test']['cot_padding_ratio'] = None
             
             print(f"Batch {cots_per_batch} saved successfully!")
         
-        print(f"\n{'='*80}")
+        print(f"\n{'='*120}")
         print("BATCH PROCESSING SUMMARY")
-        print(f"{'='*80}")
-        print(f"{'Batch Size':<12} {'Num Batches':<12} {'Total CoTs':<12} {'Total Padding':<15} {'Prompt Shape':<20} {'CoT Shape':<20}")
-        print(f"{'-'*12} {'-'*12} {'-'*12} {'-'*15} {'-'*20} {'-'*20}")
+        print(f"{'='*120}")
+        print(f"{'Batch':<8} {'Split':<6} {'Num':<8} {'Total':<10} {'Padding':<12} {'Prompt':<15} {'CoT':<15}")
+        print(f"{'Size':<8} {'':<6} {'Batches':<8} {'CoTs':<10} {'Ratio':<12} {'Shape':<15} {'Shape':<15}")
+        print(f"{'-'*8} {'-'*6} {'-'*8} {'-'*10} {'-'*12} {'-'*15} {'-'*15}")
         
         for batch_key, stats in batch_results.items():
-            prompt_shape = str(stats['tensor_shapes']['prompt_sequences'])
-            cot_shape = str(stats['tensor_shapes']['cot_sequences_tensor'])
-            padding_ratio = stats.get('padding_ratio', 'N/A')
-            if padding_ratio is not None:
-                padding_str = f"{padding_ratio:.4f}"
+            # Train set
+            train_prompt_shape = str(stats['train']['tensor_shapes']['prompt_sequences'])
+            train_cot_shape = str(stats['train']['tensor_shapes']['cot_sequences_tensor'])
+            train_padding_ratio = stats['train'].get('padding_ratio', 'N/A')
+            if train_padding_ratio is not None:
+                train_padding_str = f"{train_padding_ratio:.4f}"
             else:
-                padding_str = "N/A"
-            print(f"{stats['cots_per_batch']:<12} {stats['num_batches']:<12} {stats['total_cot_sequences']:<12} {padding_str:<15} {prompt_shape:<20} {cot_shape:<20}")
+                train_padding_str = "N/A"
+            print(f"{stats['cots_per_batch']:<8} {'Train':<6} {stats['train']['num_batches']:<8} {stats['train']['total_cot_sequences']:<10} {train_padding_str:<12} {train_prompt_shape:<15} {train_cot_shape:<15}")
+            
+            # Test set
+            test_prompt_shape = str(stats['test']['tensor_shapes']['prompt_sequences'])
+            test_cot_shape = str(stats['test']['tensor_shapes']['cot_sequences_tensor'])
+            test_padding_ratio = stats['test'].get('padding_ratio', 'N/A')
+            if test_padding_ratio is not None:
+                test_padding_str = f"{test_padding_ratio:.4f}"
+            else:
+                test_padding_str = "N/A"
+            print(f"{stats['cots_per_batch']:<8} {'Test':<6} {stats['test']['num_batches']:<8} {stats['test']['total_cot_sequences']:<10} {test_padding_str:<12} {test_prompt_shape:<15} {test_cot_shape:<15}")
         
         # Save overall statistics to main directory
         stats_file = os.path.join(output_dir, "dataset_stats.txt")
@@ -488,6 +665,11 @@ def save_tensors_in_usable_form(file_path: str,
             f.write(f"Max prompt length: {max_prompt_length}\n")
             f.write(f"Max CoT length: {max_cot_length}\n")
             f.write(f"Min qualifying CoTs: {min_qualifying_cots}\n")
+            f.write(f"Test split ratio: {test_split_ratio}\n")
+            f.write(f"Random seed: {random_seed}\n")
+            f.write(f"Uniform padding applied: Yes (during tensor processing)\n")
+            f.write(f"Final prompt length (after padding): {max_prompt_len_across_splits}\n")
+            f.write(f"Final CoT length (after padding): {max_cot_len_across_splits}\n")
             f.write(f"Batch sizes created: {cots_per_batch_values}\n\n")
             
             f.write("Filtering Summary:\n")
@@ -496,6 +678,11 @@ def save_tensors_in_usable_form(file_path: str,
             f.write(f"  Excluded prompts (length): {len(excluded_prompts):,}\n")
             f.write(f"  Excluded prompts (insufficient CoTs): {len(excluded_insufficient_cots):,}\n")
             f.write(f"  Prompts with excluded CoTs: {len(excluded_cots_info):,}\n\n")
+            
+            f.write("Train/Test Split Summary:\n")
+            f.write(f"  Train prompts: {len(train_prompts):,}\n")
+            f.write(f"  Test prompts: {len(test_prompts):,}\n")
+            f.write(f"  Train/Test ratio: {len(train_prompts)}/{len(test_prompts)} ({len(train_prompts)/num_filtered_prompts:.1%}/{len(test_prompts)/num_filtered_prompts:.1%})\n\n")
             
             f.write("Basic Information:\n")
             f.write(f"  Number of prompts: {filtered_stats['num_prompts']:,}\n")
@@ -519,16 +706,28 @@ def save_tensors_in_usable_form(file_path: str,
             f.write("Batch Processing Results:\n")
             for batch_key, stats in batch_results.items():
                 f.write(f"  {batch_key}:\n")
-                f.write(f"    Number of batches: {stats['num_batches']:,}\n")
-                f.write(f"    Total CoT sequences: {stats['total_cot_sequences']:,}\n")
-                f.write(f"    Prompt tensor shape: {stats['tensor_shapes']['prompt_sequences']}\n")
-                f.write(f"    CoT tensor shape: {stats['tensor_shapes']['cot_sequences_tensor']}\n")
-                if stats.get('padding_ratio') is not None:
-                    f.write(f"    Total padding ratio: {stats['padding_ratio']:.4f} ({stats['padding_ratio']*100:.2f}%)\n")
-                    f.write(f"    Prompt padding ratio: {stats['prompt_padding_ratio']:.4f} ({stats['prompt_padding_ratio']*100:.2f}%)\n")
-                    f.write(f"    CoT padding ratio: {stats['cot_padding_ratio']:.4f} ({stats['cot_padding_ratio']*100:.2f}%)\n")
+                f.write(f"    Train set:\n")
+                f.write(f"      Number of batches: {stats['train']['num_batches']:,}\n")
+                f.write(f"      Total CoT sequences: {stats['train']['total_cot_sequences']:,}\n")
+                f.write(f"      Prompt tensor shape: {stats['train']['tensor_shapes']['prompt_sequences']}\n")
+                f.write(f"      CoT tensor shape: {stats['train']['tensor_shapes']['cot_sequences_tensor']}\n")
+                if stats['train'].get('padding_ratio') is not None:
+                    f.write(f"      Total padding ratio: {stats['train']['padding_ratio']:.4f} ({stats['train']['padding_ratio']*100:.2f}%)\n")
+                    f.write(f"      Prompt padding ratio: {stats['train']['prompt_padding_ratio']:.4f} ({stats['train']['prompt_padding_ratio']*100:.2f}%)\n")
+                    f.write(f"      CoT padding ratio: {stats['train']['cot_padding_ratio']:.4f} ({stats['train']['cot_padding_ratio']*100:.2f}%)\n")
                 else:
-                    f.write(f"    Padding ratio: Not calculated\n")
+                    f.write(f"      Padding ratio: Not calculated\n")
+                f.write(f"    Test set:\n")
+                f.write(f"      Number of batches: {stats['test']['num_batches']:,}\n")
+                f.write(f"      Total CoT sequences: {stats['test']['total_cot_sequences']:,}\n")
+                f.write(f"      Prompt tensor shape: {stats['test']['tensor_shapes']['prompt_sequences']}\n")
+                f.write(f"      CoT tensor shape: {stats['test']['tensor_shapes']['cot_sequences_tensor']}\n")
+                if stats['test'].get('padding_ratio') is not None:
+                    f.write(f"      Total padding ratio: {stats['test']['padding_ratio']:.4f} ({stats['test']['padding_ratio']*100:.2f}%)\n")
+                    f.write(f"      Prompt padding ratio: {stats['test']['prompt_padding_ratio']:.4f} ({stats['test']['prompt_padding_ratio']*100:.2f}%)\n")
+                    f.write(f"      CoT padding ratio: {stats['test']['cot_padding_ratio']:.4f} ({stats['test']['cot_padding_ratio']*100:.2f}%)\n")
+                else:
+                    f.write(f"      Padding ratio: Not calculated\n")
                 f.write(f"\n")
             
             f.write("Directory Structure:\n")
@@ -537,11 +736,18 @@ def save_tensors_in_usable_form(file_path: str,
             f.write(f"    excluded_data.json: Details of excluded prompts and CoTs\n")
             for batch_size in cots_per_batch_values:
                 f.write(f"    batch_{batch_size}/\n")
-                f.write(f"      prompt_sequences.pt: Training-ready prompt sequences\n")
-                f.write(f"      cot_sequences_tensor.pt: Training-ready CoT sequences\n")
-                f.write(f"      prompt_mask.pt: Attention mask for prompts\n")
-                f.write(f"      cot_mask.pt: Attention mask for CoT sequences\n")
-                f.write(f"      batch_stats.json: Batch-specific statistics\n")
+                f.write(f"      train/\n")
+                f.write(f"        prompt_sequences.pt: Training-ready prompt sequences\n")
+                f.write(f"        cot_sequences_tensor.pt: Training-ready CoT sequences\n")
+                f.write(f"        prompt_mask.pt: Attention mask for prompts\n")
+                f.write(f"        cot_mask.pt: Attention mask for CoT sequences\n")
+                f.write(f"        batch_stats.json: Batch-specific statistics\n")
+                f.write(f"      test/\n")
+                f.write(f"        prompt_sequences.pt: Test-ready prompt sequences\n")
+                f.write(f"        cot_sequences_tensor.pt: Test-ready CoT sequences\n")
+                f.write(f"        prompt_mask.pt: Attention mask for prompts\n")
+                f.write(f"        cot_mask.pt: Attention mask for CoT sequences\n")
+                f.write(f"        batch_stats.json: Batch-specific statistics\n")
         
         # Save excluded data details
         excluded_data = {
@@ -549,11 +755,19 @@ def save_tensors_in_usable_form(file_path: str,
                 'max_prompt_length': max_prompt_length,
                 'max_cot_length': max_cot_length,
                 'min_qualifying_cots': min_qualifying_cots,
+                'test_split_ratio': test_split_ratio,
+                'random_seed': random_seed,
+                'uniform_padding_applied': True,
+                'padding_method': 'during_tensor_processing',
+                'final_prompt_length': max_prompt_len_across_splits,
+                'final_cot_length': max_cot_len_across_splits,
                 'batch_sizes_created': cots_per_batch_values
             },
             'summary': {
                 'original_prompts': len(prompts),
                 'filtered_prompts': len(filtered_prompts),
+                'train_prompts': len(train_prompts),
+                'test_prompts': len(test_prompts),
                 'excluded_prompts_length': len(excluded_prompts),
                 'excluded_prompts_insufficient_cots': len(excluded_insufficient_cots),
                 'prompts_with_excluded_cots': len(excluded_cots_info)
@@ -621,12 +835,17 @@ def save_tensors_in_usable_form(file_path: str,
         print("PROCESSING COMPLETE")
         print(f"{'='*60}")
         print(f"Output directory: {output_dir}")
+        print(f"Train/Test split: {len(train_prompts)}/{len(test_prompts)} prompts")
+        print(f"Uniform padding applied: Yes (during tensor processing)")
+        print(f"Final prompt length: {max_prompt_len_across_splits}")
+        print(f"Final CoT length: {max_cot_len_across_splits}")
         print(f"Batch sizes created: {cots_per_batch_values}")
         print(f"Files created:")
         print(f"  - dataset_stats.txt")
         print(f"  - excluded_data.json")
         for batch_size in cots_per_batch_values:
-            print(f"  - batch_{batch_size}/ (complete dataset)")
+            print(f"  - batch_{batch_size}/train/ (training dataset)")
+            print(f"  - batch_{batch_size}/test/ (test dataset)")
         
     except FileNotFoundError:
         print(f"File not found: {file_path}")
@@ -873,11 +1092,11 @@ def analyze_and_generate_datasets(file_path: str,
     print(f"Total CoT sequences: {sum(len(cots) for cots in cot_sequences):,}")
     
     # Define prompt lengths as powers of 2 (starting from 64)
-    prompt_lengths = [2**i for i in range(6, 9)]  # 64, 128, 256
+    prompt_lengths = [2**i for i in range(5, 9)]  # 32, 64, 128, 256
     
     # Calculate CoT lengths as 1x and 3x of prompt lengths
-    cot_lengths_1x = [prompt_len for prompt_len in prompt_lengths]  # 1x: 64, 128, 256
-    cot_lengths_3x = [prompt_len * 3 for prompt_len in prompt_lengths]  # 3x: 192, 384, 768
+    cot_lengths_1x = [prompt_len for prompt_len in prompt_lengths]
+    cot_lengths_3x = [prompt_len * 3 for prompt_len in prompt_lengths]
     
     # Create all combinations (prompt_length, cot_length)
     combinations = []
@@ -1000,7 +1219,8 @@ def analyze_and_generate_datasets(file_path: str,
             
             # Process into training format
             prompt_sequences, cot_sequences_tensor, prompt_mask, cot_mask = process_dataset(
-                qualifying_prompts, qualifying_cot_sequences, pad_token_id=eos_token_id
+                qualifying_prompts, qualifying_cot_sequences, pad_token_id=eos_token_id,
+                max_prompt_len=prompt_len, max_cot_len=cot_len
             )
             
             # Create output directory
@@ -1325,15 +1545,15 @@ if __name__ == "__main__":
 
     save_tensors_in_usable_form(FILE_PATH, output_dir=OUTPUT_DIR, 
                                 max_prompt_length=128, max_cot_length=128, 
-                                min_qualifying_cots=1)
+                                min_qualifying_cots=1, test_split_ratio=0.1, random_seed=42)
 
     # analyze_length_distribution(file_path=FILE_PATH, 
     #                             save_results=True)
     
     # Example usage of the new function
     # analyze_and_generate_datasets(file_path=FILE_PATH,
-    #                              min_qualifying_cots=8,
-    #                              save_results=True)
+    #                              min_qualifying_cots=1,
+    #                              save_results=False)
 
     # calculate_padding_ratio(dataset_dir=r"data/GSM8K/256_784")
     # calculate_padding_ratio(dataset_dir=r"data/GSM8K/128_128")
