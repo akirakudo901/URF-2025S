@@ -30,8 +30,8 @@ model_config:
   # ============================================================================
   num_embeddings: 1024       # VQ codebook size
   commitment_cost: 0.25     # VQ commitment cost
-  aggregation_hidden_dim: 1024  # Aggregation MLP hidden dimension
-  num_thoughts: 8          # Number of parallel sequences
+  aggregation_hidden_dim: 1536  # Aggregation MLP hidden dimension
+  num_thoughts: 4          # Number of parallel sequences
   
   # ============================================================================
   # Enhanced Vector Quantizer Parameters
@@ -45,19 +45,19 @@ model_config:
   max_reset_steps: null
   reservoir_size: 10000
   use_batch_norm: true
-
+  
   # ============================================================================
   # Pretrained Model Settings
   # ============================================================================
   use_pretrained_encoder: false   # Load pretrained weights for encoder
-  use_pretrained_decoder: true   # Load pretrained weights for decoder
+  use_pretrained_decoder: false   # Load pretrained weights for decoder
   pretrained_model_name: gpt2    # Use GPT2-Small (124M parameters)
   
   # ============================================================================
   # Encoder Configuration (smaller, more efficient)
   # ============================================================================
-  encoder_n_layer: 6        # Number of hidden layers in encoder
-  encoder_n_head: 12        # Number of attention heads for encoder
+  encoder_n_layer: 4        # Number of hidden layers in encoder
+  encoder_n_head: 4        # Number of attention heads for encoder
   encoder_n_inner: null     # Will be set to 4*d_model
   encoder_dropout: 0.1      # Dropout probability for encoder
   encoder_activation_function: gelu  # Activation function for encoder
@@ -65,8 +65,8 @@ model_config:
   # ============================================================================
   # Decoder Configuration (larger, more powerful)
   # ============================================================================
-  decoder_n_layer: 12       # Number of hidden layers in decoder
-  decoder_n_head: 12        # Number of attention heads for decoder
+  decoder_n_layer: 4       # Number of hidden layers in decoder
+  decoder_n_head: 4        # Number of attention heads for decoder
   decoder_n_inner: null     # Will be set to 4*d_model
   decoder_dropout: 0.1      # Dropout probability for decoder
   decoder_activation_function: gelu  # Activation function for decoder
@@ -76,8 +76,8 @@ training_config:
   # Basic Training Parameters
   # ============================================================================
   learning_rate: 1e-4       # Learning rate
-  num_epochs: 20            # Number of training epochs
-  batch_size: 16            # Batch size (reduced for memory efficiency)
+  num_epochs: 30            # Number of training epochs
+  batch_size: 32            # Batch size (reduced for memory efficiency)
   val_split: 0.1            # Fraction of data for validation
   
   # ============================================================================
@@ -105,7 +105,7 @@ training_config:
   # Memory Optimization Settings
   # ============================================================================
   use_mixed_precision: true           # Enable mixed precision training
-  gradient_accumulation_steps: 1      # Effective batch size = batch_size * gradient_accumulation_steps
+  gradient_accumulation_steps: 2      # Effective batch size = batch_size * gradient_accumulation_steps
   use_gradient_checkpointing: true    # Enable gradient checkpointing for memory efficiency
   use_dynamic_batching: false         # Enable for variable sequence lengths
   max_tokens_per_batch: 8192          # For dynamic batching
@@ -121,27 +121,27 @@ training_config:
   # Checkpoint and Saving Settings
   # ============================================================================
   save_every: 1                       # Save checkpoint every N epochs
-  checkpoint_dir: checkpoints/phased/eight_thoughts  # Directory for saving checkpoints
+  checkpoint_dir: checkpoints/phased/small/four_thoughts  # Directory for saving checkpoints
   minimum_batches_for_checkpoint: 200 # Minimum number of batches trained before saving aborted checkpoint
   
   # ============================================================================
   # Monitoring and Logging
   # ============================================================================
-  num_measurements_per_epoch: 10      # Number of detailed metrics per epoch
+  num_measurements_per_epoch: 5      # Number of detailed metrics per epoch
   enhanced_codebook_tracking: true    # Enable enhanced codebook monitoring
   
   # ============================================================================
   # Phased Training Parameters
   # ============================================================================
-  # one epoch = 1491 (based on calculation) -> twice batch so 745
-  initialization_steps: 1490          # Steps to train in no-vq mode
-  r_reestim: 62                     # Frequency of codebook reinitialization
-  quantization_start: 2980           # Step to start normal VQ training
+  # one epoch = 26577 // 64 = 415 (based on calculation) 
+  initialization_steps: 2075          # Steps to train in no-vq mode
+  r_reestim: 42                     # Frequency of codebook reinitialization
+  quantization_start: 4150           # Step to start normal VQ training
   codebook_lr_multiplier: 1.0        # Codebook learning rate multiplier
   
   # ============================================================================
   # Data Configuration
   # ============================================================================
-  data_dir: data/GSM8K/128_128/batch_8  # Directory containing training data 
+  data_dir: data/GSM8K/128_128/batch_4  # Directory containing training data 
 
   profiler_enabled: False

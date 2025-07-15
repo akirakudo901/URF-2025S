@@ -76,7 +76,7 @@ training_config:
   # Basic Training Parameters
   # ============================================================================
   learning_rate: 1e-4       # Learning rate
-  num_epochs: 10            # Number of training epochs
+  num_epochs: 20            # Number of training epochs
   batch_size: 32            # Batch size (reduced for memory efficiency)
   val_split: 0.1            # Fraction of data for validation
   

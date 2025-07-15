@@ -31,7 +31,7 @@ model_config:
   num_embeddings: 1024       # VQ codebook size
   commitment_cost: 0.25     # VQ commitment cost
   aggregation_hidden_dim: 1024  # Aggregation MLP hidden dimension
-  num_thoughts: 8          # Number of parallel sequences
+  num_thoughts: 4          # Number of parallel sequences
   
   # ============================================================================
   # Enhanced Vector Quantizer Parameters
@@ -45,7 +45,7 @@ model_config:
   max_reset_steps: null
   reservoir_size: 10000
   use_batch_norm: true
-
+  
   # ============================================================================
   # Pretrained Model Settings
   # ============================================================================
@@ -77,7 +77,7 @@ training_config:
   # ============================================================================
   learning_rate: 1e-4       # Learning rate
   num_epochs: 20            # Number of training epochs
-  batch_size: 16            # Batch size (reduced for memory efficiency)
+  batch_size: 32            # Batch size (reduced for memory efficiency)
   val_split: 0.1            # Fraction of data for validation
   
   # ============================================================================
@@ -121,7 +121,7 @@ training_config:
   # Checkpoint and Saving Settings
   # ============================================================================
   save_every: 1                       # Save checkpoint every N epochs
-  checkpoint_dir: checkpoints/phased/eight_thoughts  # Directory for saving checkpoints
+  checkpoint_dir: checkpoints/phased/four_thoughts  # Directory for saving checkpoints
   minimum_batches_for_checkpoint: 200 # Minimum number of batches trained before saving aborted checkpoint
   
   # ============================================================================
@@ -133,15 +133,15 @@ training_config:
   # ============================================================================
   # Phased Training Parameters
   # ============================================================================
-  # one epoch = 1491 (based on calculation) -> twice batch so 745
-  initialization_steps: 1490          # Steps to train in no-vq mode
+  # one epoch = 840 (based on calculation)
+  initialization_steps: 840          # Steps to train in no-vq mode
   r_reestim: 62                     # Frequency of codebook reinitialization
-  quantization_start: 2980           # Step to start normal VQ training
+  quantization_start: 1680           # Step to start normal VQ training
   codebook_lr_multiplier: 1.0        # Codebook learning rate multiplier
   
   # ============================================================================
   # Data Configuration
   # ============================================================================
-  data_dir: data/GSM8K/128_128/batch_8  # Directory containing training data 
+  data_dir: data/GSM8K/128_128/batch_4  # Directory containing training data 
 
   profiler_enabled: False

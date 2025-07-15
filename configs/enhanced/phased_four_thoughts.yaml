@@ -77,7 +77,7 @@ training_config:
   # ============================================================================
   learning_rate: 1e-4       # Learning rate
   num_epochs: 10            # Number of training epochs
-  batch_size: 16            # Batch size (reduced for memory efficiency)
+  batch_size: 32            # Batch size (reduced for memory efficiency)
   val_split: 0.1            # Fraction of data for validation
   
   # ============================================================================
@@ -133,10 +133,10 @@ training_config:
   # ============================================================================
   # Phased Training Parameters
   # ============================================================================
-  # one epoch = 1660 (based on calculation)
-  initialization_steps: 1660          # Steps to train in no-vq mode
-  r_reestim: 125                     # Frequency of codebook reinitialization
-  quantization_start: 3320           # Step to start normal VQ training
+  # one epoch = 840 (based on calculation)
+  initialization_steps: 840          # Steps to train in no-vq mode
+  r_reestim: 62                     # Frequency of codebook reinitialization
+  quantization_start: 1680           # Step to start normal VQ training
   codebook_lr_multiplier: 1.0        # Codebook learning rate multiplier
   
   # ============================================================================
