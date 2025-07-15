@@ -340,12 +340,15 @@ class GPT2VQVAETrainer:
         self.val_losses = []
         self.vq_losses = []
         self.perplexities = []
+        self.recon_losses = []
+        self.val_recon_losses = []
         
         # Training history - detailed metrics within epochs
         self.detailed_train_losses = []  # List of lists: [epoch_1_metrics, epoch_2_metrics, ...]
         self.detailed_vq_losses = []
         self.detailed_perplexities = []
         self.detailed_batch_indices = []  # List of lists: [epoch_1_indices, epoch_2_indices, ...]
+        self.detailed_recon_losses = [] 
         
         # Best model tracking
         self.best_val_loss = float('inf')
@@ -559,6 +562,7 @@ class GPT2VQVAETrainer:
         total_loss = 0.0
         total_vq_loss = 0.0
         total_perplexity = 0.0
+        total_recon_loss = 0.0
         num_batches = 0
         accumulation_steps = 0
         
@@ -571,7 +575,8 @@ class GPT2VQVAETrainer:
         detailed_vq_losses = []
         detailed_perplexities = []
         detailed_batch_indices = []
-
+        detailed_recon_losses = []
+        
         # Perplexity threshold monitoring
         perplexity_threshold = self.training_config.get('perplexity_threshold', 1.5)
         perplexity_window_size = self.training_config.get('perplexity_window_size', 20)
@@ -599,7 +604,7 @@ class GPT2VQVAETrainer:
             
             # Forward pass and loss calculation
             with record_function("## forward_pass ##"):
-                total_loss_batch, vq_loss, perplexity, _ = self._forward_pass(
+                total_loss_batch, recon_loss, vq_loss, perplexity, _ = self._forward_pass(
                     prompts, cots, prompt_masks, cot_masks
                 )
             
@@ -632,11 +637,13 @@ class GPT2VQVAETrainer:
             
             # Extract scalar values and detach tensors to prevent memory accumulation
             total_loss_batch_item = total_loss_batch.item()
+            recon_loss_item = recon_loss.item()
             vq_loss_item = vq_loss.item()
             perplexity_item = perplexity.item()
             
             # Update metrics
             total_loss += total_loss_batch_item
+            total_recon_loss += recon_loss_item
             total_vq_loss += vq_loss_item
             total_perplexity += perplexity_item
             num_batches += 1
@@ -656,10 +663,12 @@ class GPT2VQVAETrainer:
                     # Calculate final metrics
                     final_metrics = {
                         'detailed_losses': detailed_losses,
+                        'detailed_recon_losses': detailed_recon_losses,
                         'detailed_vq_losses': detailed_vq_losses,
                         'detailed_perplexities': detailed_perplexities,
                         'detailed_batch_indices': detailed_batch_indices,
                         'avg_loss': total_loss / num_batches,
+                        'avg_recon_loss': total_recon_loss / num_batches if num_batches > 0 else 0.0,
                         'avg_vq_loss': total_vq_loss / num_batches,
                         'avg_perplexity': total_perplexity / num_batches,
                         'aborted': True,
@@ -682,6 +691,7 @@ class GPT2VQVAETrainer:
                     self.log_memory_usage(f"before detailed info, batch {batch_idx}")
 
                 detailed_losses.append(total_loss_batch_item)
+                detailed_recon_losses.append(recon_loss_item)
                 detailed_vq_losses.append(vq_loss_item)
                 detailed_perplexities.append(perplexity_item)
                 detailed_batch_indices.append(batch_idx)
@@ -729,7 +739,7 @@ class GPT2VQVAETrainer:
                 self.log_memory_usage(f"after getting the dataset, batch {batch_idx}")
             
             # Explicitly delete intermediate tensors to prevent memory accumulation
-            del total_loss_batch, vq_loss, perplexity, scaled_loss
+            del total_loss_batch, recon_loss, vq_loss, perplexity, scaled_loss
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             gc.collect()
@@ -740,6 +750,7 @@ class GPT2VQVAETrainer:
 
         # Calculate averages
         avg_metrics = self._get_average_metrics(total_loss, total_vq_loss, total_perplexity, num_batches)
+        avg_recon_loss = total_recon_loss / num_batches if num_batches > 0 else 0.0
         
         # TODO DEBUG PURPOSE
         if TRACK_IN_EPOCH_MEMORY:
@@ -748,10 +759,12 @@ class GPT2VQVAETrainer:
         # Return both detailed and average metrics
         return {
             'detailed_losses': detailed_losses,
+            'detailed_recon_losses': detailed_recon_losses,
             'detailed_vq_losses': detailed_vq_losses,
             'detailed_perplexities': detailed_perplexities,
             'detailed_batch_indices': detailed_batch_indices,
             'avg_loss': avg_metrics['loss'],
+            'avg_recon_loss': avg_recon_loss,
             'avg_vq_loss': avg_metrics['vq_loss'],
             'avg_perplexity': avg_metrics['perplexity'],
             'aborted': False
@@ -771,6 +784,7 @@ class GPT2VQVAETrainer:
         total_loss = 0.0
         total_vq_loss = 0.0
         total_perplexity = 0.0
+        total_recon_loss = 0.0
         num_batches = 0
         
         with torch.no_grad():
@@ -783,18 +797,26 @@ class GPT2VQVAETrainer:
                 
                 # Forward pass and loss calculation
                 with record_function("## validation_forward ##"):
-                    total_loss_batch, vq_loss, perplexity, _ = self._forward_pass(
+                    total_loss_batch, recon_loss, vq_loss, perplexity, _ = self._forward_pass(
                         prompts, cots, prompt_masks, cot_masks
                     )
                 
                 # Update metrics
                 total_loss += total_loss_batch.item()
+                total_recon_loss += recon_loss.item()
                 total_vq_loss += vq_loss.item()
                 total_perplexity += perplexity.item()
                 num_batches += 1
         
         # Calculate averages
-        return self._get_average_metrics(total_loss, total_vq_loss, total_perplexity, num_batches)
+        avg_metrics = self._get_average_metrics(total_loss, total_vq_loss, total_perplexity, num_batches)
+        avg_recon_loss = total_recon_loss / num_batches if num_batches > 0 else 0.0
+        return {
+            'loss': avg_metrics['loss'],
+            'recon_loss': avg_recon_loss,
+            'vq_loss': avg_metrics['vq_loss'],
+            'perplexity': avg_metrics['perplexity']
+        }
     
     def _forward_pass(self, prompts, cots, prompt_masks, cot_masks):
         """Helper function for forward pass and loss calculation"""
@@ -822,7 +844,7 @@ class GPT2VQVAETrainer:
             recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
             total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
             
-        return total_loss_batch, vq_loss, perplexity, indices
+        return total_loss_batch, recon_loss, vq_loss, perplexity, indices
     
     def _update_weights(self):
         """Helper function for updating weights"""
@@ -940,10 +962,12 @@ class GPT2VQVAETrainer:
             'val_losses': self.val_losses,
             'vq_losses': self.vq_losses,
             'perplexities': self.perplexities,
+            'recon_losses': self.recon_losses,
             'detailed_train_losses': self.detailed_train_losses,
             'detailed_vq_losses': self.detailed_vq_losses,
             'detailed_perplexities': self.detailed_perplexities,
-            'detailed_batch_indices': self.detailed_batch_indices
+            'detailed_batch_indices': self.detailed_batch_indices,
+            'detailed_recon_losses': self.detailed_recon_losses,
         }
         
         # Add any additional data passed as kwargs
@@ -1023,11 +1047,14 @@ class GPT2VQVAETrainer:
         self.val_losses = checkpoint.get('val_losses', [])
         self.vq_losses = checkpoint.get('vq_losses', [])
         self.perplexities = checkpoint.get('perplexities', [])
+        self.recon_losses = checkpoint.get('recon_losses', [])
+        self.val_recon_losses = checkpoint.get('val_recon_losses', [])
         
         self.detailed_train_losses = checkpoint.get('detailed_train_losses', [])
         self.detailed_vq_losses = checkpoint.get('detailed_vq_losses', [])
         self.detailed_perplexities = checkpoint.get('detailed_perplexities', [])
         self.detailed_batch_indices = checkpoint.get('detailed_batch_indices', [])
+        self.detailed_recon_losses = checkpoint.get('detailed_recon_losses', [])
         
         print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
         print("Checkpoint loaded successfully. Configuration validation completed.")
@@ -1172,19 +1199,24 @@ class GPT2VQVAETrainer:
                 
                 # Store epoch-level metrics
                 self.train_losses.append(train_metrics['avg_loss'])
+                self.recon_losses.append(train_metrics['avg_recon_loss'])
                 self.val_losses.append(test_metrics['loss'])
+                self.val_recon_losses.append(test_metrics['recon_loss'])
                 self.vq_losses.append(train_metrics['avg_vq_loss'])
                 self.perplexities.append(train_metrics['avg_perplexity'])
                 
                 # Store detailed metrics
                 self.detailed_train_losses.append(train_metrics['detailed_losses'])
+                self.detailed_recon_losses.append(train_metrics['detailed_recon_losses'])
                 self.detailed_vq_losses.append(train_metrics['detailed_vq_losses'])
                 self.detailed_perplexities.append(train_metrics['detailed_perplexities'])
                 self.detailed_batch_indices.append(train_metrics['detailed_batch_indices'])
                 
                 # Print metrics
                 print(f"Train Loss: {train_metrics['avg_loss']:.4f}")
-                print(f"Test Loss: {test_metrics['loss']:.4f}")
+                print(f"Train Recon Loss: {train_metrics['avg_recon_loss']:.4f}")
+                print(f"Val Loss: {test_metrics['loss']:.4f}")
+                print(f"Val Recon Loss: {test_metrics['recon_loss']:.4f}")
                 print(f"VQ Loss: {train_metrics['avg_vq_loss']:.4f}")
                 print(f"Perplexity: {train_metrics['avg_perplexity']:.2f}")
                 print(f"Learning Rate: {self.optimizer.param_groups[0]['lr']:.6f}")
@@ -1242,6 +1274,7 @@ class GPT2VQVAETrainer:
             self.train_losses.append(e.metrics['avg_loss'])
             self.vq_losses.append(e.metrics['avg_vq_loss'])
             self.perplexities.append(e.metrics['avg_perplexity'])
+            self.recon_losses.append(e.metrics['avg_recon_loss'])
             
             # Add a dummy validation loss for plotting purposes (use training loss as proxy)
             self.val_losses.append(e.metrics['avg_loss'])
@@ -1251,13 +1284,15 @@ class GPT2VQVAETrainer:
             self.detailed_vq_losses.append(e.metrics['detailed_vq_losses'])
             self.detailed_perplexities.append(e.metrics['detailed_perplexities'])
             self.detailed_batch_indices.append(e.metrics['detailed_batch_indices'])
+            self.detailed_recon_losses.append(e.metrics['detailed_recon_losses'])
             
             # Create a dummy validation metrics for checkpoint saving
             # Use the training metrics as a proxy since we didn't complete validation
             dummy_val_metrics = {
                 'loss': e.metrics['avg_loss'],  # Use training loss as proxy
                 'vq_loss': e.metrics['avg_vq_loss'],
-                'perplexity': e.metrics['avg_perplexity']
+                'perplexity': e.metrics['avg_perplexity'],
+                'recon_loss': e.metrics['avg_recon_loss'],
             }
             
             # Save checkpoint for the aborted training
@@ -1308,7 +1343,8 @@ class GPT2VQVAETrainer:
             final_metrics = {
                 'loss': e.metrics['avg_loss'],
                 'vq_loss': e.metrics['avg_vq_loss'],
-                'perplexity': e.metrics['avg_perplexity']
+                'perplexity': e.metrics['avg_perplexity'],
+                'recon_loss': e.metrics['avg_recon_loss'],
             }
             
             # Send the phone notification with aborted status
@@ -1340,7 +1376,8 @@ class GPT2VQVAETrainer:
         final_metrics = {
             'loss': self.val_losses[-1] if self.val_losses else 0.0,
             'vq_loss': self.vq_losses[-1] if self.vq_losses else 0.0,
-            'perplexity': self.perplexities[-1] if self.perplexities else 0.0
+            'perplexity': self.perplexities[-1] if self.perplexities else 0.0,
+            'recon_loss': self.recon_losses[-1] if self.recon_losses else 0.0,
         }
         
         # Send the phone notification
@@ -1353,25 +1390,29 @@ class GPT2VQVAETrainer:
         # Save comprehensive training visualizations
         save_training_visualizations(self, prefix="training")
     
-    def plot_training_history(self, save_path: Optional[str] = None):
+    def plot_training_history(self, save_path: Optional[str] = None, log_scale: bool = False):
         """
         Plot training history including detailed metrics within epochs.
         
         Args:
             save_path: Path to save the plot
+            log_scale: If True, use log scale for y-axes
         """
         # Create a larger figure to accommodate detailed plots
         _, axes = plt.subplots(3, 2, figsize=(20, 15))
         
         # Epoch-level metrics (top row)
         # Loss plot
-        axes[0, 0].plot(self.train_losses, label='Train Loss')
+        axes[0, 0].plot(self.train_losses, label='Total Train Loss')
+        axes[0, 0].plot(self.recon_losses, label='Recon Loss')
         axes[0, 0].plot(self.val_losses, label='Val Loss')
-        axes[0, 0].set_title('Training and Validation Loss (Epoch Level)')
+        axes[0, 0].set_title('Training, Recon, and Validation Loss (Epoch Level)')
         axes[0, 0].set_xlabel('Epoch')
         axes[0, 0].set_ylabel('Loss')
         axes[0, 0].legend()
         axes[0, 0].grid(True)
+        if log_scale:
+            axes[0, 0].set_yscale('log')
         
         # VQ Loss plot
         axes[0, 1].plot(self.vq_losses, label='VQ Loss', color='red')
@@ -1380,6 +1421,8 @@ class GPT2VQVAETrainer:
         axes[0, 1].set_ylabel('VQ Loss')
         axes[0, 1].legend()
         axes[0, 1].grid(True)
+        if log_scale:
+            axes[0, 1].set_yscale('log')
         
         # Plot epoch-level perplexity
         axes[1, 0].plot(self.perplexities, label='Epoch Perplexity', color='orange')
@@ -1388,50 +1431,49 @@ class GPT2VQVAETrainer:
         axes[1, 0].set_ylabel('Perplexity')
         axes[1, 0].legend()
         axes[1, 0].grid(True)
+        if log_scale:
+            axes[1, 0].set_yscale('log')
         
         # Detailed metrics within epochs
-        if self.detailed_train_losses:
-            # Flatten all detailed metrics for plotting
+        if self.detailed_train_losses and self.detailed_recon_losses:
             all_detailed_losses = []
+            all_detailed_recon_losses = []
             all_detailed_vq_losses = []
             all_detailed_perplexities = []
             all_detailed_indices = []
             epoch_boundaries = []
-            
-            # Calculate global batch indices
             global_batch_idx = 0
-            for epoch_idx, (epoch_losses, epoch_vq_losses, epoch_perplexities, epoch_indices) in enumerate(
-                zip(self.detailed_train_losses, self.detailed_vq_losses, 
-                    self.detailed_perplexities, self.detailed_batch_indices)
+            for epoch_idx, (epoch_losses, epoch_recon_losses, epoch_vq_losses, epoch_perplexities, epoch_indices) in enumerate(
+                zip(self.detailed_train_losses, self.detailed_recon_losses, self.detailed_vq_losses, self.detailed_perplexities, self.detailed_batch_indices)
             ):
-                # Mark the start of each epoch
                 epoch_boundaries.append((global_batch_idx, epoch_idx + 1))
-                
-                for batch_idx, (loss, vq_loss, perplexity) in enumerate(
-                    zip(epoch_losses, epoch_vq_losses, epoch_perplexities)
+                for batch_idx, (loss, recon_loss, vq_loss, perplexity) in enumerate(
+                    zip(epoch_losses, epoch_recon_losses, epoch_vq_losses, epoch_perplexities)
                 ):
                     all_detailed_losses.append(loss)
+                    all_detailed_recon_losses.append(recon_loss)
                     all_detailed_vq_losses.append(vq_loss)
                     all_detailed_perplexities.append(perplexity)
                     all_detailed_indices.append(global_batch_idx + batch_idx)
                 global_batch_idx += len(epoch_losses)
             
             # Plot detailed training loss
-            axes[1, 1].plot(all_detailed_indices, all_detailed_losses, label='Detailed Train Loss', alpha=0.7)
-            # Add epoch boundary lines and annotations
+            axes[1, 1].plot(all_detailed_indices, all_detailed_losses, label='Detailed Total Loss', alpha=0.7)
+            axes[1, 1].plot(all_detailed_indices, all_detailed_recon_losses, label='Detailed Recon Loss', alpha=0.7)
             for boundary, epoch_num in epoch_boundaries:
                 axes[1, 1].axvline(x=boundary, color='gray', linestyle='--', alpha=0.5)
                 axes[1, 1].text(boundary, axes[1, 1].get_ylim()[1], f'Epoch {epoch_num}', 
                               rotation=90, va='top', ha='right')
-            axes[1, 1].set_title('Detailed Training Loss (Within Epochs)')
+            axes[1, 1].set_title('Detailed Training and Recon Loss (Within Epochs)')
             axes[1, 1].set_xlabel('Measurement Index')
             axes[1, 1].set_ylabel('Loss')
             axes[1, 1].legend()
             axes[1, 1].grid(True)
+            if log_scale:
+                axes[1, 1].set_yscale('log')
             
             # Plot detailed VQ loss
             axes[2, 0].plot(all_detailed_indices, all_detailed_vq_losses, label='Detailed VQ Loss', color='red', alpha=0.7)
-            # Add epoch boundary lines and annotations
             for boundary, epoch_num in epoch_boundaries:
                 axes[2, 0].axvline(x=boundary, color='gray', linestyle='--', alpha=0.5)
                 axes[2, 0].text(boundary, axes[2, 0].get_ylim()[1], f'Epoch {epoch_num}',
@@ -1441,10 +1483,11 @@ class GPT2VQVAETrainer:
             axes[2, 0].set_ylabel('VQ Loss')
             axes[2, 0].legend()
             axes[2, 0].grid(True)
+            if log_scale:
+                axes[2, 0].set_yscale('log')
             
             # Plot detailed perplexity
             axes[2, 1].plot(all_detailed_indices, all_detailed_perplexities, label='Detailed Perplexity', color='green', alpha=0.7)
-            # Add epoch boundary lines and annotations
             for boundary, epoch_num in epoch_boundaries:
                 axes[2, 1].axvline(x=boundary, color='gray', linestyle='--', alpha=0.5)
                 axes[2, 1].text(boundary, axes[2, 1].get_ylim()[1], f'Epoch {epoch_num}',
@@ -1454,11 +1497,13 @@ class GPT2VQVAETrainer:
             axes[2, 1].set_ylabel('Perplexity')
             axes[2, 1].legend()
             axes[2, 1].grid(True)
+            if log_scale:
+                axes[2, 1].set_yscale('log')
             
         else:
             # Fallback to original plots if no detailed data
             axes[1, 1].text(0.5, 0.5, 'No detailed metrics available', ha='center', va='center', transform=axes[1, 1].transAxes)
-            axes[1, 1].set_title('Detailed Training Loss')
+            axes[1, 1].set_title('Detailed Training and Recon Loss')
             
             axes[2, 0].text(0.5, 0.5, 'No detailed metrics available', ha='center', va='center', transform=axes[2, 0].transAxes)
             axes[2, 0].set_title('Detailed VQ Loss')
@@ -2012,10 +2057,8 @@ class SimpleGPT2VQVAETrainer(GPT2VQVAETrainer):
                  device: str = "cuda" if torch.cuda.is_available() else "cpu", 
                  run_name : Optional[str] = "ANONYM_RUN"):
         super().__init__(model_config, training_config, device, run_name)
-
         self.ensure_numeric_types(model_config)
         self.ensure_numeric_types(training_config)
-
         # Replace the model with SimpleGPT2VQVAE
         self.model = SimpleGPT2VQVAE(**model_config).to(device)
         # Re-initialize optimizer and scheduler for the new model
@@ -2040,10 +2083,7 @@ class SimpleGPT2VQVAETrainer(GPT2VQVAETrainer):
     
     def _forward_pass(self, prompts, cots, prompt_masks, cot_masks):
         """Helper function for forward pass and loss calculation with use_vq parameter"""
-
-        # Get use_vq from training config
         use_vq = self.training_config.get('use_vq', True)
-        
         if self.use_mixed_precision:
             with autocast('cuda'):
                 _, output_logits, vq_loss, perplexity, indices = self.model(
@@ -2069,8 +2109,7 @@ class SimpleGPT2VQVAETrainer(GPT2VQVAETrainer):
             )
             recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
             total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
-            
-        return total_loss_batch, vq_loss, perplexity, indices
+        return total_loss_batch, recon_loss, vq_loss, perplexity, indices
 
 
 class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
