@@ -968,6 +968,7 @@ class GPT2VQVAETrainer:
             'detailed_perplexities': self.detailed_perplexities,
             'detailed_batch_indices': self.detailed_batch_indices,
             'detailed_recon_losses': self.detailed_recon_losses,
+            'best_val_loss': self.best_val_loss,
         }
         
         # Add any additional data passed as kwargs
@@ -1055,6 +1056,10 @@ class GPT2VQVAETrainer:
         self.detailed_perplexities = checkpoint.get('detailed_perplexities', [])
         self.detailed_batch_indices = checkpoint.get('detailed_batch_indices', [])
         self.detailed_recon_losses = checkpoint.get('detailed_recon_losses', [])
+        
+        # Restore best_val_loss if present
+        if 'best_val_loss' in checkpoint:
+            self.best_val_loss = checkpoint['best_val_loss']
         
         print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
         print("Checkpoint loaded successfully. Configuration validation completed.")
