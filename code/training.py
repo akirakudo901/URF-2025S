@@ -1654,6 +1654,10 @@ def main():
                        help='Override quantization_start for phased training (default: 5000)')
     parser.add_argument('--codebook-lr-multiplier', type=float, default=None,
                        help='Override codebook_lr_multiplier for phased training (default: 1.0)')
+    parser.add_argument('--do-figure-analyses', dest='do_figure_analyses', action='store_true', default=True,
+                       help='Enable figure analyses and visualizations in demonstration mode (default: True)')
+    parser.add_argument('--no-figure-analyses', dest='do_figure_analyses', action='store_false',
+                       help='Disable figure analyses and visualizations in demonstration mode')
     
     args = parser.parse_args()
     
@@ -1852,6 +1856,7 @@ def main():
                 use_vq=training_config.get('use_vq', True),
                 model_type=model_type,
                 seed=args.demo_seed, 
+                do_figure_analyses=args.do_figure_analyses,
                 **model_config
             )
             return  # Exit after demonstration
@@ -1875,6 +1880,7 @@ def main():
                 device=device,
                 use_vq=training_config.get('use_vq', True),
                 model_type=model_type,
+                do_figure_analyses=args.do_figure_analyses,
                 **model_config
             )
             return  # Exit after demonstration
