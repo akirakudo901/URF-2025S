@@ -48,6 +48,7 @@ from train_utils import (
 from vqvae_gpt2 import GPT2VQVAE
 from vqvae_gpt2_simple import SimpleGPT2VQVAE
 from vqvae_gpt2_with_enhancement import EnhancedGPT2VQVAE
+from auto_switching_trainer import AutoSwitchingTrainer
 
 TRACK_MEMORY = False
 TRACK_IN_EPOCH_MEMORY = False
@@ -1674,6 +1675,8 @@ def main():
                        help='Use EnhancedGPT2VQVAETrainer and EnhancedGPT2VQVAE model (default: False)')
     parser.add_argument('--phased', action='store_true', default=False,
                        help='Use PhasedEnhancedGPT2VQVAETrainer for phased training (requires --enhanced)')
+    parser.add_argument('--auto', action='store_true', default=False,
+                       help='Use AutoSwitchingTrainer for auto-switching phased training (requires --enhanced and --phased)')
     parser.add_argument('--use-vq', action='store_true', default=None,
                        help='Enable vector quantization (default: True for SimpleGPT2VQVAE, True for GPT2VQVAE)')
     parser.add_argument('--no-vq', action='store_true', default=False,
@@ -1704,6 +1707,13 @@ def main():
                        help='Override quantization_start for phased training (default: 5000)')
     parser.add_argument('--codebook-lr-multiplier', type=float, default=None,
                        help='Override codebook_lr_multiplier for phased training (default: 1.0)')
+    
+    # Auto-switching specific arguments
+    parser.add_argument('--auto-switch-patience', type=int, default=None,
+                       help='Override auto_switch_patience for auto-switching training (default: 3)')
+    parser.add_argument('--auto-switch-validation-checks', type=int, default=None,
+                       help='Override auto_switch_validation_checks_per_epoch for auto-switching training (default: 5)')
+    
     parser.add_argument('--do-figure-analyses', dest='do_figure_analyses', action='store_true', default=True,
                        help='Enable figure analyses and visualizations in demonstration mode (default: True)')
     parser.add_argument('--no-figure-analyses', dest='do_figure_analyses', action='store_false',
@@ -1715,6 +1725,12 @@ def main():
     if args.phased and not args.enhanced:
         print("Error: --phased requires --enhanced to be enabled")
         print("Please use both --enhanced and --phased flags together")
+        return
+    
+    # Validate auto-switching arguments
+    if args.auto and not (args.enhanced and args.phased):
+        print("Error: --auto requires both --enhanced and --phased to be enabled")
+        print("Please use --enhanced, --phased, and --auto flags together")
         return
 
     if not args.config and not (args.demonstrate or args.demonstrate_custom):
@@ -1861,6 +1877,19 @@ def main():
                 if args.codebook_lr_multiplier is not None:
                     training_config['codebook_lr_multiplier'] = args.codebook_lr_multiplier
                     print(f"Overriding codebook_lr_multiplier to: {args.codebook_lr_multiplier}")
+                
+                # Handle auto-switching parameters
+                if args.auto:
+                    print("Auto-switching mode enabled")
+                    
+                    # Override auto-switching parameters if specified
+                    if args.auto_switch_patience is not None:
+                        training_config['auto_switch_patience'] = args.auto_switch_patience
+                        print(f"Overriding auto_switch_patience to: {args.auto_switch_patience}")
+                    
+                    if args.auto_switch_validation_checks is not None:
+                        training_config['auto_switch_validation_checks_per_epoch'] = args.auto_switch_validation_checks
+                        print(f"Overriding auto_switch_validation_checks_per_epoch to: {args.auto_switch_validation_checks}")
         else:
             # For non-enhanced models, disable enhanced codebook tracking
             training_config['enhanced_codebook_tracking'] = False
@@ -1890,8 +1919,8 @@ def main():
 
         # Run demonstration if requested
         if args.demonstrate:
-            if args.phased or args.enhanced:
-                model_type = "EnhancedGPT2VQVAE"  # Phased trainer uses EnhancedGPT2VQVAE model
+            if args.auto or args.phased or args.enhanced:
+                model_type = "EnhancedGPT2VQVAE"  # Auto-switching and phased trainers use EnhancedGPT2VQVAE model
             elif args.simple:
                 model_type = "SimpleGPT2VQVAE"
             else:
@@ -1913,8 +1942,8 @@ def main():
         
         # Run custom demonstration if requested
         if args.demonstrate_custom:
-            if args.phased or args.enhanced:
-                model_type = "EnhancedGPT2VQVAE"  # Phased trainer uses EnhancedGPT2VQVAE model
+            if args.auto or args.phased or args.enhanced:
+                model_type = "EnhancedGPT2VQVAE"  # Auto-switching and phased trainers use EnhancedGPT2VQVAE model
             elif args.simple:
                 model_type = "SimpleGPT2VQVAE"
             else:
@@ -1954,7 +1983,9 @@ def main():
         if args.resume_from:
             model_config['use_pretrained_encoder'] = False
             model_config['use_pretrained_decoder'] = False
-            if args.phased:
+            if args.auto:
+                trainer = AutoSwitchingTrainer(model_config, training_config, device=device, run_name=run_name)
+            elif args.phased:
                 trainer = PhasedEnhancedGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
             elif args.enhanced:
                 trainer = EnhancedGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
@@ -1965,7 +1996,9 @@ def main():
             print(f"Resuming from checkpoint: {args.resume_from}")
             trainer.load_checkpoint(args.resume_from)
         else:
-            if args.phased:
+            if args.auto:
+                trainer = AutoSwitchingTrainer(model_config, training_config, device=device, run_name=run_name)
+            elif args.phased:
                 trainer = PhasedEnhancedGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
             elif args.enhanced:
                 trainer = EnhancedGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
@@ -2823,7 +2856,7 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         """
         # Set max_reset_steps on the first epoch if it's still None
         if current_epoch == 0 and self.model.vector_quantizer.max_reset_steps is None:
-            # Set max_reset_steps to quantization_start to disable automatic resets during initialization
+            # Set max_reset_steps to quantization_start to disable automatic resets during normal training
             self.model.vector_quantizer.max_reset_steps = self.quantization_start
         
         # Call parent train_epoch
