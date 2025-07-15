@@ -9,7 +9,7 @@ import yaml
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
-import np
+import numpy as np
 
 import torch
 from torch import nn
