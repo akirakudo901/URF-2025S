@@ -3,46 +3,41 @@
 # Last Updated: 2025/06/23
 
 import torch
-import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
 from typing import Optional, Dict, Any
 import os
-import matplotlib.pyplot as plt
-from tqdm import tqdm
-# import wandb  # Optional: for experiment tracking
 import argparse
 import gc
 # import psutil
 from torch.amp.autocast_mode import autocast
-from torch.amp.grad_scaler import GradScaler
-import numpy as np
 import traceback
-import socket
-from datetime import datetime
-from torch.autograd.profiler import record_function
 import sys
 import os
-
-# Add the current directory to the path to import phone_notification
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from phone_notification import send_notification
 
 # Import the GPT2VQVAE model
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from demonstrate import demonstrate_custom_prompt_cot, demonstrate_model_from_checkpoint
-from train_utils import (
-    create_default_config, compute_reconstruction_loss, create_codebook_usage_heatmap, 
-    create_codebook_usage_timeline_plot, load_config, load_training_data, 
-    sample_and_compute_codebook_usage, validate_model_data_compatibility
+
+from trainer.auto_switching_trainer import AutoSwitchingTrainer
+from trainer.enhanced_trainer import EnhancedGPT2VQVAETrainer
+from trainer.gpt2_vqvae_trainer import GPT2VQVAETrainer, TrainingAbortedException, save_training_visualizations
+from trainer.phased_trainer import PhasedEnhancedGPT2VQVAETrainer
+
+from trainer.train_utils import (
+    create_default_config, compute_reconstruction_loss, load_config, load_training_data, 
+    validate_model_data_compatibility
     )
-from vqvae_gpt2 import GPT2VQVAE
+
 from vqvae_gpt2_simple import SimpleGPT2VQVAE
-from vqvae_gpt2_with_enhancement import EnhancedGPT2VQVAE
-from auto_switching_trainer import AutoSwitchingTrainer
-from phased_trainer import PhasedEnhancedGPT2VQVAETrainer
-from enhanced_trainer import EnhancedGPT2VQVAETrainer
-from gpt2_vqvae_trainer import GPT2VQVAETrainer, TrainingAbortedException, save_training_visualizations
+
+# GPU memory monitoring
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    NVML_AVAILABLE = True
+except ImportError:
+    print("Warning: nvidia-ml-py3 not available. Install with: pip install nvidia-ml-py3")
+    NVML_AVAILABLE = False
 
 
 def main():

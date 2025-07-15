@@ -277,7 +277,7 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
             recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
             total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
         
-        return total_loss_batch, vq_loss, perplexity, indices
+        return total_loss_batch, recon_loss, vq_loss, perplexity, indices
     
     def train_epoch(self, train_loader, num_measurements_per_epoch, current_epoch=0):
         """

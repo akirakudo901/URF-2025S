@@ -1,6 +1,11 @@
-import torch
+import os
+import sys
 from typing import Optional, Dict, Any
-from training import PhasedEnhancedGPT2VQVAETrainer
+
+import torch
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from trainer.phased_trainer import PhasedEnhancedGPT2VQVAETrainer
 
 class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
     """
