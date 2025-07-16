@@ -895,7 +895,15 @@ class GPT2VQVAETrainer:
             
             # Add basic metrics
             if 'loss' in final_metrics:
-                message += f"Final Loss: {final_metrics['loss']:.4f}\n"
+                message += f"Final Train Loss: {final_metrics['loss']:.4f}\n"
+            if 'recon_loss' in final_metrics:
+                message += f"Final Train Recon Loss: {final_metrics['recon_loss']:.4f}\n"
+            
+            if 'val_loss' in final_metrics:
+                message += f"Final Val Loss: {final_metrics['val_loss']:.4f}\n"
+            if 'val_recon_loss' in final_metrics:
+                message += f"Final Val Recon Loss: {final_metrics['val_recon_loss']:.4f}\n"
+            
             if 'vq_loss' in final_metrics:
                 message += f"VQ Loss: {final_metrics['vq_loss']:.4f}\n"
             if 'perplexity' in final_metrics:
@@ -950,6 +958,7 @@ class GPT2VQVAETrainer:
             'vq_losses': self.vq_losses,
             'perplexities': self.perplexities,
             'recon_losses': self.recon_losses,
+            'val_recon_losses': self.val_recon_losses,
             'detailed_train_losses': self.detailed_train_losses,
             'detailed_vq_losses': self.detailed_vq_losses,
             'detailed_perplexities': self.detailed_perplexities,
@@ -1219,10 +1228,15 @@ class GPT2VQVAETrainer:
                     self.best_val_loss = test_metrics['loss']
                     with record_function("## save_checkpoint ##"):
                         self.save_checkpoint(epoch + 1, test_metrics, True)
+                    # save training visualizations when saving a checkpoint
+                    save_training_visualizations(self, prefix=f"epoch_{epoch+1}")
                 
                 if (epoch + 1) % self.training_config.get('save_every', 5) == 0:
                     with record_function("## save_checkpoint ##"):
                         self.save_checkpoint(epoch + 1, test_metrics, False)
+                    # save training visualizations when saving a checkpoint
+                    save_training_visualizations(self, prefix=f"epoch_{epoch+1}")
+                
                 
                 # Save codebook tracking plots
                 if self.tracking_enabled:
@@ -1230,9 +1244,6 @@ class GPT2VQVAETrainer:
                         checkpoint_dir = self.training_config.get('checkpoint_dir', 'checkpoints')
                         codebook_dir = os.path.join(checkpoint_dir, 'codebook_tracking')
                         self.save_codebook_plots_func(codebook_dir, epoch + 1)
-                
-                # Save training visualizations at the end of every epoch
-                save_training_visualizations(self, prefix=f"epoch_{epoch+1}")
                 
                 # Clear cache after each epoch
                 if torch.cuda.is_available():
@@ -1273,6 +1284,7 @@ class GPT2VQVAETrainer:
             
             # Add a dummy validation loss for plotting purposes (use training loss as proxy)
             self.val_losses.append(e.metrics['avg_loss'])
+            self.val_recon_losses.append(e.metrics['avg_loss'])
             
             # Store detailed metrics from the aborted epoch
             self.detailed_train_losses.append(e.metrics['detailed_losses'])
@@ -1377,10 +1389,10 @@ class GPT2VQVAETrainer:
         
         # Get final metrics from the last validation
         final_metrics = {
-            'loss': self.val_losses[-1] if self.val_losses else 0.0,
+            'val_loss': self.val_losses[-1] if self.val_losses else 0.0,
             'vq_loss': self.vq_losses[-1] if self.vq_losses else 0.0,
             'perplexity': self.perplexities[-1] if self.perplexities else 0.0,
-            'recon_loss': self.recon_losses[-1] if self.recon_losses else 0.0,
+            'val_recon_loss': self.val_recon_losses[-1] if self.val_recon_losses else 0.0,
         }
         
         # Send the phone notification
@@ -1407,9 +1419,10 @@ class GPT2VQVAETrainer:
         # Epoch-level metrics (top row)
         # Loss plot
         axes[0, 0].plot(self.train_losses, label='Total Train Loss')
-        axes[0, 0].plot(self.recon_losses, label='Recon Loss')
+        axes[0, 0].plot(self.recon_losses, label='Train Recon Loss')
         axes[0, 0].plot(self.val_losses, label='Val Loss')
-        axes[0, 0].set_title('Training, Recon, and Validation Loss (Epoch Level)')
+        axes[0, 0].plot(self.val_recon_losses, label='Val Recon Loss')
+        axes[0, 0].set_title('Training and Validation Loss (Epoch Level)')
         axes[0, 0].set_xlabel('Epoch')
         axes[0, 0].set_ylabel('Loss')
         axes[0, 0].legend()
