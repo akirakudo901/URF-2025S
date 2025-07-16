@@ -13,6 +13,7 @@ from tqdm import tqdm
 import gc
 from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
+import traceback
 import socket
 from datetime import datetime
 from torch.autograd.profiler import record_function
@@ -1230,6 +1231,9 @@ class GPT2VQVAETrainer:
                         codebook_dir = os.path.join(checkpoint_dir, 'codebook_tracking')
                         self.save_codebook_plots_func(codebook_dir, epoch + 1)
                 
+                # Save training visualizations at the end of every epoch
+                save_training_visualizations(self, prefix=f"epoch_{epoch+1}")
+                
                 # Clear cache after each epoch
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -1351,6 +1355,14 @@ class GPT2VQVAETrainer:
             
             # Re-raise the exception to be caught by the main function
             raise
+        except Exception as e:
+            print(f"Training error: {e}")
+            traceback.print_exc()  
+            # Send the phone notification with aborted status
+            if SEND_NOTIFICATION:
+                # Format the message
+                message = f"Training halted for {self.run_name} with error: {e}!\n"
+                send_notification(message)
         
         # Log final memory usage
         self.log_memory_usage("training_end")
