@@ -11,7 +11,7 @@ from transformers import GPT2Tokenizer
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from latent_visualization_analysis import LatentVisualizationAnalyzer
-from train_utils import compute_reconstruction_loss, create_codebook_usage_heatmap, load_training_data
+from trainer.train_utils import compute_reconstruction_loss, create_codebook_usage_heatmap, load_training_data
 from vqvae_gpt2 import GPT2VQVAE
 from vqvae_gpt2_simple import SimpleGPT2VQVAE
 from vqvae_gpt2_with_enhancement import EnhancedGPT2VQVAE
