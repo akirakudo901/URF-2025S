@@ -231,6 +231,9 @@ class GPT2VQVAETrainer:
         self.device = device
         self.run_name = run_name
         
+        # Initialize training start time for checkpoint notifications
+        self.training_start_time = None
+        
         # Set up tracking functions (default to base class methods)
         if tracking_functions is None:
             tracking_functions = {}
@@ -590,7 +593,12 @@ class GPT2VQVAETrainer:
                 self.log_memory_usage(f"after data loading, batch {batch_idx}")
             
             # Forward pass and loss calculation
-            with record_function("## forward_pass ##"):
+            if TRACK_MEMORY:
+                with record_function("## forward_pass ##"):
+                    total_loss_batch, recon_loss, vq_loss, perplexity, _ = self._forward_pass(
+                        prompts, cots, prompt_masks, cot_masks
+                    )
+            else:
                 total_loss_batch, recon_loss, vq_loss, perplexity, _ = self._forward_pass(
                     prompts, cots, prompt_masks, cot_masks
                 )
@@ -600,7 +608,14 @@ class GPT2VQVAETrainer:
                 self.log_memory_usage(f"after forward pass, batch {batch_idx}")
             
             # Scale loss and backward pass
-            with record_function("## backward_pass ##"):
+            if TRACK_MEMORY:
+                with record_function("## backward_pass ##"):
+                    scaled_loss = total_loss_batch / self.gradient_accumulation_steps
+                    if self.use_mixed_precision and self.scaler is not None:
+                        self.scaler.scale(scaled_loss).backward()
+                    else:
+                        scaled_loss.backward()
+            else:
                 scaled_loss = total_loss_batch / self.gradient_accumulation_steps
                 if self.use_mixed_precision and self.scaler is not None:
                     self.scaler.scale(scaled_loss).backward()
@@ -615,7 +630,10 @@ class GPT2VQVAETrainer:
             
             # Update weights every gradient_accumulation_steps
             if accumulation_steps % self.gradient_accumulation_steps == 0:
-                with record_function("## optimizer_step ##"):
+                if TRACK_MEMORY:
+                    with record_function("## optimizer_step ##"):
+                        self._update_weights()
+                else:
                     self._update_weights()
                 # TODO DEBUG PURPOSE
                 if TRACK_IN_EPOCH_MEMORY:
@@ -767,6 +785,8 @@ class GPT2VQVAETrainer:
         Returns:
             Dictionary containing validation metrics
         """
+        model_was_training = self.model.training 
+        
         self.model.eval()
         total_loss = 0.0
         total_vq_loss = 0.0
@@ -783,7 +803,12 @@ class GPT2VQVAETrainer:
                 cot_masks = cot_masks.to(self.device, non_blocking=True)
                 
                 # Forward pass and loss calculation
-                with record_function("## validation_forward ##"):
+                if TRACK_MEMORY:
+                    with record_function("## validation_forward ##"):
+                        total_loss_batch, recon_loss, vq_loss, perplexity, _ = self._forward_pass(
+                            prompts, cots, prompt_masks, cot_masks
+                        )
+                else:
                     total_loss_batch, recon_loss, vq_loss, perplexity, _ = self._forward_pass(
                         prompts, cots, prompt_masks, cot_masks
                     )
@@ -798,6 +823,10 @@ class GPT2VQVAETrainer:
         # Calculate averages
         avg_metrics = self._get_average_metrics(total_loss, total_vq_loss, total_perplexity, num_batches)
         avg_recon_loss = total_recon_loss / num_batches if num_batches > 0 else 0.0
+
+        if model_was_training:
+            self.model.train()
+
         return {
             'loss': avg_metrics['loss'],
             'recon_loss': avg_recon_loss,
@@ -869,6 +898,40 @@ class GPT2VQVAETrainer:
             return send_notification(message)
         except Exception as e:
             print(f"Error sending training completion phone notification: {e}")
+            return False
+
+    def send_checkpoint_notification(self, epoch: int, is_best: bool = False) -> bool:
+        """
+        Send a short notification when a checkpoint is saved.
+        
+        Args:
+            epoch: Current epoch number
+            is_best: Whether this is the best model so far
+            
+        Returns:
+            bool: True if notification was sent successfully, False otherwise
+        """
+        try:
+            if self.training_start_time is None:
+                return False
+                
+            # Calculate time elapsed
+            current_time = datetime.now()
+            elapsed = (current_time - self.training_start_time).total_seconds()
+            hours = int(elapsed // 3600)
+            minutes = int((elapsed % 3600) // 60)
+            
+            # Format the message
+            if is_best:
+                message = f"💾 Best checkpoint saved for {self.run_name}!\nEpoch {epoch}, Time: {hours:02d}:{minutes:02d}"
+            else:
+                message = f"💾 Checkpoint saved for {self.run_name}\nEpoch {epoch}, Time: {hours:02d}:{minutes:02d}"
+            
+            # Send the phone notification
+            return send_notification(message)
+            
+        except Exception as e:
+            print(f"Error sending checkpoint notification: {e}")
             return False
 
     def send_training_completion_phone_notification(self, final_metrics: Dict[str, float], 
@@ -1062,37 +1125,25 @@ class GPT2VQVAETrainer:
         
         return checkpoint
     
-    def train(self, 
-              train_prompt_sequences: torch.Tensor,
-              train_cot_sequences: torch.Tensor,
-              train_prompt_mask: torch.Tensor,
-              train_cot_mask: torch.Tensor,
-              test_prompt_sequences: torch.Tensor,
-              test_cot_sequences: torch.Tensor,
-              test_prompt_mask: torch.Tensor,
-              test_cot_mask: torch.Tensor,
-              resume_from: Optional[str] = None,
-              num_measurements_per_epoch: Optional[int] = None,
-              seed: int = 42):
+    def _train_with_loaders(self, 
+                           train_loader: DataLoader,
+                           test_loader: DataLoader,
+                           resume_from: Optional[str] = None,
+                           num_measurements_per_epoch: Optional[int] = None,
+                           seed: int = 42):
         """
-        Train the model with memory optimizations using pre-split train and test data.
+        Core training logic that works with pre-created data loaders.
         
         Args:
-            train_prompt_sequences: Training prompt sequences
-            train_cot_sequences: Training CoT sequences
-            train_prompt_mask: Training prompt masks
-            train_cot_mask: Training CoT masks
-            test_prompt_sequences: Test prompt sequences
-            test_cot_sequences: Test CoT sequences
-            test_prompt_mask: Test prompt masks
-            test_cot_mask: Test CoT masks
+            train_loader: Training data loader
+            test_loader: Test data loader
             resume_from: Path to checkpoint to resume from
             num_measurements_per_epoch: Number of metrics saved per epoch
             seed: Random seed for reproducibility
         """
-
         # Start timing
         training_start_time = datetime.now()
+        self.training_start_time = training_start_time  # Store for checkpoint notifications
 
         # FOR DEBUG
         if TRACK_MEMORY:
@@ -1101,13 +1152,9 @@ class GPT2VQVAETrainer:
         # Log initial memory usage
         self.log_memory_usage("training_start")
         
-        # Create train and test datasets directly from provided tensors
-        train_dataset = TensorDataset(train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask)
-        test_dataset = TensorDataset(test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask)
-        
         # Validate dataset sizes
-        train_size = len(train_dataset)
-        test_size = len(test_dataset)
+        train_size = len(train_loader.dataset)
+        test_size = len(test_loader.dataset)
 
         if train_size == 0:
             raise Exception(f"The training dataset has size 0.")
@@ -1126,19 +1173,6 @@ class GPT2VQVAETrainer:
         
         print(f"Training samples: {train_size}")
         print(f"Test samples: {test_size}")
-        
-        # Create data loaders with memory optimizations
-        train_loader = self.create_data_loader(
-            train_dataset,
-            batch_size=self.training_config['batch_size'], 
-            shuffle=True
-        )
-        
-        test_loader = self.create_data_loader(
-            test_dataset,
-            batch_size=self.training_config['batch_size'], 
-            shuffle=False
-        )
         
         # Resume from checkpoint if specified
         start_epoch = 0
@@ -1226,21 +1260,38 @@ class GPT2VQVAETrainer:
                 is_best = test_metrics['loss'] < self.best_val_loss
                 if is_best:
                     self.best_val_loss = test_metrics['loss']
-                    with record_function("## save_checkpoint ##"):
+                    if TRACK_MEMORY:
+                        with record_function("## save_checkpoint ##"):
+                            self.save_checkpoint(epoch + 1, test_metrics, True)
+                    else:
                         self.save_checkpoint(epoch + 1, test_metrics, True)
+                    # Send checkpoint notification
+                    if SEND_NOTIFICATION:
+                        self.send_checkpoint_notification(epoch + 1, is_best=True)
                     # save training visualizations when saving a checkpoint
                     save_training_visualizations(self, prefix=f"epoch_{epoch+1}")
                 
                 if (epoch + 1) % self.training_config.get('save_every', 5) == 0:
-                    with record_function("## save_checkpoint ##"):
+                    if TRACK_MEMORY:
+                        with record_function("## save_checkpoint ##"):
+                            self.save_checkpoint(epoch + 1, test_metrics, False)
+                    else:
                         self.save_checkpoint(epoch + 1, test_metrics, False)
+                    # Send checkpoint notification
+                    if SEND_NOTIFICATION:
+                        self.send_checkpoint_notification(epoch + 1, is_best=False)
                     # save training visualizations when saving a checkpoint
                     save_training_visualizations(self, prefix=f"epoch_{epoch+1}")
                 
                 
                 # Save codebook tracking plots
                 if self.tracking_enabled:
-                    with record_function("## save_codebook_plots ##"):
+                    if TRACK_MEMORY:
+                        with record_function("## save_codebook_plots ##"):
+                            checkpoint_dir = self.training_config.get('checkpoint_dir', 'checkpoints')
+                            codebook_dir = os.path.join(checkpoint_dir, 'codebook_tracking')
+                            self.save_codebook_plots_func(codebook_dir, epoch + 1)
+                    else:
                         checkpoint_dir = self.training_config.get('checkpoint_dir', 'checkpoints')
                         codebook_dir = os.path.join(checkpoint_dir, 'codebook_tracking')
                         self.save_codebook_plots_func(codebook_dir, epoch + 1)
@@ -1317,16 +1368,28 @@ class GPT2VQVAETrainer:
             # Save as a special "aborted" checkpoint if we've trained enough batches
             if total_batches_trained >= minimum_batches:
                 aborted_checkpoint_path = os.path.join(checkpoint_dir, f'aborted_training_epoch_{e.epoch}.pt')
-                with record_function("## save_checkpoint ##"):
+                if TRACK_MEMORY:
+                    with record_function("## save_checkpoint ##"):
+                        self.save_checkpoint(e.epoch, dummy_val_metrics, is_best=False, checkpoint_path=aborted_checkpoint_path)
+                else:
                     self.save_checkpoint(e.epoch, dummy_val_metrics, is_best=False, checkpoint_path=aborted_checkpoint_path)
+                # Send checkpoint notification for aborted training
+                if SEND_NOTIFICATION:
+                    self.send_checkpoint_notification(e.epoch, is_best=False)
                 print(f"Aborted training checkpoint saved (trained {total_batches_trained} batches, threshold: {minimum_batches})")
 
                 # Also save as best model if it's better than previous best
                 if e.metrics['avg_loss'] < self.best_val_loss:
                     self.best_val_loss = e.metrics['avg_loss']
                     best_aborted_path = os.path.join(checkpoint_dir, f'best_model_aborted_epoch_{e.epoch}.pt')
-                    with record_function("## save_checkpoint ##"):
+                    if TRACK_MEMORY:
+                        with record_function("## save_checkpoint ##"):
+                            self.save_checkpoint(e.epoch, dummy_val_metrics, is_best=True, checkpoint_path=best_aborted_path)
+                    else:
                         self.save_checkpoint(e.epoch, dummy_val_metrics, is_best=True, checkpoint_path=best_aborted_path)
+                    # Send checkpoint notification for best aborted model
+                    if SEND_NOTIFICATION:
+                        self.send_checkpoint_notification(e.epoch, is_best=True)
                     print(f"New best model (from aborted training) saved to: {best_aborted_path}")
             else:
                 print(f"Skipping checkpoint save - only trained {total_batches_trained} batches, need at least {minimum_batches}")
@@ -1404,6 +1467,60 @@ class GPT2VQVAETrainer:
         
         # Save comprehensive training visualizations
         save_training_visualizations(self, prefix="training")
+
+    def train(self, 
+              train_prompt_sequences: torch.Tensor,
+              train_cot_sequences: torch.Tensor,
+              train_prompt_mask: torch.Tensor,
+              train_cot_mask: torch.Tensor,
+              test_prompt_sequences: torch.Tensor,
+              test_cot_sequences: torch.Tensor,
+              test_prompt_mask: torch.Tensor,
+              test_cot_mask: torch.Tensor,
+              resume_from: Optional[str] = None,
+              num_measurements_per_epoch: Optional[int] = None,
+              seed: int = 42):
+        """
+        Train the model with memory optimizations using pre-split train and test data.
+        
+        Args:
+            train_prompt_sequences: Training prompt sequences
+            train_cot_sequences: Training CoT sequences
+            train_prompt_mask: Training prompt masks
+            train_cot_mask: Training CoT masks
+            test_prompt_sequences: Test prompt sequences
+            test_cot_sequences: Test CoT sequences
+            test_prompt_mask: Test prompt masks
+            test_cot_mask: Test CoT masks
+            resume_from: Path to checkpoint to resume from
+            num_measurements_per_epoch: Number of metrics saved per epoch
+            seed: Random seed for reproducibility
+        """
+        # Create train and test datasets directly from provided tensors
+        train_dataset = TensorDataset(train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask)
+        test_dataset = TensorDataset(test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask)
+        
+        # Create data loaders with memory optimizations
+        train_loader = self.create_data_loader(
+            train_dataset,
+            batch_size=self.training_config['batch_size'], 
+            shuffle=True
+        )
+        
+        test_loader = self.create_data_loader(
+            test_dataset,
+            batch_size=self.training_config['batch_size'], 
+            shuffle=False
+        )
+        
+        # Call the helper function with the created loaders
+        return self._train_with_loaders(
+            train_loader=train_loader,
+            test_loader=test_loader,
+            resume_from=resume_from,
+            num_measurements_per_epoch=num_measurements_per_epoch,
+            seed=seed
+        )
     
     def plot_training_history(self, save_path: Optional[str] = None, log_scale: bool = False):
         """
@@ -1537,10 +1654,9 @@ class GPT2VQVAETrainer:
     
     def plot_memory_usage(self, save_path: Optional[str] = None):
         """Plot memory usage throughout training."""
-        with record_function("## plot_memory_usage ##"):
-            if not self.memory_stats:
-                print("No memory statistics available")
-                return
+        if not self.memory_stats:
+            print("No memory statistics available")
+            return
         
         # Check if we have GPU memory stats (indicates memory_monitor was used)
         has_gpu_stats = 'gpu_total_gb' in self.memory_stats[0]
@@ -1640,56 +1756,53 @@ def save_training_visualizations(trainer, save_dir: str = None, prefix: str = "t
         save_dir: Directory to save visualizations (defaults to trainer's checkpoint directory)
         prefix: Prefix for saved files
     """
-    with record_function("## save_training_visualizations ##"):
-        DEFAULT_FOLDER = './training_visualizations'
+    DEFAULT_FOLDER = './training_visualizations'
+    try:
+        if save_dir is None:
+            training_config = getattr(trainer, 'training_config', None)
+            if training_config is None:
+                save_dir = DEFAULT_FOLDER
+            else:
+                save_dir = training_config.get('checkpoint_dir', DEFAULT_FOLDER)
+        
+        os.makedirs(save_dir, exist_ok=True)
+        
+        print(f"\n📊 Saving comprehensive training visualizations to {save_dir}")
+        
+        # 1. Training history plots
+        history_path = os.path.join(save_dir, f"{prefix}_history.png")
+        trainer.plot_training_history(history_path)
+        
+        # 2. Memory usage plots
+        memory_path = os.path.join(save_dir, f"{prefix}_memory_usage.png")
+        trainer.plot_memory_usage(memory_path)
+        
+        # 3. Codebook tracking plots (if enabled)
+        if trainer.tracking_enabled:
+            codebook_dir = os.path.join(save_dir, f"{prefix}_codebook_tracking")
+            os.makedirs(codebook_dir, exist_ok=True)
+            
+            # Save current codebook plots
+            if hasattr(trainer, 'save_codebook_plots_func'):
+                trainer.save_codebook_plots_func(codebook_dir, len(trainer.train_losses))
+        
+        print(f"✅ All training visualizations saved successfully!")
+        print(f"   📈 Training history: {history_path}")
+        print(f"   💾 Memory usage: {memory_path}")
+        if trainer.tracking_enabled:
+            print(f"   🎯 Codebook tracking: {codebook_dir}")
+        
+    except Exception as e:
+        print(f"⚠️  Warning: Failed to save some training visualizations: {e}")
+        # Try to save at least basic plots
         try:
             if save_dir is None:
-                training_config = getattr(trainer, 'training_config', None)
-                if training_config is None:
-                    save_dir = DEFAULT_FOLDER
-                else:
-                    save_dir = training_config.get('checkpoint_dir', DEFAULT_FOLDER)
-            
+                save_dir = getattr(trainer, 'checkpoint_dir', './training_visualizations')
             os.makedirs(save_dir, exist_ok=True)
             
-            print(f"\n📊 Saving comprehensive training visualizations to {save_dir}")
-            
-            # 1. Training history plots
-            history_path = os.path.join(save_dir, f"{prefix}_history.png")
-            with record_function("## plot_training_history ##"):
-                trainer.plot_training_history(history_path)
-            
-            # 2. Memory usage plots
-            memory_path = os.path.join(save_dir, f"{prefix}_memory_usage.png")
-            trainer.plot_memory_usage(memory_path)
-            
-            # 3. Codebook tracking plots (if enabled)
-            if trainer.tracking_enabled:
-                codebook_dir = os.path.join(save_dir, f"{prefix}_codebook_tracking")
-                os.makedirs(codebook_dir, exist_ok=True)
-                
-                # Save current codebook plots
-                if hasattr(trainer, 'save_codebook_plots_func'):
-                    trainer.save_codebook_plots_func(codebook_dir, len(trainer.train_losses))
-            
-            print(f"✅ All training visualizations saved successfully!")
-            print(f"   📈 Training history: {history_path}")
-            print(f"   💾 Memory usage: {memory_path}")
-            if trainer.tracking_enabled:
-                print(f"   🎯 Codebook tracking: {codebook_dir}")
-            
-        except Exception as e:
-            print(f"⚠️  Warning: Failed to save some training visualizations: {e}")
-            # Try to save at least basic plots
-            try:
-                if save_dir is None:
-                    save_dir = getattr(trainer, 'checkpoint_dir', './training_visualizations')
-                os.makedirs(save_dir, exist_ok=True)
-                
-                # Fallback: save basic training history
-                history_path = os.path.join(save_dir, f"{prefix}_history_fallback.png")
-                with record_function("## plot_training_history ##"):
-                    trainer.plot_training_history(history_path)
-                print(f"   📈 Basic training history saved: {history_path}")
-            except Exception as fallback_error:
-                print(f"   ❌ Failed to save even basic plots: {fallback_error}")
+            # Fallback: save basic training history
+            history_path = os.path.join(save_dir, f"{prefix}_history_fallback.png")
+            trainer.plot_training_history(history_path)
+            print(f"   📈 Basic training history saved: {history_path}")
+        except Exception as fallback_error:
+            print(f"   ❌ Failed to save even basic plots: {fallback_error}")
