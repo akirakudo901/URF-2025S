@@ -815,9 +815,10 @@ class GPT2VQVAE(nn.Module):
         return padded_cache
         
     def encode(self, prompt_sequences, cot_sequences, prompt_mask=None, cot_mask=None, 
-               aggregate_mode="linear", quantize_cot_only=True):
+               aggregate_mode="linear", quantize_cot_only=True, no_vq=False):
         """
         Encodes prompt sequences and COT sequences, with or without caching based on gradient checkpointing status.
+        If no_vq is True, bypass vector quantization and return aggregated embeddings directly.
         
         Args:
             prompt_sequences (torch.Tensor): Prompt sequences [batch_size, K]
@@ -827,6 +828,7 @@ class GPT2VQVAE(nn.Module):
             aggregate_mode (str): Mode of aggregation
             quantize_cot_only (bool): If True, only quantize COT positions (K to K+L-1). 
                                     If False, quantize all positions (0 to K+L-1).
+            no_vq (bool): If True, bypass vector quantization and return aggregated embeddings.
             
         Returns:
             tuple: (quantized, vq_loss, perplexity, indices) 
@@ -942,6 +944,15 @@ class GPT2VQVAE(nn.Module):
 
         # Aggregate the memory content per-prompt into single chains 
         aggregated = self.aggregate(memory, mode=aggregate_mode) # [batch_size*L or batch_size*(K+L), d_model]
+
+        if no_vq:
+            # For no_vq mode, tile the aggregated embeddings back to match the expected shape
+            quantized = aggregated.unsqueeze(1).expand(-1, M, -1)  # [batch_size*(L or K+L), M, d_model]
+            quantized = quantized.view(batch_size, -1, M, quantized.size(-1))
+            vq_loss = torch.tensor(0.0, device=quantized.device)
+            perplexity = torch.tensor(0.0, device=quantized.device)
+            indices = torch.zeros(batch_size, device=quantized.device, dtype=torch.long)
+            return quantized, vq_loss, perplexity, indices
         
         # Apply VQ
         quantized, vq_loss, perplexity, indices = self.vector_quantizer(aggregated) # [batch_size*L or batch_size*(K+L), d_model]
@@ -1140,9 +1151,10 @@ class GPT2VQVAE(nn.Module):
         # COMMON PROCESSING: Reshape back to [batch_size, M, L, vocab_size]
         return cot_logits.view(batch_size, M, L, -1)
 
-    def forward(self, prompt, cot_sequences, cot_mask=None, prompt_mask=None, inference=False, quantize_cot_only=True, pad_token_id=50256):
+    def forward(self, prompt, cot_sequences, cot_mask=None, prompt_mask=None, inference=False, quantize_cot_only=True, pad_token_id=50256, no_vq=False):
         """
         Forward pass through the model.
+        If no_vq is True, bypass vector quantization and use aggregated embeddings directly.
         
         Args:
             prompt (torch.Tensor): Prompt sequences [batch_size, K] where K is prompt length
@@ -1152,6 +1164,7 @@ class GPT2VQVAE(nn.Module):
             inference (bool): If True, performs inference without teacher forcing
             quantize_cot_only (bool): If True, only quantize the COT portion of sequences
             pad_token_id (int): Token ID to use for padding when K=0, defaults to 50256
+            no_vq (bool): If True, bypass vector quantization and use aggregated embeddings directly.
             
         Returns:
             tuple: (output_sequences, output_logits, vq_loss, perplexity, indices)
@@ -1168,7 +1181,8 @@ class GPT2VQVAE(nn.Module):
         quantized, vq_loss, perplexity, indices = self.encode(
             prompt, cot_sequences, 
             prompt_mask, cot_mask, 
-            quantize_cot_only=quantize_cot_only
+            quantize_cot_only=quantize_cot_only,
+            no_vq=no_vq
         )
         
         # quantized shape depends on quantize_cot_only:
