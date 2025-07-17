@@ -424,7 +424,7 @@ def compute_reconstruction_loss(output_logits: torch.Tensor,
     
     return recon_loss
 
-def create_codebook_usage_heatmap(counts: torch.Tensor, 
+def create_codebook_usage_heatmap(counts_np: np.ndarray, 
                                  num_embeddings: int,
                                  title: str = "Codebook Usage Heatmap",
                                  save_path: Optional[str] = None,
@@ -435,7 +435,7 @@ def create_codebook_usage_heatmap(counts: torch.Tensor,
     Create and optionally save a heatmap showing codebook usage from counts.
     
     Args:
-        counts (torch.Tensor): Tensor of codebook usage counts [num_embeddings]
+        counts_np (np.ndarray): Numpy array of codebook usage counts [num_embeddings]
         num_embeddings (int): Total number of embeddings in the codebook
         title (str): Title for the heatmap
         save_path (Optional[str]): Path to save the heatmap image (if None, only displays)
@@ -444,14 +444,13 @@ def create_codebook_usage_heatmap(counts: torch.Tensor,
         show_counts (bool): Whether to show count values on the heatmap
         
     Example:
-        >>> counts = torch.tensor([10, 5, 3, 0, 2])  # Usage counts for 5 embeddings
+        >>> counts = np.array([10, 5, 3, 0, 2])  # Usage counts for 5 embeddings
         >>> create_codebook_usage_heatmap(counts, num_embeddings=5, save_path="heatmap.png")
     """
-    # Ensure counts is the right shape and convert to numpy
-    if counts.dim() > 1:
-        counts = counts.flatten()
+    # Ensure counts is the right shape
+    if counts_np.ndim > 1:
+        counts_np = counts_np.flatten()
     
-    counts_np = counts.cpu().numpy()
     
     # Create the heatmap
     _, ax = plt.subplots(figsize=figsize)
@@ -545,7 +544,7 @@ def create_codebook_usage_heatmap(counts: torch.Tensor,
     
     plt.close()
 
-def create_codebook_usage_timeline_plot(codebook_history: List[torch.Tensor], 
+def create_codebook_usage_timeline_plot(codebook_history: List[np.ndarray], 
                                       num_embeddings: int,
                                       measurement_points: List[int],
                                       title: str = "Codebook Usage Over Time",
@@ -555,7 +554,7 @@ def create_codebook_usage_timeline_plot(codebook_history: List[torch.Tensor],
     Create a 3D visualization showing codebook usage distribution over time.
     
     Args:
-        codebook_history: List of count tensors, one per measurement point
+        codebook_history: List of count numpy arrays, one per measurement point
         num_embeddings: Total number of embeddings in the codebook
         measurement_points: List of measurement point indices (e.g., batch numbers)
         title: Title for the plot
@@ -566,8 +565,6 @@ def create_codebook_usage_timeline_plot(codebook_history: List[torch.Tensor],
         print("Warning: No codebook history to plot")
         return
     
-    # Convert to numpy arrays
-    history_np = [counts.numpy() for counts in codebook_history]
     
     # Create 3D plot
     fig = plt.figure(figsize=figsize)
@@ -579,7 +576,7 @@ def create_codebook_usage_timeline_plot(codebook_history: List[torch.Tensor],
     X, Y = np.meshgrid(x, y)
     
     # Create Z matrix (usage counts over time)
-    Z = np.array(history_np)
+    Z = np.array(codebook_history)
     
     # Create 3D surface plot
     surf = ax.plot_surface(X, Y, Z, cmap='viridis', alpha=0.8)
@@ -595,7 +592,7 @@ def create_codebook_usage_timeline_plot(codebook_history: List[torch.Tensor],
     
     # Add statistics text
     total_measurements = len(codebook_history)
-    avg_unique_codes = np.mean([(counts > 0).sum() for counts in history_np])
+    avg_unique_codes = np.mean([(counts > 0).sum() for counts in codebook_history])
     stats_text = f'Total measurements: {total_measurements}\nAvg unique codes: {avg_unique_codes:.1f}'
     ax.text2D(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=10,
               verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))

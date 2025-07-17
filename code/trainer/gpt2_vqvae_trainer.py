@@ -38,7 +38,9 @@ except ImportError:
     NVML_AVAILABLE = False
 
 TRACK_MEMORY = False
+TRACK_IN_EPOCH_MEMORY_EVERY_N = 200
 TRACK_IN_EPOCH_MEMORY = False
+TRACK_IN_EPOCH_MEMORY_LOGGING = True
 SEND_NOTIFICATION = True
 
 # Profiler configuration
@@ -351,7 +353,7 @@ class GPT2VQVAETrainer:
         # Codebook usage tracking (legacy - now handled by tracking functions)
         self.codebook_tracking_enabled = self.training_config.get('codebook_tracking_enabled', True)
         self.codebook_sample_size = self.training_config.get('codebook_sample_size', 100)
-        self.codebook_history = []  # List of count tensors over time
+        self.codebook_history = []  # List of count numpy arrays over time
         self.codebook_perplexities = []  # List of perplexities over time
         self.codebook_measurement_points = []  # List of measurement point indices
         
@@ -392,8 +394,8 @@ class GPT2VQVAETrainer:
                 use_vq=self.training_config.get('use_vq', True)
             )
             
-            # Store results - ensure counts are on CPU to prevent GPU memory accumulation
-            self.codebook_history.append(counts.cpu().detach())
+            # Store results - convert to numpy array to prevent GPU memory accumulation
+            self.codebook_history.append(counts.cpu().detach().numpy())
             self.codebook_perplexities.append(perplexity)
             self.codebook_measurement_points.append(measurement_point)
             
@@ -582,7 +584,7 @@ class GPT2VQVAETrainer:
         
         for batch_idx, (prompts, cots, prompt_masks, cot_masks) in enumerate(progress_bar):
             # TODO DEBUG PURPOSE
-            if TRACK_IN_EPOCH_MEMORY:
+            if TRACK_IN_EPOCH_MEMORY and (batch_idx + 1) % TRACK_IN_EPOCH_MEMORY_EVERY_N == 0:
                 self.log_memory_usage(f"before batch {batch_idx}")
             
             # Profiler step if enabled
@@ -595,7 +597,7 @@ class GPT2VQVAETrainer:
             cot_masks = cot_masks.to(self.device, non_blocking=True)
 
             # TODO DEBUG PURPOSE
-            if TRACK_IN_EPOCH_MEMORY:
+            if TRACK_IN_EPOCH_MEMORY and (batch_idx + 1) % TRACK_IN_EPOCH_MEMORY_EVERY_N == 0:
                 self.log_memory_usage(f"after data loading, batch {batch_idx}")
             
             # Forward pass and loss calculation
@@ -610,7 +612,7 @@ class GPT2VQVAETrainer:
                 )
             
             # TODO DEBUG PURPOSE
-            if TRACK_IN_EPOCH_MEMORY:
+            if TRACK_IN_EPOCH_MEMORY and (batch_idx + 1) % TRACK_IN_EPOCH_MEMORY_EVERY_N == 0:
                 self.log_memory_usage(f"after forward pass, batch {batch_idx}")
             
             # Scale loss and backward pass
@@ -629,7 +631,7 @@ class GPT2VQVAETrainer:
                     scaled_loss.backward()
             
             # TODO DEBUG PURPOSE
-            if TRACK_IN_EPOCH_MEMORY:
+            if TRACK_IN_EPOCH_MEMORY and (batch_idx + 1) % TRACK_IN_EPOCH_MEMORY_EVERY_N == 0:
                 self.log_memory_usage(f"after backward pass, batch {batch_idx}")
 
             accumulation_steps += 1
@@ -642,7 +644,7 @@ class GPT2VQVAETrainer:
                 else:
                     self._update_weights()
                 # TODO DEBUG PURPOSE
-                if TRACK_IN_EPOCH_MEMORY:
+                if TRACK_IN_EPOCH_MEMORY and (batch_idx + 1) % TRACK_IN_EPOCH_MEMORY_EVERY_N == 0:
                     self.log_memory_usage(f"after weight update, batch {batch_idx}")
 
             
@@ -698,7 +700,7 @@ class GPT2VQVAETrainer:
             # Log detailed metrics at regular intervals
             if batch_idx % measurement_interval == 0:
                 # TODO DEBUG PURPOSE
-                if TRACK_IN_EPOCH_MEMORY:
+                if TRACK_IN_EPOCH_MEMORY_LOGGING and (batch_idx + 1) % TRACK_IN_EPOCH_MEMORY_EVERY_N == 0:
                     self.log_memory_usage(f"before detailed info, batch {batch_idx}")
 
                 detailed_losses.append(total_loss_batch_item)
@@ -711,7 +713,7 @@ class GPT2VQVAETrainer:
                 if self.tracking_enabled:
 
                     # TODO DEBUG PURPOSE
-                    if TRACK_IN_EPOCH_MEMORY:
+                    if TRACK_IN_EPOCH_MEMORY_LOGGING and (batch_idx + 1) % TRACK_IN_EPOCH_MEMORY_EVERY_N == 0:
                         self.log_memory_usage(f"before getting the dataset, batch {batch_idx}")
 
                     # Get the dataset from the data loader
@@ -720,18 +722,18 @@ class GPT2VQVAETrainer:
                         dataset = dataset.dataset
 
                     # TODO DEBUG PURPOSE
-                    if TRACK_IN_EPOCH_MEMORY:
+                    if TRACK_IN_EPOCH_MEMORY_LOGGING and (batch_idx + 1) % TRACK_IN_EPOCH_MEMORY_EVERY_N == 0:
                         self.log_memory_usage(f"after getting the dataset, batch {batch_idx}")
 
                     self.track_codebook_usage_func(dataset, batch_idx)
 
                     # TODO DEBUG PURPOSE
-                    if TRACK_IN_EPOCH_MEMORY:
+                    if TRACK_IN_EPOCH_MEMORY_LOGGING and (batch_idx + 1) % TRACK_IN_EPOCH_MEMORY_EVERY_N == 0:
                         self.log_memory_usage(f"after running codebook usage function, batch {batch_idx}")
                     
                 
                 # TODO DEBUG PURPOSE
-                if TRACK_IN_EPOCH_MEMORY:
+                if TRACK_IN_EPOCH_MEMORY_LOGGING and (batch_idx + 1) % TRACK_IN_EPOCH_MEMORY_EVERY_N == 0:
                     self.log_memory_usage(f"after detailed info, batch {batch_idx}")
             
             # Update progress bar
@@ -745,27 +747,15 @@ class GPT2VQVAETrainer:
                 'accum_steps': f"{acc_step}/{self.gradient_accumulation_steps}"
             })
 
-            # TODO DEBUG PURPOSE
-            if TRACK_IN_EPOCH_MEMORY:
-                self.log_memory_usage(f"after getting the dataset, batch {batch_idx}")
-            
             # Explicitly delete intermediate tensors to prevent memory accumulation
             del total_loss_batch, recon_loss, vq_loss, perplexity, scaled_loss
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             gc.collect()
         
-        # TODO DEBUG PURPOSE
-        if TRACK_IN_EPOCH_MEMORY:
-            self.log_memory_usage(f"before getting average metrics, batch {batch_idx}")
-
         # Calculate averages
         avg_metrics = self._get_average_metrics(total_loss, total_vq_loss, total_perplexity, num_batches)
         avg_recon_loss = total_recon_loss / num_batches if num_batches > 0 else 0.0
-        
-        # TODO DEBUG PURPOSE
-        if TRACK_IN_EPOCH_MEMORY:
-            self.log_memory_usage(f"after getting average metrics, batch {batch_idx}")
         
         # Return both detailed and average metrics
         return {
@@ -1289,6 +1279,8 @@ class GPT2VQVAETrainer:
                     # save training visualizations when saving a checkpoint
                     save_training_visualizations(self, prefix=f"epoch_{epoch+1}")
                 
+                    self.log_memory_usage(f"epoch_{epoch+1}_after_saving")
+                
                 
                 # Save codebook tracking plots
                 if self.tracking_enabled:
@@ -1301,6 +1293,8 @@ class GPT2VQVAETrainer:
                         checkpoint_dir = self.training_config.get('checkpoint_dir', 'checkpoints')
                         codebook_dir = os.path.join(checkpoint_dir, 'codebook_tracking')
                         self.save_codebook_plots_func(codebook_dir, epoch + 1)
+                
+                    self.log_memory_usage(f"epoch_{epoch+1}_after_saving_codebook")
                 
                 # Clear cache after each epoch
                 if torch.cuda.is_available():
@@ -1660,7 +1654,7 @@ class GPT2VQVAETrainer:
     
     def plot_memory_usage(self, save_path: Optional[str] = None):
         """Plot memory usage throughout training, including CPU RAM."""
-        USE_SEPARATE_AXIS_FOR_CPURAM = False
+        USE_SEPARATE_AXIS_FOR_CPURAM = True
 
         if not self.memory_stats:
             print("No memory statistics available")
