@@ -26,10 +26,6 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
         self._val_loss_increase_count = 0
         self._force_reestimation_phase = False
 
-    def set_val_loader(self, val_loader):
-        """Set the validation loader to be used for auto-switching validation checks."""
-        self._val_loader = val_loader
-
     def train(self, 
               train_prompt_sequences: torch.Tensor,
               train_cot_sequences: torch.Tensor,
@@ -43,7 +39,7 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
               num_measurements_per_epoch: Optional[int] = None,
               seed: int = 42):
         """
-        Override train method to set up auto-switching validation before calling parent.
+        Override train method to set up auto-switching validation before calling the helper function.
         """
         # Create train and test datasets
         train_dataset = torch.utils.data.TensorDataset(train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask)
@@ -57,20 +53,15 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
         total_batches = len(train_loader)
         steps_per_epoch = max(1, total_batches // self.gradient_accumulation_steps)
         self._val_check_interval_steps = max(1, steps_per_epoch // self.validation_checks_per_epoch)
-        self.set_val_loader(val_loader)
+        
+        self._val_loader = val_loader
         
         print(f"[AutoSwitch] Validation checks every {self._val_check_interval_steps} steps ({self.validation_checks_per_epoch} times per epoch)")
         
-        # Call parent train method
-        return super().train(
-            train_prompt_sequences=train_prompt_sequences,
-            train_cot_sequences=train_cot_sequences,
-            train_prompt_mask=train_prompt_mask,
-            train_cot_mask=train_cot_mask,
-            test_prompt_sequences=test_prompt_sequences,
-            test_cot_sequences=test_cot_sequences,
-            test_prompt_mask=test_prompt_mask,
-            test_cot_mask=test_cot_mask,
+        # Call the helper function with the created loaders
+        return self._train_with_loaders(
+            train_loader=train_loader,
+            test_loader=val_loader,
             resume_from=resume_from,
             num_measurements_per_epoch=num_measurements_per_epoch,
             seed=seed
@@ -95,9 +86,9 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
                     self._val_loss_increase_count = 0
             self._val_recon_loss_history.append(val_recon_loss)
             
-            print(f"[AutoSwitch] Step {self.current_step}, Val Recon Loss: {val_recon_loss:.4f}, Increases: {self._val_loss_increase_count}/{self.patience}")
+            print(f"\n[AutoSwitch] Step {self.current_step}, Val Recon Loss: {val_recon_loss:.4f}, Increases: {self._val_loss_increase_count}/{self.patience}")
             if self._val_loss_increase_count >= self.patience:
-                print(f"[AutoSwitch] Switching to reestimation phase at step {self.current_step} (patience={self.patience})")
+                print(f"\n[AutoSwitch] Switching to reestimation phase at step {self.current_step} (patience={self.patience})")
                 self._force_reestimation_phase = True
 
     def _determine_training_phase(self, current_step: int) -> str:
