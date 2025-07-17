@@ -18,6 +18,7 @@ import socket
 from datetime import datetime
 from torch.autograd.profiler import record_function
 import sys
+import psutil
 
 # Add the current directory to the path to import dependencies
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -468,13 +469,13 @@ class GPT2VQVAETrainer:
                 config_dict[key] = bool(value)
     
     def log_memory_usage(self, stage: str):
-        """Log current memory usage using the GPU memory monitor."""
+        """Log current memory usage using the GPU memory monitor and CPU RAM usage."""
+        # CPU RAM usage
+        ram_gb = psutil.virtual_memory().used / (1024 ** 3)
         if self.memory_monitor:
             # Log both GPU and PyTorch memory usage
             gpu_mem = self.memory_monitor.log_memory_usage(stage, print_info=False)
             pytorch_mem = self.memory_monitor.log_pytorch_memory_usage(stage, print_info=False)
-            
-            # Store combined memory stats
             self.memory_stats.append({
                 'stage': stage,
                 'gpu_total_gb': gpu_mem['total_gb'],
@@ -483,28 +484,33 @@ class GPT2VQVAETrainer:
                 'gpu_utilization_percent': gpu_mem['utilization_percent'],
                 'pytorch_allocated_gb': pytorch_mem['allocated_gb'],
                 'pytorch_reserved_gb': pytorch_mem['reserved_gb'],
-                'pytorch_max_allocated_gb': pytorch_mem['max_allocated_gb']
+                'pytorch_max_allocated_gb': pytorch_mem['max_allocated_gb'],
+                'cpu_ram_gb': ram_gb
             })
-            
-            # Print combined information
             print(f"Memory Usage ({stage}):")
             print(f"  GPU: {gpu_mem['used_gb']:.2f}GB used / {gpu_mem['total_gb']:.2f}GB total ({gpu_mem['utilization_percent']:.1f}%)")
             print(f"  PyTorch: {pytorch_mem['allocated_gb']:.2f}GB allocated, {pytorch_mem['reserved_gb']:.2f}GB reserved")
+            print(f"  CPU RAM: {ram_gb:.2f}GB used")
         else:
-            # Fallback to original method if no memory monitor
             if torch.cuda.is_available():
                 allocated = torch.cuda.memory_allocated() / 1e9
                 reserved = torch.cuda.memory_reserved() / 1e9
                 max_allocated = torch.cuda.max_memory_allocated() / 1e9
-                
                 self.memory_stats.append({
                     'stage': stage,
                     'allocated_gb': allocated,
                     'reserved_gb': reserved,
-                    'max_allocated_gb': max_allocated
+                    'max_allocated_gb': max_allocated,
+                    'cpu_ram_gb': ram_gb
                 })
-                
                 print(f"Memory usage ({stage}): {allocated:.2f}GB allocated, {reserved:.2f}GB reserved, {max_allocated:.2f}GB max")
+                print(f"  CPU RAM: {ram_gb:.2f}GB used")
+            else:
+                self.memory_stats.append({
+                    'stage': stage,
+                    'cpu_ram_gb': ram_gb
+                })
+                print(f"Memory usage ({stage}): CPU RAM: {ram_gb:.2f}GB used")
     
 
     
@@ -1653,38 +1659,40 @@ class GPT2VQVAETrainer:
         plt.close()
     
     def plot_memory_usage(self, save_path: Optional[str] = None):
-        """Plot memory usage throughout training."""
+        """Plot memory usage throughout training, including CPU RAM."""
+        USE_SEPARATE_AXIS_FOR_CPURAM = False
+
         if not self.memory_stats:
             print("No memory statistics available")
             return
-        
         # Check if we have GPU memory stats (indicates memory_monitor was used)
         has_gpu_stats = 'gpu_total_gb' in self.memory_stats[0]
-        
+        stages = [stat['stage'] for stat in self.memory_stats]
+        cpu_ram = [stat.get('cpu_ram_gb', 0.0) for stat in self.memory_stats]
         if has_gpu_stats:
-            # Case 1: Both GPU and PyTorch memory tracking
-            fig, axes = plt.subplots(3, 1, figsize=(12, 12))
-            
-            # Extract data
-            stages = [stat['stage'] for stat in self.memory_stats]
+            fig, axes = plt.subplots(3, 1, figsize=(12, 14))
             gpu_used = [stat['gpu_used_gb'] for stat in self.memory_stats]
             gpu_total = [stat['gpu_total_gb'] for stat in self.memory_stats]
             gpu_utilization = [stat['gpu_utilization_percent'] for stat in self.memory_stats]
             pytorch_allocated = [stat['pytorch_allocated_gb'] for stat in self.memory_stats]
             pytorch_reserved = [stat['pytorch_reserved_gb'] for stat in self.memory_stats]
             pytorch_max_allocated = [stat['pytorch_max_allocated_gb'] for stat in self.memory_stats]
-            
             # Plot GPU memory usage
             axes[0].plot(range(len(stages)), gpu_used, label='GPU Used', marker='o', color='blue')
             axes[0].plot(range(len(stages)), gpu_total, label='GPU Total', marker='s', color='red', linestyle='--')
-            axes[0].set_title('GPU Memory Usage Throughout Training')
+            
+            ax2 = axes[0].twinx() if USE_SEPARATE_AXIS_FOR_CPURAM else axes[0]
+
+            ax2.plot(range(len(stages)), cpu_ram, label='CPU RAM Used', color='purple', marker='x', linestyle=':')
+            axes[0].set_title('GPU and CPU Memory Usage Throughout Training')
             axes[0].set_xlabel('Training Stage')
-            axes[0].set_ylabel('Memory (GB)')
-            axes[0].legend()
+            axes[0].set_ylabel('GPU Memory (GB)')
+            ax2.set_ylabel('CPU RAM (GB)')
+            axes[0].legend(loc='upper left')
+            ax2.legend(loc='upper right')
             axes[0].grid(True)
             axes[0].set_xticks(range(len(stages)))
             axes[0].set_xticklabels(stages, rotation=45, ha='right')
-            
             # Plot GPU utilization
             axes[1].plot(range(len(stages)), gpu_utilization, label='GPU Utilization', color='green', marker='^')
             axes[1].set_title('GPU Memory Utilization')
@@ -1694,56 +1702,64 @@ class GPT2VQVAETrainer:
             axes[1].grid(True)
             axes[1].set_xticks(range(len(stages)))
             axes[1].set_xticklabels(stages, rotation=45, ha='right')
-            
             # Plot PyTorch memory usage
             axes[2].plot(range(len(stages)), pytorch_allocated, label='PyTorch Allocated', marker='o')
             axes[2].plot(range(len(stages)), pytorch_reserved, label='PyTorch Reserved', marker='s')
             axes[2].plot(range(len(stages)), pytorch_max_allocated, label='PyTorch Max Allocated', color='red', marker='^')
-            axes[2].set_title('PyTorch Memory Usage')
+            
+            # again, can choose between using the same or a separate axis
+            ax3 = axes[2].twinx() if USE_SEPARATE_AXIS_FOR_CPURAM else axes[2]
+            
+            ax3.plot(range(len(stages)), cpu_ram, label='CPU RAM Used', color='purple', marker='x', linestyle=':')
+            axes[2].set_title('PyTorch and CPU Memory Usage')
             axes[2].set_xlabel('Training Stage')
-            axes[2].set_ylabel('Memory (GB)')
-            axes[2].legend()
+            axes[2].set_ylabel('PyTorch Memory (GB)')
+            ax3.set_ylabel('CPU RAM (GB)')
+            axes[2].legend(loc='upper left')
+            ax3.legend(loc='upper right')
             axes[2].grid(True)
             axes[2].set_xticks(range(len(stages)))
             axes[2].set_xticklabels(stages, rotation=45, ha='right')
-            
         else:
-            # Case 2: Only PyTorch memory tracking (fallback case)
             fig, axes = plt.subplots(2, 1, figsize=(12, 8))
-            
-            # Extract data
-            stages = [stat['stage'] for stat in self.memory_stats]
             allocated = [stat['allocated_gb'] for stat in self.memory_stats]
             reserved = [stat['reserved_gb'] for stat in self.memory_stats]
             max_allocated = [stat['max_allocated_gb'] for stat in self.memory_stats]
-            
             # Plot allocated vs reserved memory
             axes[0].plot(range(len(stages)), allocated, label='Allocated', marker='o')
             axes[0].plot(range(len(stages)), reserved, label='Reserved', marker='s')
-            axes[0].set_title('PyTorch Memory Usage Throughout Training')
+
+            ax2 = axes[0].twinx() if USE_SEPARATE_AXIS_FOR_CPURAM else axes[0]
+
+            ax2.plot(range(len(stages)), cpu_ram, label='CPU RAM Used', color='purple', marker='x', linestyle=':')
+            axes[0].set_title('PyTorch and CPU Memory Usage Throughout Training')
             axes[0].set_xlabel('Training Stage')
-            axes[0].set_ylabel('Memory (GB)')
-            axes[0].legend()
+            axes[0].set_ylabel('PyTorch Memory (GB)')
+            ax2.set_ylabel('CPU RAM (GB)')
+            axes[0].legend(loc='upper left')
+            ax2.legend(loc='upper right')
             axes[0].grid(True)
             axes[0].set_xticks(range(len(stages)))
             axes[0].set_xticklabels(stages, rotation=45, ha='right')
-            
             # Plot max allocated memory
             axes[1].plot(range(len(stages)), max_allocated, label='Max Allocated', color='red', marker='^')
-            axes[1].set_title('Maximum PyTorch Memory Usage')
+            
+            ax3 = axes[1].twinx() if USE_SEPARATE_AXIS_FOR_CPURAM else axes[1]
+            
+            ax3.plot(range(len(stages)), cpu_ram, label='CPU RAM Used', color='purple', marker='x', linestyle=':')
+            axes[1].set_title('Maximum PyTorch and CPU Memory Usage')
             axes[1].set_xlabel('Training Stage')
-            axes[1].set_ylabel('Memory (GB)')
-            axes[1].legend()
+            axes[1].set_ylabel('PyTorch Memory (GB)')
+            ax3.set_ylabel('CPU RAM (GB)')
+            axes[1].legend(loc='upper left')
+            ax3.legend(loc='upper right')
             axes[1].grid(True)
             axes[1].set_xticks(range(len(stages)))
             axes[1].set_xticklabels(stages, rotation=45, ha='right')
-        
         plt.tight_layout()
-        
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             print(f"Memory usage plot saved to {save_path}")
-        
         plt.close()
 
 
