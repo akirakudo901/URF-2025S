@@ -499,7 +499,9 @@ class GPT2VQVAE(nn.Module):
                  encoder_dropout=None, encoder_activation_function=None,
                  # Decoder-specific parameters (take precedence over unified if specified)
                  decoder_n_layer=None, decoder_n_head=None, decoder_n_inner=None,
-                 decoder_dropout=None, decoder_activation_function=None):
+                 decoder_dropout=None, decoder_activation_function=None,
+                 # Only latent decode mode
+                 only_latent_decode=False):
         """
         GPT2-based VQ-VAE model that uses GPT2 as both encoder and decoder.
         
@@ -540,8 +542,10 @@ class GPT2VQVAE(nn.Module):
             decoder_n_inner (int, optional): Dimensionality of decoder inner feed-forward layers
             decoder_dropout (float, optional): Dropout probability for decoder
             decoder_activation_function (str, optional): Activation function for decoder
+            only_latent_decode (bool): If True, decoder ignores cross-attention and decodes from prompt embeddings + latents only.
         """
         super(GPT2VQVAE, self).__init__()
+        self.only_latent_decode = only_latent_decode
 
         # TODO ADD INITIALIZATION FOR ENCODER, DECODER AND MLP
         # THOUGHT: COULD ADD output_attentions=True FOR DEBUGGING (E.G. FOR HAND-MADE CROSS-ATTENTION MASK OF DECODER)
@@ -592,6 +596,8 @@ class GPT2VQVAE(nn.Module):
             attn_pdrop=final_decoder_dropout,
             activation_function=final_decoder_activation_function,
         )
+        if self.only_latent_decode:
+            self.decoder_config.add_cross_attention = False
         
         # Initialize encoder with or without pretrained weights
         if use_pretrained_encoder:
@@ -951,7 +957,7 @@ class GPT2VQVAE(nn.Module):
 
     def decode(self, memory, prompt_sequences, cot_sequences, prompt_mask=None, cot_mask=None, pad_token_id=0):
         """
-        Decodes using GPT2 decoder with or without caching based on gradient checkpointing status.
+        Decodes using GPT2 decoder. If only_latent_decode is True, decoder ignores cross-attention and decodes from prompt embeddings + latents only.
         
         Args:
             memory (torch.Tensor): Encoded memory [batch_size, L, M, d_model]
@@ -964,6 +970,44 @@ class GPT2VQVAE(nn.Module):
         Returns:
             torch.Tensor: Decoded output logits [batch_size, M, L, vocab_size] (only COT positions)
         """
+        if self.only_latent_decode:
+            # memory: [batch_size, M, L, d_model] or [batch_size, L, d_model] (if M=1)
+            # prompt_sequences: [batch_size, K]
+            # cot_sequences: [batch_size, M, L]
+            batch_size, K = prompt_sequences.shape
+            _, M, L = cot_sequences.shape
+            # Reshape memory to [batch_size * M, L, d_model]
+            memory = memory.transpose(1, 2).reshape(batch_size * M, L, -1)
+            # Prepare prompt embeddings [batch_size, K, d_model] -> [batch_size, M, K, d_model] -> [batch_size * M, K, d_model]
+            prompt_embeds = self.decoder.transformer.wte(prompt_sequences)  # [batch_size, K, d_model]
+            prompt_embeds = prompt_embeds.unsqueeze(1).expand(-1, M, -1, -1).reshape(batch_size * M, K, -1)
+            # Concatenate prompt embeddings and latents
+            decoder_inputs_embeds = torch.cat([prompt_embeds, memory], dim=1)  # [batch_size * M, K + L, d_model]
+            # Build attention mask if provided
+            if prompt_mask is not None:
+                prompt_mask_expanded = prompt_mask.unsqueeze(1).expand(-1, M, -1).reshape(batch_size * M, K)
+            else:
+                prompt_mask_expanded = torch.ones(batch_size * M, K, device=memory.device)
+            if cot_mask is not None:
+                cot_mask_flat = cot_mask.view(batch_size * M, L)
+            else:
+                cot_mask_flat = torch.ones(batch_size * M, L, device=memory.device)
+            attention_mask = torch.cat([prompt_mask_expanded, cot_mask_flat], dim=1)  # [batch_size * M, K + L]
+            # Run decoder with no cross-attention, using inputs_embeds
+            decoder_outputs = self.decoder(
+                input_ids=None,
+                inputs_embeds=decoder_inputs_embeds,
+                attention_mask=attention_mask,
+                encoder_hidden_states=None,
+                encoder_attention_mask=None,
+                use_cache=False,
+                return_dict=True
+            )
+            all_logits = decoder_outputs.logits  # [batch_size * M, K + L, vocab_size]
+            # Return only logits for the latent (COT) positions (after prompt)
+            cot_logits = all_logits[:, K:, :]  # [batch_size * M, L, vocab_size]
+            return cot_logits.view(batch_size, M, L, -1)
+        
         batch_size, K = prompt_sequences.shape
         _, M, L = cot_sequences.shape
         

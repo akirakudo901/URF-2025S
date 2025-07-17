@@ -28,7 +28,9 @@ class SimpleGPT2VQVAE(GPT2VQVAE):
                  encoder_dropout=None, encoder_activation_function=None,
                  # Decoder-specific parameters (take precedence over unified if specified)
                  decoder_n_layer=None, decoder_n_head=None, decoder_n_inner=None,
-                 decoder_dropout=None, decoder_activation_function=None):
+                 decoder_dropout=None, decoder_activation_function=None,
+                 # Only latent decode mode
+                 only_latent_decode=False):
         """
         Simple GPT2-based VQ-VAE model that uses GPT2 as both encoder and decoder.
         This version handles single chain-of-thought per prompt (no aggregation needed).
@@ -68,85 +70,38 @@ class SimpleGPT2VQVAE(GPT2VQVAE):
             decoder_n_inner (int, optional): Dimensionality of decoder inner feed-forward layers
             decoder_dropout (float, optional): Dropout probability for decoder
             decoder_activation_function (str, optional): Activation function for decoder
+            only_latent_decode (bool): If True, decoder ignores cross-attention and decodes from prompt embeddings + latents only.
         """
         # Call nn.Module constructor directly instead of parent
-        super(GPT2VQVAE, self).__init__()
-
-        # Apply unified parameters as defaults, then override with specific parameters if provided
-        final_encoder_n_layer = encoder_n_layer if encoder_n_layer is not None else n_layer
-        final_encoder_n_head = encoder_n_head if encoder_n_head is not None else n_head
-        final_encoder_n_inner = encoder_n_inner if encoder_n_inner is not None else n_inner
-        final_encoder_dropout = encoder_dropout if encoder_dropout is not None else dropout
-        final_encoder_activation_function = encoder_activation_function if encoder_activation_function is not None else activation_function
-        
-        final_decoder_n_layer = decoder_n_layer if decoder_n_layer is not None else n_layer
-        final_decoder_n_head = decoder_n_head if decoder_n_head is not None else n_head
-        final_decoder_n_inner = decoder_n_inner if decoder_n_inner is not None else n_inner
-        final_decoder_dropout = decoder_dropout if decoder_dropout is not None else dropout
-        final_decoder_activation_function = decoder_activation_function if decoder_activation_function is not None else activation_function
-        
-        # Handle None values for n_inner parameters
-        if final_encoder_n_inner == "None": final_encoder_n_inner = None
-        if final_decoder_n_inner == "None": final_decoder_n_inner = None
-
-        # Create encoder config with encoder-specific parameters
-        self.encoder_config = GPT2Config(
+        super().__init__(
             vocab_size=vocab_size,
-            n_embd=d_model,
+            d_model=d_model,
+            num_embeddings=num_embeddings,
+            commitment_cost=commitment_cost,
+            aggregation_hidden_dim=None,  # Not used in simple version
+            num_thoughts=1,  # Single chain per prompt
             n_positions=n_positions,
-            n_layer=final_encoder_n_layer,
-            n_head=final_encoder_n_head,
-            n_inner=final_encoder_n_inner,
-            resid_pdrop=final_encoder_dropout,
-            embd_pdrop=final_encoder_dropout,
-            attn_pdrop=final_encoder_dropout,
-            activation_function=final_encoder_activation_function,
+            use_pretrained_encoder=use_pretrained_encoder,
+            use_pretrained_decoder=use_pretrained_decoder,
+            pretrained_model_name=pretrained_model_name,
+            n_layer=n_layer,
+            n_head=n_head,
+            n_inner=n_inner,
+            dropout=dropout,
+            activation_function=activation_function,
+            encoder_n_layer=encoder_n_layer,
+            encoder_n_head=encoder_n_head,
+            encoder_n_inner=encoder_n_inner,
+            encoder_dropout=encoder_dropout,
+            encoder_activation_function=encoder_activation_function,
+            decoder_n_layer=decoder_n_layer,
+            decoder_n_head=decoder_n_head,
+            decoder_n_inner=decoder_n_inner,
+            decoder_dropout=decoder_dropout,
+            decoder_activation_function=decoder_activation_function,
+            only_latent_decode=only_latent_decode
         )
-        
-        # Create decoder config with decoder-specific parameters and cross-attention
-        self.decoder_config = GPT2Config(
-            vocab_size=vocab_size,
-            n_embd=d_model,
-            n_positions=n_positions,
-            add_cross_attention=True,  # Enable cross-attention for decoder
-            is_decoder=True,  # Mark as decoder
-            n_layer=final_decoder_n_layer,
-            n_head=final_decoder_n_head,
-            n_inner=final_decoder_n_inner,
-            resid_pdrop=final_decoder_dropout,
-            embd_pdrop=final_decoder_dropout,
-            attn_pdrop=final_decoder_dropout,
-            activation_function=final_decoder_activation_function,
-        )
-        
-        # Initialize encoder with or without pretrained weights
-        if use_pretrained_encoder:
-            print(f"\nLoading pretrained {pretrained_model_name} weights for encoder...")
-            self.encoder = GPT2Model.from_pretrained(pretrained_model_name, config=self.encoder_config)
-            # Ensure the encoder uses our config (in case vocab_size differs)
-            if self.encoder.config.vocab_size != vocab_size:
-                print(f"Warning: Pretrained model vocab_size ({self.encoder.config.vocab_size}) "
-                      f"differs from specified vocab_size ({vocab_size}). "
-                      f"Using specified vocab_size.")
-                self.encoder.resize_token_embeddings(vocab_size)
-        else:
-            print("\nInitializing encoder with random weights...")
-            self.encoder = GPT2Model(self.encoder_config)
-        
-        # Initialize decoder with or without pretrained weights
-        if use_pretrained_decoder:
-            print(f"Loading pretrained {pretrained_model_name} weights for decoder...")
-            self.decoder = CustomGPT2LMHeadModel.from_pretrained(pretrained_model_name, config=self.decoder_config)
-            # Ensure the decoder uses our config
-            if self.decoder.config.vocab_size != vocab_size:
-                print(f"Warning: Pretrained model vocab_size ({self.decoder.config.vocab_size}) "
-                      f"differs from specified vocab_size ({vocab_size}). "
-                      f"Using specified vocab_size.")
-                self.decoder.resize_token_embeddings(vocab_size)
-        else:
-            print("Initializing decoder with random weights...")
-            self.decoder = CustomGPT2LMHeadModel(self.decoder_config)
-        
+
         # Vector Quantizer
         self.vector_quantizer = VectorQuantizer(num_embeddings, d_model, commitment_cost)
         
