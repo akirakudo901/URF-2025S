@@ -139,6 +139,9 @@ def main():
     parser.add_argument('--no-figure-analyses', dest='do_figure_analyses', action='store_false',
                        help='Disable figure analyses and visualizations in demonstration mode')
     
+    parser.add_argument('--only-latent-decode', action='store_true', default=False,
+                       help='Enable only_latent_decode mode for the model (default: False)')
+    
     args = parser.parse_args()
     
     # Validate phased training arguments
@@ -391,6 +394,10 @@ def main():
                   f"to command-line value: {num_thoughts}")
             # Update model config for consistency
             model_config['num_thoughts'] = num_thoughts
+        
+        if args.only_latent_decode:
+            model_config['only_latent_decode'] = True
+            print('Enabling only_latent_decode mode (--only-latent-decode flag)')
         
         print(f"Loading data from: {data_dir}")
         if num_thoughts is not None:

@@ -199,7 +199,7 @@ def load_config(config_path: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     return model_config, training_config
 
 
-def create_default_config(output_path: str, enhanced_vq: bool = False, phased_training: bool = False, memory_optimized_tracking: bool = False):
+def create_default_config(output_path: str, enhanced_vq: bool = False, phased_training: bool = False, memory_optimized_tracking: bool = False, only_latent_decode: bool = False):
     """
     Create a default configuration file with memory optimizations.
     
@@ -207,6 +207,8 @@ def create_default_config(output_path: str, enhanced_vq: bool = False, phased_tr
         output_path: Path where to save the default config
         enhanced_vq: Whether to include enhanced VQ-VAE configuration options
         phased_training: Whether to include phased training configuration options (requires enhanced_vq=True)
+        memory_optimized_tracking: Whether to use memory-optimized codebook tracking
+        only_latent_decode: Whether to enable only_latent_decode mode (default: False)
     """
     # Validate phased training requires enhanced VQ-VAE
     if phased_training and not enhanced_vq:
@@ -221,6 +223,7 @@ def create_default_config(output_path: str, enhanced_vq: bool = False, phased_tr
         'aggregation_hidden_dim': 1024,  # Aggregation MLP hidden dim
         'num_thoughts': 40,   # Number of parallel sequences
         'n_positions': 1024,   # Maximum sequence length
+        'only_latent_decode': False, # If True, decoder ignores cross-attention and decodes from prompt embeddings + latents only
         # Pretrained model settings
         'use_pretrained_encoder': True,  # Load pretrained weights for encoder
         'use_pretrained_decoder': True,  # and decoder
