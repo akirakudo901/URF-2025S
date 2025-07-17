@@ -1155,17 +1155,18 @@ class GPT2VQVAE(nn.Module):
         """
         Forward pass through the model.
         If no_vq is True, bypass vector quantization and use aggregated embeddings directly.
+        If self.only_latent_decode is True, always decode in a single pass regardless of 'inference'.
         
         Args:
             prompt (torch.Tensor): Prompt sequences [batch_size, K] where K is prompt length
             cot_sequences (torch.Tensor): Chain-of-thought sequences [batch_size, M, L]
             cot_mask (torch.Tensor, optional): Chain-of-thought attention mask for padding
             prompt_mask (torch.Tensor, optional): Prompt attention mask for padding
-            inference (bool): If True, performs inference without teacher forcing
+            inference (bool): If True, performs inference without teacher forcing (ignored if only_latent_decode is True)
             quantize_cot_only (bool): If True, only quantize the COT portion of sequences
             pad_token_id (int): Token ID to use for padding when K=0, defaults to 50256
             no_vq (bool): If True, bypass vector quantization and use aggregated embeddings directly.
-            
+        
         Returns:
             tuple: (output_sequences, output_logits, vq_loss, perplexity, indices)
                 - output_sequences: Generated token sequences [batch_size, M, L]
@@ -1191,10 +1192,15 @@ class GPT2VQVAE(nn.Module):
         else:                          # if False: [batch_size, K+L, M, d_model] (all positions)
             cot_quantized = quantized[:, K:, :, :]
         
+        if self.only_latent_decode:
+            # Always decode in a single pass, regardless of 'inference'
+            output_logits = self.decode(cot_quantized, prompt, cot_sequences, prompt_mask, cot_mask, pad_token_id)
+            output_sequences = torch.argmax(output_logits, dim=-1)
+            return output_sequences, output_logits, vq_loss, perplexity, indices
+        
         if not inference:
             # During training, use teacher forcing with single forward pass to get all logits
             output_logits = self.decode(cot_quantized, prompt, cot_sequences, prompt_mask, cot_mask, pad_token_id) # [batch_size, M, L, vocab_size]
-            
             # Get the predicted tokens from logits
             output_sequences = torch.argmax(output_logits, dim=-1)
         else:
@@ -1206,7 +1212,6 @@ class GPT2VQVAE(nn.Module):
             # During inference, generate sequence auto-regressively
             for t in range(L):
                 current_output = self.decode(cot_quantized, prompt, output_sequences, prompt_mask, cot_mask, pad_token_id)
-                
                 # Get next token predictions
                 output_logits[:, :, t, :] = current_output[:, :, t, :]  # [batch_size, M, L, vocab_size]
                 output_sequences[:, :, t] = torch.argmax(output_logits[:, :, t, :], dim=-1)  # [batch_size, M, L]
