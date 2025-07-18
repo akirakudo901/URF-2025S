@@ -366,10 +366,11 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         checkpoint_dir = self.training_config.get('checkpoint_dir', 'checkpoints')
         if is_best:
             if remove_other_best_models:
-                # Remove only best model checkpoints from the same phase
-                for file in os.listdir(checkpoint_dir):
-                    if file.startswith(f'best_model_{phase}_') and file.endswith('.pt'):
-                        os.remove(os.path.join(checkpoint_dir, file))
+                # Remove only best model checkpoints from the same phase if folder exists
+                if os.path.exists(checkpoint_dir):
+                    for file in os.listdir(checkpoint_dir):
+                        if file.startswith(f'best_model_{phase}_') and file.endswith('.pt'):
+                            os.remove(os.path.join(checkpoint_dir, file))
             if checkpoint_path is None:
                 checkpoint_path = os.path.join(checkpoint_dir, f'best_model_{phase}_epoch_{epoch}.pt')
         super().save_checkpoint(epoch, metrics, is_best, checkpoint_path, remove_other_best_models=False, **kwargs)
