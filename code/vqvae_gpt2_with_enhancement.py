@@ -6,9 +6,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
+import numpy as np
 from typing import Optional
 from sklearn.cluster import KMeans
-from collections import deque
 
 from transformers.cache_utils import DynamicCache
 
@@ -28,7 +28,9 @@ class ReservoirSampler:
     def __init__(self, reservoir_size=10000, embedding_size=None):
         self.reservoir_size = reservoir_size
         self.embedding_size = embedding_size
-        self.reservoir = deque(maxlen=reservoir_size)
+        # Use numpy arrays instead of PyTorch tensors to avoid memory leaks
+        self.reservoir = None
+        self.reservoir_count = 0
         self.count = 0
     
     def _validate_and_flatten_sample(self, sample):
@@ -52,6 +54,12 @@ class ReservoirSampler:
         
         return sample
     
+    def _initialize_reservoir(self, sample_shape):
+        """Initialize the reservoir numpy array with the correct shape."""
+        if self.reservoir is None:
+            self.reservoir = np.zeros((self.reservoir_size, sample_shape[-1]), dtype=np.float32)
+            self.reservoir_count = 0
+    
     def add_sample(self, sample):
         """
         Add a sample to the reservoir using reservoir sampling.
@@ -61,14 +69,24 @@ class ReservoirSampler:
         """
         sample = self._validate_and_flatten_sample(sample)
         
+        # Convert to numpy and ensure it's the right shape
+        if sample.dim() == 1:
+            sample_np = sample.detach().cpu().numpy()
+        else:
+            sample_np = sample.detach().cpu().numpy()
+        
+        # Initialize reservoir if needed
+        self._initialize_reservoir(sample_np.shape)
+        
         self.count += 1
-        if len(self.reservoir) < self.reservoir_size:
-            self.reservoir.append(sample)
+        if self.reservoir_count < self.reservoir_size:
+            self.reservoir[self.reservoir_count] = sample_np
+            self.reservoir_count += 1
         else:
             # Reservoir sampling: replace with probability reservoir_size/count
             if torch.rand(1).item() < self.reservoir_size / self.count:
                 idx = torch.randint(0, self.reservoir_size, (1,)).item()
-                self.reservoir[idx] = sample
+                self.reservoir[idx] = sample_np
     
     def add_samples(self, samples):
         """
@@ -90,22 +108,29 @@ class ReservoirSampler:
             self.add_sample(samples)
             return
         
-        batch_size = samples.shape[0]
+        # Convert to numpy for efficient processing
+        samples_np = samples.detach().cpu().numpy()
+        batch_size = samples_np.shape[0]
+        
+        # Initialize reservoir if needed
+        self._initialize_reservoir(samples_np.shape)
         
         # First, fill the reservoir if it's not full
-        remaining_capacity = max(0, self.reservoir_size - len(self.reservoir))
+        remaining_capacity = max(0, self.reservoir_size - self.reservoir_count)
         samples_to_fill = min(remaining_capacity, batch_size)
         
         if samples_to_fill > 0:
             # Add samples to fill the reservoir
-            for i in range(samples_to_fill):
-                self.reservoir.append(samples[i])
+            start_idx = self.reservoir_count
+            end_idx = start_idx + samples_to_fill
+            self.reservoir[start_idx:end_idx] = samples_np[:samples_to_fill]
+            self.reservoir_count += samples_to_fill
             self.count += samples_to_fill
-            samples = samples[samples_to_fill:]  # Remove used samples
+            samples_np = samples_np[samples_to_fill:]  # Remove used samples
             batch_size -= samples_to_fill
         
         # If we still have samples and reservoir is full, use reservoir sampling
-        if batch_size > 0 and len(self.reservoir) >= self.reservoir_size:
+        if batch_size > 0 and self.reservoir_count >= self.reservoir_size:
             # Generate all random numbers at once for efficiency
             random_values = torch.rand(batch_size)
             reservoir_ratio = self.reservoir_size / (self.count + torch.arange(batch_size, dtype=torch.float))
@@ -119,7 +144,7 @@ class ReservoirSampler:
             # Apply replacements
             for i, (should_replace, idx) in enumerate(zip(replace_mask, replace_indices)):
                 if should_replace:
-                    self.reservoir[idx] = samples[i]
+                    self.reservoir[idx] = samples_np[i]
             
             self.count += batch_size
     
@@ -134,23 +159,53 @@ class ReservoirSampler:
         Returns:
             torch.Tensor: Requested samples from reservoir, or None if reservoir is empty
         """
-        if num_samples is None:
-            num_samples = len(self.reservoir)
-        if len(self.reservoir) == 0:
+        if self.reservoir is None or self.reservoir_count == 0:
             return None
+            
+        if num_samples is None:
+            num_samples = self.reservoir_count
+        if num_samples > self.reservoir_count:
+            num_samples = self.reservoir_count
         
-        # Convert to tensor
-        samples = torch.stack(list(self.reservoir))
-        if num_samples > len(samples):
-            num_samples = len(samples)
+        # Get the actual samples (only the filled portion)
+        actual_samples = self.reservoir[:self.reservoir_count]
         
         if shuffle:
-            # Return shuffled samples
-            indices = torch.randperm(len(samples))[:num_samples]
-            return samples[indices]
+            # Shuffle and return requested number of samples
+            indices = np.random.permutation(self.reservoir_count)[:num_samples]
+            selected_samples = actual_samples[indices]
         else:
             # Return first num_samples without shuffling
-            return samples[:num_samples]
+            selected_samples = actual_samples[:num_samples]
+        
+        # Convert back to PyTorch tensor
+        return torch.from_numpy(selected_samples).float()
+    
+    def clear_reservoir(self):
+        """Clear the reservoir to free memory."""
+        self.reservoir = None
+        self.reservoir_count = 0
+        self.count = 0
+    
+    def get_memory_usage(self):
+        """Get memory usage information about the reservoir."""
+        if self.reservoir is None:
+            return {
+                'reservoir_size': 0,
+                'reservoir_count': 0,
+                'memory_bytes': 0,
+                'memory_mb': 0.0
+            }
+        
+        memory_bytes = self.reservoir.nbytes
+        memory_mb = memory_bytes / (1024 * 1024)
+        
+        return {
+            'reservoir_size': self.reservoir_size,
+            'reservoir_count': self.reservoir_count,
+            'memory_bytes': memory_bytes,
+            'memory_mb': memory_mb
+        }
 
 class EnhancedVectorQuantizer(nn.Module):
     def __init__(self, num_embeddings: int, embedding_dim: int, 
@@ -500,7 +555,8 @@ class EnhancedVectorQuantizer(nn.Module):
         
         if self.training:
             # Add to reservoir for future re-initialization
-            self.reservoir_sampler.add_samples(normalized_inputs.detach().clone().cpu())
+            # Use detach() only to avoid gradient tracking, no need for clone() since we convert to numpy
+            self.reservoir_sampler.add_samples(normalized_inputs.detach())
             
             # Update EMA statistics
             if self.use_ema:
@@ -592,8 +648,9 @@ class EnhancedVectorQuantizer(nn.Module):
                 })
         
         # Add reservoir information
-        stats['reservoir_size'] = len(self.reservoir_sampler.reservoir)
-        stats['reservoir_count'] = self.reservoir_sampler.count
+        stats['reservoir_size'] = self.reservoir_sampler.reservoir_size
+        stats['reservoir_count'] = self.reservoir_sampler.reservoir_count
+        stats['reservoir_memory_usage'] = self.reservoir_sampler.get_memory_usage()
         stats['reset_strategy'] = self.reset_strategy
         stats['batch_norm_enabled'] = self.is_batch_norm_enabled()
         
@@ -785,6 +842,26 @@ class EnhancedVectorQuantizer(nn.Module):
             bool: True if batch normalization is enabled, False otherwise
         """
         return self.use_batch_norm and self.batch_norm is not None
+    
+    def clear_reservoir(self):
+        """
+        Clear the reservoir sampler to free memory.
+        This is useful when you want to free up memory during training.
+        """
+        if hasattr(self, 'reservoir_sampler'):
+            self.reservoir_sampler.clear_reservoir()
+            print("Reservoir cleared to free memory")
+    
+    def get_reservoir_memory_usage(self):
+        """
+        Get memory usage information about the reservoir sampler.
+        
+        Returns:
+            dict: Dictionary containing memory usage information
+        """
+        if hasattr(self, 'reservoir_sampler'):
+            return self.reservoir_sampler.get_memory_usage()
+        return {'error': 'reservoir_sampler not found'}
 
 
 class EnhancedGPT2VQVAE(GPT2VQVAE):
@@ -950,6 +1027,22 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             bool: True if batch normalization is enabled, False otherwise
         """
         return self.vector_quantizer.is_batch_norm_enabled()
+    
+    def clear_reservoir(self):
+        """
+        Clear the reservoir sampler to free memory.
+        This is useful when you want to free up memory during training.
+        """
+        self.vector_quantizer.clear_reservoir()
+    
+    def get_reservoir_memory_usage(self):
+        """
+        Get memory usage information about the reservoir sampler.
+        
+        Returns:
+            dict: Dictionary containing memory usage information
+        """
+        return self.vector_quantizer.get_reservoir_memory_usage()
     
     @classmethod
     def from_checkpoint(cls, checkpoint_path: str, device: Optional[str] = None, **kwargs):
