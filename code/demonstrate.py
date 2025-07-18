@@ -493,7 +493,7 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                 counts_tf = torch.bincount(combined_indices_tf[combined_indices_tf < num_embeddings], 
                                           minlength=num_embeddings)
                 create_codebook_usage_heatmap(
-                    counts_tf.numpy(), 
+                    counts_tf.cpu().numpy(), 
                     num_embeddings=num_embeddings,
                     title=f"Teacher Forcing Codebook Usage - All {num_examples} Examples ({split_name})",
                     save_path=heatmap_path_tf
@@ -506,7 +506,7 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                 counts_ar = torch.bincount(combined_indices_ar[combined_indices_ar < num_embeddings], 
                                           minlength=num_embeddings)
                 create_codebook_usage_heatmap(
-                    counts_ar.numpy(), 
+                    counts_ar.cpu().numpy(), 
                     num_embeddings=num_embeddings,
                     title=f"Auto-regressive Codebook Usage - All {num_examples} Examples ({split_name})",
                     save_path=heatmap_path_ar
