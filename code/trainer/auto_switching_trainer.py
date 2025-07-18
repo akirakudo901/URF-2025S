@@ -90,6 +90,11 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
             if self._val_loss_increase_count >= self.patience:
                 print(f"\n[AutoSwitch] Switching to reestimation phase at step {self.current_step} (patience={self.patience})")
                 self._force_reestimation_phase = True
+                # If using phase lengths, dynamically set phase boundaries
+                if self.reestimation_phase_length is not None:
+                    self.initialization_steps = self.current_step
+                    self.quantization_start = self.current_step + self.reestimation_phase_length
+                    print(f"[AutoSwitch] Dynamic phase boundaries set: initialization_steps={self.initialization_steps}, quantization_start={self.quantization_start}")
 
     def _determine_training_phase(self, current_step: int) -> str:
         """
@@ -123,7 +128,11 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
             'val_recon_loss_history': self._val_recon_loss_history,
             'val_loss_increase_count': self._val_loss_increase_count,
             'force_reestimation_phase': self._force_reestimation_phase,
-            'val_check_interval_steps': getattr(self, '_val_check_interval_steps', None)
+            'val_check_interval_steps': getattr(self, '_val_check_interval_steps', None),
+            # Save dynamic phase boundaries if changed
+            'initialization_steps': self.initialization_steps,
+            'quantization_start': self.quantization_start,
+            'reestimation_phase_length': getattr(self, 'reestimation_phase_length', None),
         }
         kwargs.update(auto_switch_state)
         
@@ -161,5 +170,16 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
         if 'val_check_interval_steps' in checkpoint:
             self._val_check_interval_steps = checkpoint['val_check_interval_steps']
             print(f"Restored val_check_interval_steps: {self._val_check_interval_steps}")
+        
+        # Restore dynamic phase boundaries if present
+        if 'initialization_steps' in checkpoint:
+            self.initialization_steps = checkpoint['initialization_steps']
+            print(f"Restored initialization_steps: {self.initialization_steps}")
+        if 'quantization_start' in checkpoint:
+            self.quantization_start = checkpoint['quantization_start']
+            print(f"Restored quantization_start: {self.quantization_start}")
+        if 'reestimation_phase_length' in checkpoint:
+            self.reestimation_phase_length = checkpoint['reestimation_phase_length']
+            print(f"Restored reestimation_phase_length: {self.reestimation_phase_length}")
         
         return checkpoint

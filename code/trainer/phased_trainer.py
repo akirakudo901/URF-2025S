@@ -56,15 +56,33 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
                 - initialization_steps: Number of steps to train in no-vq mode
                 - r_reestim: Frequency of codebook reinitialization during reinitialization phase
                 - quantization_start: Step at which to start normal VQ training
+                - OR: reestimation_phase_length (alternative), taking precedence if both provided 
+                      (e.g. with dynamic change of initialization phase)
             device: Device to train on
             run_name: Optional string for the name of the run, as texted via send_notification.
         """
-        # Extract phased training parameters
-        self.initialization_steps = training_config.get('initialization_steps', 1500)
+        # --- Phase boundary logic ---
+        # Require initialization_steps, then either reestimation_phase_length or quantization_start
+        if 'initialization_steps' not in training_config:
+            raise ValueError("'initialization_steps' must be specified in the training config.")
+        self.initialization_steps = training_config['initialization_steps']
+
+        has_reestimation_length = 'reestimation_phase_length' in training_config
+        has_quantization_start = 'quantization_start' in training_config
+
+        if has_reestimation_length and has_quantization_start:
+            print("[PhasedTrainer] WARNING: Both reestimation_phase_length and quantization_start provided. Using reestimation_phase_length.")
+
+        if has_quantization_start:
+            self.quantization_start = training_config['quantization_start']
+            self.reestimation_phase_length = self.quantization_start - self.initialization_steps
+        elif has_reestimation_length:
+            self.reestimation_phase_length = training_config['reestimation_phase_length']
+            self.quantization_start = self.initialization_steps + self.reestimation_phase_length
+        else:
+            raise ValueError("Must specify either 'reestimation_phase_length' or 'quantization_start' in the training config.")
+
         self.r_reestim = training_config.get('r_reestim', 500)
-        self.quantization_start = training_config.get('quantization_start', 5000)
-        
-        # Extract codebook learning rate multiplier
         self.codebook_lr_multiplier = training_config.get('codebook_lr_multiplier', 1.0)
         
         # Validate parameters
@@ -86,11 +104,12 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         # Override optimizer with codebook-specific learning rates
         self._setup_codebook_optimizer()
         
+        # Print phase info
         print(f"PhasedEnhancedGPT2VQVAETrainer initialized with:")
         print(f"  - Initialization phase: 0 to {self.initialization_steps} steps (no-vq mode)")
-        print(f"  - Reinitialization phase: {self.initialization_steps} to {self.quantization_start} steps")
-        print(f"  - Reinitialization frequency: every {self.r_reestim} steps")
+        print(f"  - Reinitialization phase: {self.initialization_steps} to {self.quantization_start} steps (length: {self.reestimation_phase_length})")
         print(f"  - Normal training phase: after {self.quantization_start} steps")
+        print(f"  - Reinitialization frequency: every {self.r_reestim} steps")
         print(f"  - Codebook learning rate multiplier: {self.codebook_lr_multiplier}x")
 
         self._init_phase_best_tracking()
