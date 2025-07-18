@@ -815,6 +815,9 @@ class GPT2VQVAETrainer:
                 total_vq_loss += vq_loss.item()
                 total_perplexity += perplexity.item()
                 num_batches += 1
+
+                del prompts, cots, prompt_masks, cot_masks
+                
         
         # Calculate averages
         avg_metrics = self._get_average_metrics(total_loss, total_vq_loss, total_perplexity, num_batches)
