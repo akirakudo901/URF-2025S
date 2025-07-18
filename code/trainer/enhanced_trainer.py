@@ -168,7 +168,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         # Increment step counter
         self.current_step += 1
 
-    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None, **kwargs):
+    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None, remove_other_best_models: bool = True, **kwargs):
         """
         Enhanced checkpoint saving that includes phased training state.
         
@@ -177,11 +177,11 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             metrics: Training metrics
             is_best: Whether this is the best model so far
             checkpoint_path: Optional custom checkpoint path
+            remove_other_best_models: If True, remove other best model checkpoints (default: True)
         """
         kwargs.update({ "current_step" : self.current_step })
         # Call parent save_checkpoint with current_step info as kwargs
-        super().save_checkpoint(epoch, metrics, is_best, checkpoint_path, 
-                                **kwargs)
+        super().save_checkpoint(epoch, metrics, is_best, checkpoint_path, remove_other_best_models, **kwargs)
 
     def load_checkpoint(self, checkpoint_path: str):
         """

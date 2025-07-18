@@ -112,7 +112,7 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
         self._val_recon_loss_history = []
         self._val_loss_increase_count = 0
 
-    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None, **kwargs):
+    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None, remove_other_best_models: bool = True, **kwargs):
         """
         Override save_checkpoint to include auto-switching state.
         """
@@ -128,7 +128,7 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
         kwargs.update(auto_switch_state)
         
         # Call parent save_checkpoint
-        return super().save_checkpoint(epoch, metrics, is_best, checkpoint_path, **kwargs)
+        return super().save_checkpoint(epoch, metrics, is_best, checkpoint_path, remove_other_best_models, **kwargs)
 
     def load_checkpoint(self, checkpoint_path: str):
         """

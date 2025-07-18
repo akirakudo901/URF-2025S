@@ -993,7 +993,7 @@ class GPT2VQVAETrainer:
     
 
     
-    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None, **kwargs):
+    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None, remove_other_best_models: bool = True, **kwargs):
         """
         Save model checkpoint.
         
@@ -1002,6 +1002,7 @@ class GPT2VQVAETrainer:
             metrics: Current metrics
             is_best: Whether this is the best model so far
             checkpoint_path: Path to save the checkpoint (optional)
+            remove_other_best_models: If True, remove other best model checkpoints (default: True)
             **kwargs: Additional data to append to the checkpoint
         """
         checkpoint_dir = self.training_config.get('checkpoint_dir', 'checkpoints')
@@ -1034,12 +1035,15 @@ class GPT2VQVAETrainer:
         
         # Save best model if this is the best so far
         if is_best:
-            # Remove any existing best model checkpoints
-            for file in os.listdir(checkpoint_dir):
-                if 'best_model' in file and file.endswith('.pt'):
-                    os.remove(os.path.join(checkpoint_dir, file))
-            
-            best_path = os.path.join(checkpoint_dir, f'best_model_epoch_{epoch}.pt')
+            if remove_other_best_models:
+                # Remove any existing best model checkpoints
+                for file in os.listdir(checkpoint_dir):
+                    if 'best_model' in file and file.endswith('.pt'):
+                        os.remove(os.path.join(checkpoint_dir, file))
+            if checkpoint_path is None:
+                best_path = os.path.join(checkpoint_dir, f'checkpoint_epoch_{epoch}.pt')
+            else:
+                best_path = checkpoint_path
             torch.save(checkpoint, best_path)
             self.best_model_path = best_path
             print(f"New best model saved (epoch {epoch}) with validation loss: {metrics['loss']:.4f}")
@@ -1256,9 +1260,9 @@ class GPT2VQVAETrainer:
                 print(f"Learning Rate: {self.optimizer.param_groups[0]['lr']:.6f}")
                 
                 # Save checkpoint
-                is_best = test_metrics['loss'] < self.best_val_loss
+                is_best = self.is_new_best(test_metrics['loss'])
                 if is_best:
-                    self.best_val_loss = test_metrics['loss']
+                    self.update_best(test_metrics['loss'])
                     if TRACK_MEMORY:
                         with record_function("## save_checkpoint ##"):
                             self.save_checkpoint(epoch + 1, test_metrics, True)
@@ -1382,8 +1386,8 @@ class GPT2VQVAETrainer:
                 print(f"Aborted training checkpoint saved (trained {total_batches_trained} batches, threshold: {minimum_batches})")
 
                 # Also save as best model if it's better than previous best
-                if e.metrics['avg_loss'] < self.best_val_loss:
-                    self.best_val_loss = e.metrics['avg_loss']
+                if self.is_new_best(e.metrics['avg_loss']):
+                    self.update_best(e.metrics['avg_loss'])
                     best_aborted_path = os.path.join(checkpoint_dir, f'best_model_aborted_epoch_{e.epoch}.pt')
                     if TRACK_MEMORY:
                         with record_function("## save_checkpoint ##"):
@@ -1758,6 +1762,15 @@ class GPT2VQVAETrainer:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             print(f"Memory usage plot saved to {save_path}")
         plt.close()
+
+    def is_new_best(self, val_loss: float) -> bool:
+        """Return True if val_loss is better than the current best_val_loss."""
+        return val_loss < self.best_val_loss
+
+    def update_best(self, val_loss: float):
+        """Update the best_val_loss if val_loss is better."""
+        if self.is_new_best(val_loss):
+            self.best_val_loss = val_loss
 
 
 def save_training_visualizations(trainer, save_dir: str = None, prefix: str = "training"):

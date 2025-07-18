@@ -92,6 +92,8 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         print(f"  - Reinitialization frequency: every {self.r_reestim} steps")
         print(f"  - Normal training phase: after {self.quantization_start} steps")
         print(f"  - Codebook learning rate multiplier: {self.codebook_lr_multiplier}x")
+
+        self._init_phase_best_tracking()
     
     def _setup_codebook_optimizer(self):
         """
@@ -314,17 +316,55 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         super()._enhanced_track_codebook_usage(dataset, measurement_point)
         
     
+    def _init_phase_best_tracking(self):
+        self.best_val_loss_per_phase = {
+            'initialization': float('inf'),
+            'reinitialization': float('inf'),
+            'normal': float('inf'),
+        }
+
+    def is_new_best(self, val_loss: float) -> bool:
+        phase = self._determine_training_phase(self.current_step)
+        return val_loss < self.best_val_loss_per_phase[phase]
+
+    def update_best(self, val_loss: float):
+        phase = self._determine_training_phase(self.current_step)
+        if self.is_new_best(val_loss):
+            self.best_val_loss_per_phase[phase] = val_loss
+
+    def get_best_val_loss(self, phase: str = None):
+        if phase is None:
+            phase = self._determine_training_phase(self.current_step)
+        return self.best_val_loss_per_phase[phase]
+
+    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None, remove_other_best_models: bool = True, **kwargs):
+        """
+        Save checkpoint with phase-aware best model logic.
+        If is_best and remove_other_best_models is True, only remove best model checkpoints from the same phase.
+        """
+        kwargs.update({'best_val_loss_per_phase': self.best_val_loss_per_phase})
+        phase = self._determine_training_phase(self.current_step)
+        checkpoint_dir = self.training_config.get('checkpoint_dir', 'checkpoints')
+        if is_best:
+            if remove_other_best_models:
+                # Remove only best model checkpoints from the same phase
+                for file in os.listdir(checkpoint_dir):
+                    if file.startswith(f'best_model_{phase}_') and file.endswith('.pt'):
+                        os.remove(os.path.join(checkpoint_dir, file))
+            if checkpoint_path is None:
+                checkpoint_path = os.path.join(checkpoint_dir, f'best_model_{phase}_epoch_{epoch}.pt')
+        super().save_checkpoint(epoch, metrics, is_best, checkpoint_path, remove_other_best_models=False, **kwargs)
+
     def load_checkpoint(self, checkpoint_path: str):
-        """
-        Enhanced checkpoint loading that restores phased training state.
-        
-        Args:
-            checkpoint_path: Path to checkpoint file
-        """
-        # Load checkpoint using parent method
         checkpoint = super().load_checkpoint(checkpoint_path)
-        
-        # Update current phase
-        print(f"Current training phase: {self._determine_training_phase(self.current_step)}")
-        
+        # Restore per-phase bests
+        if 'best_val_loss_per_phase' in checkpoint:
+            self.best_val_loss_per_phase = checkpoint['best_val_loss_per_phase']
+        else:
+            # Backward compatibility: initialize from best_val_loss if present
+            best = checkpoint.get('best_val_loss', float('inf'))
+            self._init_phase_best_tracking()
+            for k in self.best_val_loss_per_phase:
+                self.best_val_loss_per_phase[k] = best
+        print(f"Current best val loss per phase: {self.best_val_loss_per_phase}")
         return checkpoint
