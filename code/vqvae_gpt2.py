@@ -951,7 +951,7 @@ class GPT2VQVAE(nn.Module):
             quantized = quantized.view(batch_size, -1, M, quantized.size(-1))
             vq_loss = torch.tensor(0.0, device=quantized.device)
             perplexity = torch.tensor(0.0, device=quantized.device)
-            indices = torch.zeros(batch_size, device=quantized.device, dtype=torch.long)
+            indices = torch.zeros(batch_size, L, device=quantized.device, dtype=torch.long)
             return quantized, vq_loss, perplexity, indices
         
         # Apply VQ
