@@ -574,19 +574,20 @@ class EnhancedVectorQuantizer(nn.Module):
             # During inference, update separate inference usage counts
             self._inference_usage_counts += current_usage
         
-        # Quantize
-        quantized = torch.matmul(encodings, self.embedding.weight)
+        # Quantize & Reshape
+        quantized = torch.matmul(encodings, self.embedding.weight) # [ (batch x seq_len), emb_dim ]
         quantized = quantized.view(input_shape)
+        normalized_inputs = normalized_inputs.view(input_shape)
 
         # Loss computation (only during training)
         if self.training:
-            total_loss = compute_loss(quantized, inputs, encoding_indices)
+            total_loss = compute_loss(quantized, normalized_inputs, encoding_indices)
         else:
             # During inference, do not track gradients
             with torch.no_grad():
-                total_loss = compute_loss(quantized, inputs, encoding_indices)
+                total_loss = compute_loss(quantized, normalized_inputs, encoding_indices)
         
-        quantized = inputs + (quantized - inputs).detach()  # Straight-through estimator
+        quantized = normalized_inputs + (quantized - normalized_inputs).detach()  # Straight-through estimator
         # Perplexity: diversity of latent code usage, keep it mid (high=uniform, no learning, low=not used fully)
         perplexity = compute_perplexity(encoding_indices, "indices")
         
