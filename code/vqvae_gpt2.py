@@ -990,18 +990,15 @@ class GPT2VQVAE(nn.Module):
         Returns:
             torch.Tensor: Decoded output logits [batch_size, M, L, vocab_size] (only COT positions)
         """
+        batch_size, K = prompt_sequences.shape
+        _, M, L = cot_sequences.shape
+        # Reshape memory to [batch_size * M, L, d_model] and add chain-positional embeddings
+        memory = memory.transpose(1, 2).reshape(batch_size * M, L, -1)
+        chain_indices = torch.arange(M, device=memory.device).repeat(batch_size)
+        chain_emb = self.chain_embeddings(chain_indices).unsqueeze(1)  # [batch_size*M, 1, d_model]
+        memory = memory + chain_emb  # Add to all positions in the sequence
+
         if self.only_latent_decode:
-            # memory: [batch_size, M, L, d_model] or [batch_size, L, d_model] (if M=1)
-            # prompt_sequences: [batch_size, K]
-            # cot_sequences: [batch_size, M, L]
-            batch_size, K = prompt_sequences.shape
-            _, M, L = cot_sequences.shape
-            # Reshape memory to [batch_size * M, L, d_model]
-            memory = memory.transpose(1, 2).reshape(batch_size * M, L, -1)
-            # Add chain-positional embeddings to memory
-            chain_indices = torch.arange(M, device=memory.device).repeat(batch_size)
-            chain_emb = self.chain_embeddings(chain_indices).unsqueeze(1)  # [batch_size*M, 1, d_model]
-            memory = memory + chain_emb  # Add to all positions in the sequence
             # Prepare prompt embeddings [batch_size, K, d_model] -> [batch_size, M, K, d_model] -> [batch_size * M, K, d_model]
             prompt_embeds = self.decoder.transformer.wte(prompt_sequences)  # [batch_size, K, d_model]
             prompt_embeds = prompt_embeds.unsqueeze(1).expand(-1, M, -1, -1).reshape(batch_size * M, K, -1)
@@ -1031,18 +1028,6 @@ class GPT2VQVAE(nn.Module):
             # Return only logits for the latent (COT) positions (after prompt)
             cot_logits = all_logits[:, K:, :]  # [batch_size * M, L, vocab_size]
             return cot_logits.view(batch_size, M, L, -1)
-        
-        batch_size, K = prompt_sequences.shape
-        _, M, L = cot_sequences.shape
-        
-        # Reshape memory for decoder
-        memory = memory.transpose(1, 2)  # [batch_size, M, L, d_model]
-        memory = memory.reshape(batch_size * M, L, -1)  # [batch_size * M, L, d_model]
-        
-        # Add chain-positional embeddings to memory
-        chain_indices = torch.arange(M, device=memory.device).repeat(batch_size)
-        chain_emb = self.chain_embeddings(chain_indices).unsqueeze(1)  # [batch_size*M, 1, d_model]
-        memory = memory + chain_emb  # Add to all positions in the sequence
         
         # Check if gradient checkpointing is enabled to determine caching strategy
         use_caching = not self.is_gradient_checkpointing_enabled()
