@@ -1273,6 +1273,8 @@ class GPT2VQVAETrainer:
                 self.val_recon_losses.append(test_metrics['recon_loss'])
                 self.vq_losses.append(train_metrics['avg_vq_loss'])
                 self.perplexities.append(train_metrics['avg_perplexity'])
+                # New: Track chain embeddings at end of epoch
+                self.epoch_chain_embeddings.append(self.model.chain_embeddings.weight.detach().cpu().numpy())
                 
                 # Store detailed metrics
                 self.detailed_train_losses.append(train_metrics['detailed_losses'])
@@ -1333,9 +1335,6 @@ class GPT2VQVAETrainer:
                         self.save_codebook_plots_func(codebook_dir, epoch + 1)
                 
                     self.log_memory_usage(f"epoch_{epoch+1}_after_saving_codebook")
-                
-                # New: Track chain embeddings at end of epoch
-                self.epoch_chain_embeddings.append(self.model.chain_embeddings.weight.detach().cpu().numpy())
                 
                 # Clear cache after each epoch
                 if torch.cuda.is_available():
