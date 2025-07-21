@@ -289,7 +289,7 @@ class SimpleGPT2VQVAE(GPT2VQVAE):
         
         return quantized, vq_loss, perplexity, indices
 
-    def decode(self, memory, prompt_sequences, cot_sequences, prompt_mask=None, cot_mask=None, pad_token_id=0):
+    def decode(self, memory, prompt_sequences, cot_sequences, prompt_mask=None, cot_mask=None, ar_position=None, pad_token_id=0):
         """
         Decodes using GPT2 decoder with or without caching based on gradient checkpointing status.
         
@@ -299,6 +299,8 @@ class SimpleGPT2VQVAE(GPT2VQVAE):
             cot_sequences (torch.Tensor): Chain-of-thought sequences [batch_size, L] (single CoT per prompt)
             prompt_mask (torch.Tensor, optional): Prompt attention mask for padding
             cot_mask (torch.Tensor, optional): COT attention mask for padding
+            # TODO IMPLEMENT ar_position FUNCTIONALITY
+            ar_position (int, optional): Index of position to decode within the CoT, starts from 0.
             pad_token_id (int): Token ID to use for padding when K=0, defaults to 0
             
         Returns:
@@ -458,7 +460,8 @@ class SimpleGPT2VQVAE(GPT2VQVAE):
         
         if not inference:
             # During training, use teacher forcing with single forward pass to get all logits
-            output_logits = self.decode(cot_quantized, prompt, cot_sequences, prompt_mask, cot_mask, pad_token_id) # [batch_size, L, vocab_size]
+            output_logits = self.decode(cot_quantized, prompt, cot_sequences, prompt_mask, cot_mask, 
+                                        ar_position=None, pad_token_id=pad_token_id) # [batch_size, L, vocab_size]
             
             # Get the predicted tokens from logits
             output_sequences = torch.argmax(output_logits, dim=-1)
@@ -470,7 +473,8 @@ class SimpleGPT2VQVAE(GPT2VQVAE):
             # TODO IF I FIND THE TIME : USE KV-CACHING TO SPEED UP AUTO-REGRESSIVE GENERATION
             # During inference, generate sequence auto-regressively
             for t in range(L):
-                current_output = self.decode(cot_quantized, prompt, output_sequences, prompt_mask, cot_mask, pad_token_id)
+                current_output = self.decode(cot_quantized, prompt, output_sequences, prompt_mask, cot_mask, 
+                                             ar_position=None, pad_token_id=pad_token_id)
                 
                 # Get next token predictions
                 output_logits[:, t, :] = current_output[:, t, :]  # [batch_size, L, vocab_size]
