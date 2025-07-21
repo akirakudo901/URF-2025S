@@ -7,6 +7,7 @@ import torch.optim as optim
 from typing import Optional, Dict, Any
 import os
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 import gc
 import numpy as np
 import sys
@@ -99,6 +100,8 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         
         # Enhanced codebook tracking with granular control
         self.enhanced_codebook_tracking = training_config.get('enhanced_codebook_tracking', True)
+        # Track batch norm parameter history per epoch
+        self.detailed_bn_param_history = []  # List of dicts, one per epoch
         
         # Granular tracking flags for memory optimization
         tracking_config = training_config.get('codebook_tracking_config', {})
@@ -140,7 +143,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         # Training phase tracking - no current use, but might be useful later
         self.current_step = 0
 
-    def train_epoch(self, train_loader, num_measurements_per_epoch, current_epoch=0):
+    def train_epoch(self, train_loader, num_measurements_per_epoch, current_epoch=0, detailed_metrics_callback=None):
         # Set max_reset_steps on the first epoch if it's still None
         if self.model.vector_quantizer.max_reset_steps is None:
             # Calculate total training steps
@@ -155,9 +158,29 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             # Set max_reset_steps on the vector quantizer
             self.model.vector_quantizer.max_reset_steps = max_reset_steps
             print(f"Set max_reset_steps to {max_reset_steps} (based on {total_training_steps} total steps, {reset_stop_fraction*100:.0f}% of training)")
-        
-        # Call the parent train_epoch method
-        return super().train_epoch(train_loader, num_measurements_per_epoch, current_epoch)
+        # Initialize batch norm tracking list for this epoch
+        self._current_bn_param_history = []
+
+        def bn_tracking_callback(**kwargs):
+            vq = self.model.vector_quantizer
+            if hasattr(vq, 'batch_norm') and vq.batch_norm is not None:
+                self._current_bn_param_history.append({
+                    'weight': vq.batch_norm.weight.detach().cpu().numpy(),
+                    'bias': vq.batch_norm.bias.detach().cpu().numpy(),
+                    'running_mean': vq.batch_norm.running_mean.detach().cpu().numpy(),
+                    'running_var': vq.batch_norm.running_var.detach().cpu().numpy(),
+                    'step': kwargs.get('batch_idx', None),
+                })
+            if detailed_metrics_callback is not None:
+                detailed_metrics_callback(**kwargs)
+
+        # Call the parent train_epoch method with the callback
+        result = super().train_epoch(train_loader, num_measurements_per_epoch, current_epoch, detailed_metrics_callback=bn_tracking_callback)
+        # After each epoch, store a copy of the batch norm parameter history for this epoch
+        self.detailed_bn_param_history.append(self._current_bn_param_history)
+        del self._current_bn_param_history
+        self._current_bn_param_history = None
+        return result
 
     def _update_weights(self):
         """
@@ -457,3 +480,55 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         plt.tight_layout()
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
+
+    def plot_training_history(self, save_path: Optional[str] = None, log_scale: bool = False):
+        super().plot_training_history(save_path, log_scale)
+        # Plot batch norm parameter evolution if available
+        if self.detailed_bn_param_history and any(len(epoch) > 0 for epoch in self.detailed_bn_param_history):
+            # Flatten all epochs into a single list
+            all_bn_params = [item for epoch in self.detailed_bn_param_history for item in epoch]
+            if all_bn_params:
+                weights = np.array([p['weight'] for p in all_bn_params])
+                biases = np.array([p['bias'] for p in all_bn_params])
+                running_means = np.array([p['running_mean'] for p in all_bn_params])
+                running_vars = np.array([p['running_var'] for p in all_bn_params])
+                steps = np.arange(len(all_bn_params))
+                fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+                for arr, ax, name in zip([weights, biases, running_means, running_vars], axes.flat,
+                                         ['Weight', 'Bias', 'Running Mean', 'Running Var']):
+                    arr_mean = arr.mean(axis=1)
+                    arr_std = arr.std(axis=1)
+                    ax.plot(steps, arr_mean, label=f'{name} Mean')
+                    ax.fill_between(steps, arr_mean - arr_std, arr_mean + arr_std, alpha=0.3, label=f'{name} ±1 Std')
+                    ax.set_title(f'BatchNorm {name} Evolution')
+                    ax.set_xlabel('Step')
+                    ax.set_ylabel(name)
+                    ax.legend()
+                    ax.grid(True)
+                plt.tight_layout()
+                if save_path:
+                    bn_fig_path = save_path.replace('.png', '_batchnorm.png')
+                    fig.savefig(bn_fig_path, dpi=300, bbox_inches='tight')
+                    print(f"BatchNorm parameter evolution plot saved to {bn_fig_path}")
+                plt.close(fig)
+                # 3D mesh plots for each parameter
+                param_arrays = {'Weight': weights, 'Bias': biases, 'Running Mean': running_means, 'Running Var': running_vars}
+                for name, arr in param_arrays.items():
+                    fig3d = plt.figure(figsize=(10, 7))
+                    ax3d = fig3d.add_subplot(111, projection='3d')
+                    # arr: (time, dim)
+                    T, D = arr.shape
+                    X, Y = np.meshgrid(np.arange(D), np.arange(T))
+                    Z = arr
+                    surf = ax3d.plot_surface(X, Y, Z, cmap='viridis', edgecolor='none', alpha=0.85)
+                    ax3d.set_title(f'BatchNorm {name} (Dim x Time)')
+                    ax3d.set_xlabel('Dimension')
+                    ax3d.set_ylabel('Step')
+                    ax3d.set_zlabel(name)
+                    fig3d.colorbar(surf, shrink=0.5, aspect=10)
+                    plt.tight_layout()
+                    if save_path:
+                        mesh_path = save_path.replace('.png', f'_batchnorm_{name.lower().replace(" ", "_")}_3d.png')
+                        fig3d.savefig(mesh_path, dpi=300, bbox_inches='tight')
+                        print(f"BatchNorm 3D mesh plot for {name} saved to {mesh_path}")
+                    plt.close(fig3d)

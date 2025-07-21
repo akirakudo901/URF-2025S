@@ -663,7 +663,7 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
                     )
                 else:
                     # Fallback for other model types (GPT2VQVAE, etc.)
-                    _, _, _, _, indices = model(
+                    _, _, _, _, indices, _ = model(
                         prompt=prompts,
                         cot_sequences=cots,
                         cot_mask=cot_masks,

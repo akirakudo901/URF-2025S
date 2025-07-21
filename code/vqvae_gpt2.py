@@ -945,6 +945,15 @@ class GPT2VQVAE(nn.Module):
         # Aggregate the memory content per-prompt into single chains 
         aggregated = self.aggregate(memory, mode=aggregate_mode) # [batch_size*L or batch_size*(K+L), d_model]
 
+        # Calculate norm statistics for debugging
+        aggregated_norms = torch.norm(aggregated.detach(), dim=-1)  # [batch_size*L or batch_size*(K+L)]
+        vq_input_norm_mean = aggregated_norms.mean().item()
+        vq_input_norm_std = aggregated_norms.std().item()
+        debug_stats = {
+            'vq_input_norm_mean': vq_input_norm_mean,
+            'vq_input_norm_std': vq_input_norm_std
+        }
+
         if no_vq:
             # For no_vq mode, tile the aggregated embeddings back to match the expected shape
             quantized = aggregated.unsqueeze(1).expand(-1, M, -1)  # [batch_size*(L or K+L), M, d_model]
@@ -952,7 +961,7 @@ class GPT2VQVAE(nn.Module):
             vq_loss = torch.tensor(0.0, device=quantized.device)
             perplexity = torch.tensor(0.0, device=quantized.device)
             indices = torch.zeros(batch_size, L, device=quantized.device, dtype=torch.long)
-            return quantized, vq_loss, perplexity, indices
+            return quantized, vq_loss, perplexity, indices, debug_stats
         
         # Apply VQ
         quantized, vq_loss, perplexity, indices = self.vector_quantizer(aggregated) # [batch_size*L or batch_size*(K+L), d_model]
@@ -964,7 +973,7 @@ class GPT2VQVAE(nn.Module):
         quantized = quantized.view(batch_size, -1, M, quantized.size(-1))
         indices = indices.view(batch_size, -1)
         
-        return quantized, vq_loss, perplexity, indices
+        return quantized, vq_loss, perplexity, indices, debug_stats
 
     def decode(self, memory, prompt_sequences, cot_sequences, prompt_mask=None, cot_mask=None, pad_token_id=0):
         """
@@ -1183,7 +1192,7 @@ class GPT2VQVAE(nn.Module):
         _, M, L = cot_sequences.shape
         
         # Encode using the new separate prompt and COT approach
-        quantized, vq_loss, perplexity, indices = self.encode(
+        quantized, vq_loss, perplexity, indices, debug_stats = self.encode(
             prompt, cot_sequences, 
             prompt_mask, cot_mask, 
             quantize_cot_only=quantize_cot_only,
@@ -1200,7 +1209,7 @@ class GPT2VQVAE(nn.Module):
             # Always decode in a single pass, regardless of 'inference'
             output_logits = self.decode(cot_quantized, prompt, cot_sequences, prompt_mask, cot_mask, pad_token_id)
             output_sequences = torch.argmax(output_logits, dim=-1)
-            return output_sequences, output_logits, vq_loss, perplexity, indices
+            return output_sequences, output_logits, vq_loss, perplexity, indices, debug_stats
         
         if not inference:
             # During training, use teacher forcing with single forward pass to get all logits
@@ -1220,7 +1229,7 @@ class GPT2VQVAE(nn.Module):
                 output_logits[:, :, t, :] = current_output[:, :, t, :]  # [batch_size, M, L, vocab_size]
                 output_sequences[:, :, t] = torch.argmax(output_logits[:, :, t, :], dim=-1)  # [batch_size, M, L]
         
-        return output_sequences, output_logits, vq_loss, perplexity, indices
+        return output_sequences, output_logits, vq_loss, perplexity, indices, debug_stats
 
     def load_checkpoint(self, checkpoint_path: str, device: Optional[str] = None):
         """

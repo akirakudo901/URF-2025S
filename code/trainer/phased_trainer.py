@@ -274,7 +274,7 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         # Perform forward pass with appropriate VQ setting and handle mixed precision
         if self.use_mixed_precision:
             with autocast('cuda'):
-                _, output_logits, vq_loss, perplexity, indices = self.model(
+                _, output_logits, vq_loss, perplexity, indices, debug_stats = self.model(
                     prompt=prompts,
                     cot_sequences=cots,
                     cot_mask=cot_masks,
@@ -286,7 +286,7 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
                 recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
                 total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
         else:
-            _, output_logits, vq_loss, perplexity, indices = self.model(
+            _, output_logits, vq_loss, perplexity, indices, debug_stats = self.model(
                 prompt=prompts,
                 cot_sequences=cots,
                 cot_mask=cot_masks,
@@ -298,9 +298,9 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
             recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
             total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
         
-        return total_loss_batch, recon_loss, vq_loss, perplexity, indices
+        return total_loss_batch, recon_loss, vq_loss, perplexity, indices, debug_stats
     
-    def train_epoch(self, train_loader, num_measurements_per_epoch, current_epoch=0):
+    def train_epoch(self, train_loader, num_measurements_per_epoch, current_epoch=0, detailed_metrics_callback=None):
         """
         Enhanced train_epoch that tracks training steps and handles phase transitions.
         
@@ -318,7 +318,7 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
             self.model.vector_quantizer.max_reset_steps = self.quantization_start
         
         # Call parent train_epoch
-        metrics = super().train_epoch(train_loader, num_measurements_per_epoch, current_epoch)
+        metrics = super().train_epoch(train_loader, num_measurements_per_epoch, current_epoch, detailed_metrics_callback)
         
         return metrics
 

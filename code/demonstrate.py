@@ -193,7 +193,7 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                     model_inputs['use_vq'] = use_vq
                 else:
                     model_inputs['no_vq'] = not use_vq
-                _, output_logits_tf, vq_loss_tf, perplexity_tf, indices_tf = model(**model_inputs)
+                _, output_logits_tf, vq_loss_tf, perplexity_tf, indices_tf, debug_stats = model(**model_inputs)
                 predicted_tokens_tf = torch.argmax(output_logits_tf, dim=-1)  # [B, M, L]
                 if indices_tf is not None:
                     all_indices_tf.append(indices_tf.flatten())
@@ -218,7 +218,7 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                     model_inputs['use_vq'] = use_vq
                 else:
                     model_inputs['no_vq'] = not use_vq
-                output_sequences_ar, output_logits_ar, vq_loss_ar, perplexity_ar, indices_ar = model(**model_inputs)
+                output_sequences_ar, output_logits_ar, vq_loss_ar, perplexity_ar, indices_ar, debug_stats = model(**model_inputs)
                 if indices_ar is not None:
                     all_indices_ar.append(indices_ar.flatten())
             except Exception as e:

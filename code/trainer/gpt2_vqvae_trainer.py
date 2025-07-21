@@ -19,6 +19,7 @@ from datetime import datetime
 from torch.autograd.profiler import record_function
 import sys
 import psutil
+import numpy as np
 
 # Add the current directory to the path to import dependencies
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -335,13 +336,17 @@ class GPT2VQVAETrainer:
         self.perplexities = []
         self.recon_losses = []
         self.val_recon_losses = []
+        self.epoch_chain_embeddings = []   # List of np.arrays, one per epoch
         
         # Training history - detailed metrics within epochs
         self.detailed_train_losses = []  # List of lists: [epoch_1_metrics, epoch_2_metrics, ...]
         self.detailed_vq_losses = []
         self.detailed_perplexities = []
         self.detailed_batch_indices = []  # List of lists: [epoch_1_indices, epoch_2_indices, ...]
-        self.detailed_recon_losses = [] 
+        self.detailed_recon_losses = []
+        # New: VQ input norm tracking (per measurement interval)
+        self.detailed_vq_input_means = []  # List of lists: [epoch_1_means, epoch_2_means, ...]
+        self.detailed_vq_input_stds = []   # List of lists: [epoch_1_stds, epoch_2_stds, ...]
         
         # Best model tracking
         self.best_val_loss = float('inf')
@@ -544,7 +549,7 @@ class GPT2VQVAETrainer:
         else:
             return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0)
             
-    def train_epoch(self, train_loader: DataLoader, num_measurements_per_epoch: int, current_epoch: int = 0) -> Dict[str, Any]:
+    def train_epoch(self, train_loader: DataLoader, num_measurements_per_epoch: int, current_epoch: int = 0, detailed_metrics_callback=None) -> Dict[str, Any]:
         """
         Train for one epoch with memory optimizations.
         
@@ -552,6 +557,7 @@ class GPT2VQVAETrainer:
             train_loader: Training data loader
             num_measurements_per_epoch: Number of equally spaced measurements to log during the epoch
             current_epoch: Current epoch number (for exception handling)
+            detailed_metrics_callback: Optional function to call at each measurement interval for custom tracking
             
         Returns:
             Dictionary containing training metrics with both detailed and average metrics
@@ -574,6 +580,9 @@ class GPT2VQVAETrainer:
         detailed_perplexities = []
         detailed_batch_indices = []
         detailed_recon_losses = []
+        # New: VQ input norm tracking for this epoch
+        detailed_vq_input_means = []
+        detailed_vq_input_stds = []
         
         # Perplexity threshold monitoring
         perplexity_threshold = self.training_config.get('perplexity_threshold', 1.5)
@@ -603,11 +612,11 @@ class GPT2VQVAETrainer:
             # Forward pass and loss calculation
             if TRACK_MEMORY:
                 with record_function("## forward_pass ##"):
-                    total_loss_batch, recon_loss, vq_loss, perplexity, _ = self._forward_pass(
+                    total_loss_batch, recon_loss, vq_loss, perplexity, _, debug_stats = self._forward_pass(
                         prompts, cots, prompt_masks, cot_masks
                     )
             else:
-                total_loss_batch, recon_loss, vq_loss, perplexity, _ = self._forward_pass(
+                total_loss_batch, recon_loss, vq_loss, perplexity, _, debug_stats = self._forward_pass(
                     prompts, cots, prompt_masks, cot_masks
                 )
             
@@ -708,6 +717,25 @@ class GPT2VQVAETrainer:
                 detailed_vq_losses.append(vq_loss_item)
                 detailed_perplexities.append(perplexity_item)
                 detailed_batch_indices.append(batch_idx)
+                # New: Use debug_stats from model forward for VQ input norm
+                if debug_stats is not None:
+                    detailed_vq_input_means.append(debug_stats['vq_input_norm_mean'])
+                    detailed_vq_input_stds.append(debug_stats['vq_input_norm_std'])
+                # Call the detailed metrics callback if provided
+                if detailed_metrics_callback is not None:
+                    detailed_metrics_callback(
+                        batch_idx=batch_idx,
+                        model=self.model,
+                        trainer=self,
+                        prompts=prompts,
+                        cots=cots,
+                        prompt_masks=prompt_masks,
+                        cot_masks=cot_masks,
+                        debug_stats=debug_stats,
+                        current_epoch=current_epoch
+                    )
+            else:
+                del debug_stats
                 
                 # Track codebook usage at measurement intervals
                 if self.tracking_enabled:
@@ -756,6 +784,9 @@ class GPT2VQVAETrainer:
         # Calculate averages
         avg_metrics = self._get_average_metrics(total_loss, total_vq_loss, total_perplexity, num_batches)
         avg_recon_loss = total_recon_loss / num_batches if num_batches > 0 else 0.0
+        # Store VQ input stats for this epoch
+        self.detailed_vq_input_means.append(detailed_vq_input_means)
+        self.detailed_vq_input_stds.append(detailed_vq_input_stds)
         
         # Return both detailed and average metrics
         return {
@@ -801,11 +832,11 @@ class GPT2VQVAETrainer:
                 # Forward pass and loss calculation
                 if TRACK_MEMORY:
                     with record_function("## validation_forward ##"):
-                        total_loss_batch, recon_loss, vq_loss, perplexity, _ = self._forward_pass(
+                        total_loss_batch, recon_loss, vq_loss, perplexity, _, _ = self._forward_pass(
                             prompts, cots, prompt_masks, cot_masks
                         )
                 else:
-                    total_loss_batch, recon_loss, vq_loss, perplexity, _ = self._forward_pass(
+                    total_loss_batch, recon_loss, vq_loss, perplexity, _, _ = self._forward_pass(
                         prompts, cots, prompt_masks, cot_masks
                     )
                 
@@ -837,7 +868,7 @@ class GPT2VQVAETrainer:
         """Helper function for forward pass and loss calculation"""
         if self.use_mixed_precision:
             with autocast('cuda'):
-                _, output_logits, vq_loss, perplexity, indices = self.model(
+                _, output_logits, vq_loss, perplexity, indices, debug_stats = self.model(
                     prompt=prompts,
                     cot_sequences=cots,
                     cot_mask=cot_masks,
@@ -848,7 +879,7 @@ class GPT2VQVAETrainer:
                 recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
                 total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
         else:
-            _, output_logits, vq_loss, perplexity, indices = self.model(
+            _, output_logits, vq_loss, perplexity, indices, debug_stats = self.model(
                 prompt=prompts,
                 cot_sequences=cots,
                 cot_mask=cot_masks,
@@ -859,7 +890,7 @@ class GPT2VQVAETrainer:
             recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
             total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
             
-        return total_loss_batch, recon_loss, vq_loss, perplexity, indices
+        return total_loss_batch, recon_loss, vq_loss, perplexity, indices, debug_stats
     
     def _update_weights(self):
         """Helper function for updating weights"""
@@ -1303,6 +1334,9 @@ class GPT2VQVAETrainer:
                 
                     self.log_memory_usage(f"epoch_{epoch+1}_after_saving_codebook")
                 
+                # New: Track chain embeddings at end of epoch
+                self.epoch_chain_embeddings.append(self.model.chain_embeddings.weight.detach().cpu().numpy())
+                
                 # Clear cache after each epoch
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -1639,7 +1673,96 @@ class GPT2VQVAETrainer:
             axes[2, 1].grid(True)
             if log_scale:
                 axes[2, 1].set_yscale('log')
-            
+            # New: Plot VQ input mean/std
+            all_vq_means = np.concatenate(self.detailed_vq_input_means) if self.detailed_vq_input_means else []
+            all_vq_stds = np.concatenate(self.detailed_vq_input_stds) if self.detailed_vq_input_stds else []
+            if len(all_vq_means) > 0:
+                fig2, ax2 = plt.subplots(figsize=(12, 4))
+                ax2.plot(all_detailed_indices, all_vq_means, label='VQ Input Mean', color='blue')
+                ax2.plot(all_detailed_indices, all_vq_stds, label='VQ Input Std', color='red')
+                for boundary, epoch_num in epoch_boundaries:
+                    ax2.axvline(x=boundary, color='gray', linestyle='--', alpha=0.5)
+                    ax2.text(boundary, ax2.get_ylim()[1], f'Epoch {epoch_num}', rotation=90, va='top', ha='right')
+                ax2.set_title('VQ Input Mean/Std (Within Epochs)')
+                ax2.set_xlabel('Measurement Index')
+                ax2.set_ylabel('Value')
+                ax2.legend()
+                ax2.grid(True)
+                if save_path:
+                    vq_input_path = save_path.replace('.png', '_vq_input.png')
+                    fig2.savefig(vq_input_path, dpi=300, bbox_inches='tight')
+                    print(f"VQ input mean/std plot saved to {vq_input_path}")
+                plt.close(fig2)
+            # New: Plot chain embedding stats per epoch
+            if self.epoch_chain_embeddings:
+                means = [np.mean(e) for e in self.epoch_chain_embeddings]
+                stds = [np.std(e) for e in self.epoch_chain_embeddings]
+                mins = [np.min(e) for e in self.epoch_chain_embeddings]
+                maxs = [np.max(e) for e in self.epoch_chain_embeddings]
+                fig3, ax3 = plt.subplots(figsize=(12, 4))
+                ax3.plot(means, label='Chain Embedding Mean', color='blue')
+                ax3.plot(stds, label='Chain Embedding Std', color='red')
+                ax3.plot(mins, label='Chain Embedding Min', color='green')
+                ax3.plot(maxs, label='Chain Embedding Max', color='orange')
+                ax3.set_title('Chain Embedding Stats per Epoch')
+                ax3.set_xlabel('Epoch')
+                ax3.set_ylabel('Value')
+                ax3.legend()
+                ax3.grid(True)
+                if save_path:
+                    chain_emb_path = save_path.replace('.png', '_chain_emb.png')
+                    fig3.savefig(chain_emb_path, dpi=300, bbox_inches='tight')
+                    print(f"Chain embedding stats plot saved to {chain_emb_path}")
+                plt.close(fig3)
+
+                # 3D mesh: visualize how each embedding dimension evolves over epochs
+                # epoch_chain_embeddings: list of (num_embeddings, emb_dim) arrays, one per epoch
+                chain_embs = np.stack(self.epoch_chain_embeddings, axis=0)  # shape: (epochs, num_embeddings, emb_dim)
+                num_epochs, num_embeddings, emb_dim = chain_embs.shape
+
+                # For each embedding index, plot a 2D heatmap (epoch x dim) of its vector evolution
+                for idx in range(num_embeddings):
+                    fig_heatmap, ax_heatmap = plt.subplots(figsize=(10, 6))
+                    # Z: (epochs, emb_dim) for this embedding index
+                    Z = chain_embs[:, idx, :]  # shape: (epochs, emb_dim)
+                    im = ax_heatmap.imshow(Z, aspect='auto', cmap='viridis', origin='lower')
+                    ax_heatmap.set_title(f'Chain Embedding {idx} Evolution (Epoch x Dim)')
+                    ax_heatmap.set_xlabel('Embedding Dimension')
+                    ax_heatmap.set_ylabel('Epoch')
+                    fig_heatmap.colorbar(im, ax=ax_heatmap, orientation='vertical', label='Value')
+
+                    # Add visible horizontal lines to separate each epoch
+                    num_epochs = Z.shape[0]
+                    for i in range(1, num_epochs):
+                        ax_heatmap.axhline(i - 0.5, color='black', linewidth=3, alpha=0.8, linestyle='-')
+
+                    plt.tight_layout()
+                    if save_path:
+                        heatmap_path = save_path.replace('.png', f'_chain_emb_{idx}_heatmap.png')
+                        fig_heatmap.savefig(heatmap_path, dpi=300, bbox_inches='tight')
+                        print(f"Chain embedding heatmap for embedding {idx} saved to {heatmap_path}")
+                    plt.close(fig_heatmap)
+
+                # 2D heatmap: show the final chain embeddings (num_embeddings x emb_dim)
+                final_chain_emb = self.epoch_chain_embeddings[-1]  # shape: (num_embeddings, emb_dim)
+                fig_heat, ax_heat = plt.subplots(figsize=(10, 6))
+                im = ax_heat.imshow(final_chain_emb, aspect='auto', cmap='viridis')
+                ax_heat.set_title('Final Chain Embeddings (Heatmap)')
+                ax_heat.set_xlabel('Embedding Dimension')
+                ax_heat.set_ylabel('Embedding Index')
+                fig_heat.colorbar(im, ax=ax_heat, orientation='vertical', label='Value')
+
+                # Add visible horizontal lines to separate each embedding
+                num_embeddings = final_chain_emb.shape[0]
+                for i in range(1, num_embeddings):
+                    ax_heat.axhline(i - 0.5, color='black', linewidth=3, alpha=0.8, linestyle='-')
+
+                plt.tight_layout()
+                if save_path:
+                    heatmap_path = save_path.replace('.png', '_chain_emb_final_heatmap.png')
+                    fig_heat.savefig(heatmap_path, dpi=300, bbox_inches='tight')
+                    print(f"Final chain embedding heatmap saved to {heatmap_path}")
+                plt.close(fig_heat)
         else:
             # Fallback to original plots if no detailed data
             axes[1, 1].text(0.5, 0.5, 'No detailed metrics available', ha='center', va='center', transform=axes[1, 1].transAxes)
