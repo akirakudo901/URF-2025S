@@ -396,7 +396,8 @@ def create_default_config(output_path: str, enhanced_vq: bool = False, phased_tr
 def compute_reconstruction_loss(output_logits: torch.Tensor, 
                               target_sequences: torch.Tensor, 
                               target_mask: torch.Tensor,
-                              pad_token_id: int = 50256) -> torch.Tensor:
+                              pad_token_id: int = 50256,
+                              reduction="mean") -> torch.Tensor:
     """
     Compute reconstruction loss between predicted logits and target sequences.
     
@@ -405,6 +406,7 @@ def compute_reconstruction_loss(output_logits: torch.Tensor,
         target_sequences: Target sequences [batch_size, M, L]
         target_mask: Target mask [batch_size, M, L]
         pad_token_id: Token ID for padding (to ignore in loss computation)
+        reduction: optionally specifies if the criterion reduces, in case we wanna compute per-item loss
         
     Returns:
         torch.Tensor: Reconstruction loss only
@@ -415,7 +417,7 @@ def compute_reconstruction_loss(output_logits: torch.Tensor,
     mask_flat = target_mask.view(-1).bool()
     
     # Create loss function
-    criterion = nn.CrossEntropyLoss(ignore_index=pad_token_id)
+    criterion = nn.CrossEntropyLoss(ignore_index=pad_token_id, reduction=reduction)
     
     # Compute reconstruction loss
     recon_loss = torch.tensor(0.0, device=output_logits.device)
