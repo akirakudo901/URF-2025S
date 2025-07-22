@@ -503,7 +503,7 @@ class EnhancedVectorQuantizer(nn.Module):
             inputs (torch.Tensor): Input embeddings to quantize
             
         Returns:
-            tuple: (quantized, total_loss, perplexity, encoding_indices)
+            tuple: (quantized, total_loss, perplexity, encoding_indices, debug_stats)
         """
 
         def compute_loss(quantized, inputs, encoding_indices):
@@ -597,8 +597,14 @@ class EnhancedVectorQuantizer(nn.Module):
         else:
             indices_shape = input_shape[:-1]
         
-        return quantized, total_loss, perplexity, encoding_indices.view(indices_shape)
-
+        # Compute post-batch-norm input norm stats for debug
+        post_bn_norms = torch.norm(normalized_inputs.detach().view(-1, self.embedding_dim), dim=-1)
+        debug_stats = {
+            'vq_post_bn_input_norm_mean': post_bn_norms.mean().item(),
+            'vq_post_bn_input_norm_std': post_bn_norms.std().item()
+        }
+        return quantized, total_loss, perplexity, encoding_indices.view(indices_shape), debug_stats
+    
     def get_codebook_stats(self):
         """
         Get statistics about codebook usage and health.

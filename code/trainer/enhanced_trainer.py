@@ -160,6 +160,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             print(f"Set max_reset_steps to {max_reset_steps} (based on {total_training_steps} total steps, {reset_stop_fraction*100:.0f}% of training)")
         # Initialize batch norm tracking list for this epoch
         self._current_bn_param_history = []
+        self._detailed_post_bn_norm_history = []
 
         def bn_tracking_callback(**kwargs):
             vq = self.model.vector_quantizer
@@ -171,6 +172,15 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
                     'running_var': vq.batch_norm.running_var.detach().cpu().numpy(),
                     'step': kwargs.get('batch_idx', None),
                 })
+            # Track post-batch-norm input norm stats if present
+            if 'debug_stats' in kwargs:
+                debug_stats = kwargs['debug_stats']
+                if 'vq_post_bn_input_norm_mean' in debug_stats and 'vq_post_bn_input_norm_std' in debug_stats:
+                    self._detailed_post_bn_norm_history.append({
+                        'mean': debug_stats['vq_post_bn_input_norm_mean'],
+                        'std': debug_stats['vq_post_bn_input_norm_std'],
+                        'step': kwargs.get('batch_idx', None),
+                    })
             if detailed_metrics_callback is not None:
                 detailed_metrics_callback(**kwargs)
 
@@ -180,6 +190,12 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         self.detailed_bn_param_history.append(self._current_bn_param_history)
         del self._current_bn_param_history
         self._current_bn_param_history = None
+        # Store post-bn norm history for this epoch
+        if not hasattr(self, 'detailed_post_bn_norm_history'):
+            self.detailed_post_bn_norm_history = []
+        self.detailed_post_bn_norm_history.append(self._detailed_post_bn_norm_history)
+        del self._detailed_post_bn_norm_history
+        self._detailed_post_bn_norm_history = None
         return result
 
     def _update_weights(self):
@@ -532,3 +548,25 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
                         fig3d.savefig(mesh_path, dpi=300, bbox_inches='tight')
                         print(f"BatchNorm 3D mesh plot for {name} saved to {mesh_path}")
                     plt.close(fig3d)
+        # Plot post-batch-norm input norm evolution if available
+        if hasattr(self, 'detailed_post_bn_norm_history') and self.detailed_post_bn_norm_history and any(len(epoch) > 0 for epoch in self.detailed_post_bn_norm_history):
+            # Flatten all epochs into a single list
+            all_post_bn = [item for epoch in self.detailed_post_bn_norm_history for item in epoch]
+            if all_post_bn:
+                means = np.array([p['mean'] for p in all_post_bn])
+                stds = np.array([p['std'] for p in all_post_bn])
+                steps = np.arange(len(all_post_bn))
+                fig, ax = plt.subplots(figsize=(10, 5))
+                ax.plot(steps, means, label='Post-BN Input Norm Mean')
+                ax.fill_between(steps, means - stds, means + stds, alpha=0.3, label='±1 Std')
+                ax.set_title('Post-BatchNorm Input Norm Evolution')
+                ax.set_xlabel('Step')
+                ax.set_ylabel('Norm')
+                ax.legend()
+                ax.grid(True)
+                plt.tight_layout()
+                if save_path:
+                    post_bn_fig_path = save_path.replace('.png', '_post_bn_input_norm.png')
+                    fig.savefig(post_bn_fig_path, dpi=300, bbox_inches='tight')
+                    print(f"Post-BatchNorm input norm plot saved to {post_bn_fig_path}")
+                plt.close(fig)

@@ -971,7 +971,13 @@ class GPT2VQVAE(nn.Module):
             return quantized, vq_loss, perplexity, indices, debug_stats
         
         # Apply VQ
-        quantized, vq_loss, perplexity, indices = self.vector_quantizer(aggregated) # [batch_size*L or batch_size*(K+L), d_model]
+        vq_out = self.vector_quantizer(aggregated)
+        if isinstance(vq_out, tuple) and len(vq_out) == 5:
+            quantized, vq_loss, perplexity, indices, vq_debug_stats = vq_out
+            if isinstance(vq_debug_stats, dict):
+                debug_stats.update(vq_debug_stats)
+        else:
+            quantized, vq_loss, perplexity, indices = vq_out
         
         # Tile back to obtain the same shape and amount of info
         quantized = quantized.unsqueeze(1).expand(-1, M, -1)  # [batch_size*(L or K+L), M, d_model]
