@@ -6,6 +6,7 @@ import os
 import sys
 
 import torch
+import torch.nn.functional as F
 from transformers import GPT2Tokenizer
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -248,28 +249,42 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                     print(f"  Reconstruction Loss: {recon_loss_ar.item():.4f}")
             # Compute and print reconstruction accuracies for all CoTs and examples
             if predicted_tokens_tf is not None and output_logits_tf is not None:
-                _, tf_accuracies = compute_cot_reconstruction_metrics(cot_gt, output_logits_tf, cot_mask_ex)
-                tf_accuracies = tf_accuracies[0]
-                print(f"\n[Teacher-forced] Sequence-level reconstruction accuracy (per CoT, per example):")
+                tf_metrics = compute_cot_reconstruction_metrics(cot_gt, output_logits_tf, cot_mask_ex)
+                tf_token_acc = tf_metrics['token_level_accuracies'][0]
+                tf_seq_accs = tf_metrics['sequence_level_accuracies']
+                print(f"\n[Teacher-forced] Token-level accuracy (per CoT, per example):")
                 print(" | ".join(
-                    [f"CoT {i}: {tf_accuracies[i].item():.4f}" for i in range(tf_accuracies.size(0))]
+                    [f"CoT {i}: {tf_token_acc[i].item():.4f}" for i in range(tf_token_acc.size(0))]
                     ))
-                mean_per_example_tf = tf_accuracies.mean().item() 
-                print(f"[Teacher-forced] Mean sequence-level reconstruction accuracy per example:")
+                print(f"[Teacher-forced] Sequence-level accuracy (thresholds):")
+                for thresh, count in tf_seq_accs.items():
+                    print(f"  Threshold {int(thresh*100)}%: {int(count)} sequences correct")
+                mean_per_example_tf = tf_token_acc.mean().item() 
+                print(f"[Teacher-forced] Mean token-level accuracy per example:")
                 print(f"{mean_per_example_tf:.4f}")
                 tf_mean_per_example_accs.append(mean_per_example_tf)
+                print(f"[Teacher-forced] Perplexity (per CoT, per example):")
+                tf_ppl = tf_metrics['perplexities'][0]
+                print(" | ".join([f"CoT {i}: {tf_ppl[i]:.4f}" for i in range(tf_ppl.size(0))]))
                 
             if output_sequences_ar is not None and output_logits_ar is not None:
-                _, ar_accuracies = compute_cot_reconstruction_metrics(cot_gt, output_logits_ar, cot_mask_ex)
-                ar_accuracies = ar_accuracies[0]
-                print(f"\n[Auto-regressive] Sequence-level reconstruction accuracy (per CoT, per example):")
+                ar_metrics = compute_cot_reconstruction_metrics(cot_gt, output_logits_ar, cot_mask_ex)
+                ar_token_acc = ar_metrics['token_level_accuracies'][0]
+                ar_seq_accs = ar_metrics['sequence_level_accuracies']
+                print(f"\n[Auto-regressive] Token-level accuracy (per CoT, per example):")
                 print(" | ".join(
-                    [f"CoT {i}: {ar_accuracies[i].item():.4f}" for i in range(ar_accuracies.size(0))]
+                    [f"CoT {i}: {ar_token_acc[i].item():.4f}" for i in range(ar_token_acc.size(0))]
                     ))
-                mean_per_example_ar = ar_accuracies.mean().item()
-                print(f"[Auto-regressive] Mean sequence-level reconstruction accuracy per example:")
+                print(f"[Auto-regressive] Sequence-level accuracy (thresholds):")
+                for thresh, count in ar_seq_accs.items():
+                    print(f"  Threshold {int(thresh*100)}%: {int(count)} sequences correct")
+                mean_per_example_ar = ar_token_acc.mean().item()
+                print(f"[Auto-regressive] Mean token-level accuracy per example:")
                 print(f"{mean_per_example_ar:.4f}")
                 ar_mean_per_example_accs.append(mean_per_example_ar)
+                print(f"[Auto-regressive] Perplexity (per CoT, per example):")
+                ar_ppl = ar_metrics['perplexities'][0]
+                print(" | ".join([f"CoT {i}: {ar_ppl[i]:.4f}" for i in range(ar_ppl.size(0))]))
 
             def chunk_text(text, chunk_size=20):
                 if not text:
@@ -518,59 +533,76 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
         print("\nDemonstration completed for {} data!".format(split_name))
 
 
-def compute_cot_reconstruction_metrics(ground_truth_cots, predicted_logits, cot_mask=None):
+def compute_cot_reconstruction_metrics(
+    ground_truth_cots, predicted_logits, cot_mask=None, thresholds=[1.0, 0.95, 0.9]
+):
     """
-    Compute reconstruction loss and accuracy for each CoT sequence using vectorized operations.
-    
+    Compute reconstruction loss, accuracy, and additional metrics for each CoT sequence using vectorized operations.
     Args:
         ground_truth_cots: Tensor of shape [batch, num_thoughts, seq_len]
         predicted_logits: Tensor of shape [batch, num_thoughts, seq_len, vocab_size]
         cot_mask: Optional mask tensor of shape [batch, num_thoughts, seq_len]
-        
+        thresholds: List of floats for sequence-level accuracy thresholds (e.g., [1.0, 0.95, 0.9])
     Returns:
-        reconstruction_losses: Tensor of shape [batch, num_thoughts] with loss per sequence
-        reconstruction_accuracies: Tensor of shape [batch, num_thoughts] with accuracy per sequence
+        metrics: dict with keys:
+            - reconstruction_losses: [batch, num_thoughts]
+            - token_level_accuracies: [batch, num_thoughts]
+            - sequence_level_accuracies: {threshold: float}
+            - perplexities: [batch, num_thoughts]
     """
     batch_size, num_thoughts, seq_len = ground_truth_cots.shape
-    
-    # Get predicted tokens for all CoTs at once
-    predicted_tokens = torch.argmax(predicted_logits, dim=-1)  # [batch, num_thoughts, seq_len]
-    
-    # Initialize tensors for results
-    reconstruction_losses = torch.zeros(batch_size, num_thoughts, device=ground_truth_cots.device)
-    reconstruction_accuracies = torch.zeros(batch_size, num_thoughts, device=ground_truth_cots.device)
-    
-    # Compute reconstruction loss and accuracy for each CoT
-    for j in range(num_thoughts):
-        for b in range(batch_size):
-            # Extract the b-th batch, j-th CoT sequence
-            cot_gt = ground_truth_cots[b:b+1, j:j+1, :]  # [1, 1, seq_len]
-            cot_logits = predicted_logits[b:b+1, j:j+1, :, :]  # [1, 1, seq_len, vocab_size]
-            cot_mask_j = cot_mask[b:b+1, j:j+1, :] if cot_mask is not None else None  # [1, 1, seq_len]
-            
-            # Compute reconstruction loss for this sequence
-            recon_loss = compute_reconstruction_loss(cot_logits, cot_gt, cot_mask_j)
-            reconstruction_losses[b, j] = recon_loss.item()
-            
-            # Compute reconstruction accuracy for this sequence
-            cot_pred = predicted_tokens[b:b+1, j:j+1, :]  # [1, 1, seq_len]
-            
-            if cot_mask_j is not None:
-                # Apply mask to both ground truth and predictions
-                masked_gt = cot_gt[cot_mask_j.bool()]
-                masked_pred = cot_pred[cot_mask_j.bool()]
-            else:
-                masked_gt = cot_gt.flatten()
-                masked_pred = cot_pred.flatten()
-            
-            # Compute accuracy for this sequence
-            if masked_gt.numel() > 0:
-                accuracy = (masked_gt == masked_pred).float().mean().item()
-            else:
-                accuracy = 0.0
-            reconstruction_accuracies[b, j] = accuracy
-    
-    return reconstruction_losses, reconstruction_accuracies
+    # [B, M, L, V]
+    predicted_tokens = torch.argmax(predicted_logits, dim=-1)  # [B, M, L]
+    device = ground_truth_cots.device
+    # Compute mask
+    if cot_mask is not None:
+        mask = cot_mask.bool()
+    else:
+        mask = torch.ones_like(ground_truth_cots, dtype=torch.bool)
+    # Compute reconstruction loss per item
+    # Flatten batch and num_thoughts for efficient computation
+    flat_logits = predicted_logits.view(-1, predicted_logits.size(-1))  # [B*M*L, V]
+    flat_targets = ground_truth_cots.view(-1)  # [B*M*L]
+    flat_mask = mask.view(-1)  # [B*M*L]
+    # Per-token loss (no reduction)
+    per_token_loss = torch.zeros_like(flat_targets, dtype=predicted_logits.dtype, device=device)
+    if flat_mask.sum() > 0:
+        criterion = torch.nn.CrossEntropyLoss(ignore_index=50256, reduction='none')
+        per_token_loss[flat_mask] = criterion(flat_logits[flat_mask], flat_targets[flat_mask])
+    # Reshape to [B, M, L]
+    per_token_loss = per_token_loss.view(batch_size, num_thoughts, seq_len)
+    # Sum over tokens, mean over non-masked tokens per sequence
+    mask_f = mask.float()
+    num_valid = mask_f.sum(dim=2)  # [B, M]
+    # Avoid division by zero
+    num_valid = num_valid + (num_valid == 0)
+    reconstruction_losses = (per_token_loss * mask_f).sum(dim=2) / num_valid  # [B, M]
+    # Token-level accuracy
+    correct = ((predicted_tokens == ground_truth_cots) & mask).float()  # [B, M, L]
+    token_level_accuracies = correct.sum(dim=2) / num_valid  # [B, M]
+    # Sequence-level accuracy for each threshold
+    sequence_level_accuracies = {}
+    for thresh in thresholds:
+        # For each sequence, is accuracy >= threshold?
+        sequence_level_accuracies[thresh] = (token_level_accuracies >= thresh).sum().item()
+    # Perplexity (masked)
+    # Compute log_probs for all tokens
+    log_probs = F.log_softmax(predicted_logits, dim=-1)  # [B, M, L, V]
+    # Gather log_probs of the ground truth tokens
+    gt_log_probs = log_probs.gather(-1, ground_truth_cots.unsqueeze(-1)).squeeze(-1)  # [B, M, L]
+    # Masked negative log likelihood
+    nll = torch.zeros_like(gt_log_probs)
+    nll[mask] = -gt_log_probs[mask]
+    # Mean NLL per sequence
+    nll_sum = nll.sum(dim=2)  # [B, M]
+    nll_mean = nll_sum / num_valid  # [B, M]
+    perplexities = torch.exp(nll_mean)  # [B, M]
+    return {
+        'reconstruction_losses': reconstruction_losses,
+        'token_level_accuracies': token_level_accuracies,
+        'sequence_level_accuracies': sequence_level_accuracies,
+        'perplexities': perplexities
+    }
 
 
 def demonstrate_model_from_checkpoint(checkpoint_path: str, 
