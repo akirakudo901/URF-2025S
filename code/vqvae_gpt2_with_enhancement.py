@@ -885,7 +885,9 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
                  decoder_dropout=None, decoder_activation_function=None, 
                  reset_stop_fraction=None,
                  # Only latent decode mode
-                 only_latent_decode=False):
+                 only_latent_decode=False,
+                 # Simple decoder mode
+                 simple_decoder=False):
         """
         Enhanced GPT2VQVAE with improved vector quantization.
         
@@ -945,7 +947,9 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             decoder_n_inner=decoder_n_inner,
             decoder_dropout=decoder_dropout,
             decoder_activation_function=decoder_activation_function,
-            only_latent_decode=only_latent_decode
+            # Decoder mode
+            only_latent_decode=only_latent_decode,
+            simple_decoder=simple_decoder
         )
         
         # Replace the vector quantizer with enhanced version
