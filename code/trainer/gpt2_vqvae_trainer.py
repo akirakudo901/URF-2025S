@@ -41,8 +41,9 @@ except ImportError:
 TRACK_MEMORY = False
 TRACK_IN_EPOCH_MEMORY_EVERY_N = 200
 TRACK_IN_EPOCH_MEMORY = False
-TRACK_IN_EPOCH_MEMORY_LOGGING = True
-SEND_NOTIFICATION = True
+TRACK_IN_EPOCH_MEMORY_LOGGING = False
+SEND_START_END_NOTIFICATION = True
+SEND_MID_TRAINING_NOTIFICATION = False
 
 # Profiler configuration
 TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
@@ -1217,7 +1218,7 @@ class GPT2VQVAETrainer:
         # Training loop with profiler
         try:
             # Send message that training has started
-            if SEND_NOTIFICATION:
+            if SEND_START_END_NOTIFICATION:
                 self.send_training_start_phone_notification()
 
             # Set up profiler for this epoch if enabled
@@ -1302,7 +1303,7 @@ class GPT2VQVAETrainer:
                     else:
                         self.save_checkpoint(epoch + 1, test_metrics, True)
                     # Send checkpoint notification
-                    if SEND_NOTIFICATION:
+                    if SEND_MID_TRAINING_NOTIFICATION:
                         self.send_checkpoint_notification(epoch + 1, is_best=True)
                     # save training visualizations when saving a checkpoint
                     save_training_visualizations(self, prefix=f"epoch_{epoch+1}")
@@ -1314,7 +1315,7 @@ class GPT2VQVAETrainer:
                     else:
                         self.save_checkpoint(epoch + 1, test_metrics, False)
                     # Send checkpoint notification
-                    if SEND_NOTIFICATION:
+                    if SEND_MID_TRAINING_NOTIFICATION:
                         self.send_checkpoint_notification(epoch + 1, is_best=False)
                     # save training visualizations when saving a checkpoint
                     save_training_visualizations(self, prefix=f"epoch_{epoch+1}")
@@ -1414,7 +1415,7 @@ class GPT2VQVAETrainer:
                 else:
                     self.save_checkpoint(e.epoch, dummy_val_metrics, is_best=False, checkpoint_path=aborted_checkpoint_path)
                 # Send checkpoint notification for aborted training
-                if SEND_NOTIFICATION:
+                if SEND_MID_TRAINING_NOTIFICATION:
                     self.send_checkpoint_notification(e.epoch, is_best=False)
                 print(f"Aborted training checkpoint saved (trained {total_batches_trained} batches, threshold: {minimum_batches})")
 
@@ -1428,7 +1429,7 @@ class GPT2VQVAETrainer:
                     else:
                         self.save_checkpoint(e.epoch, dummy_val_metrics, is_best=True, checkpoint_path=best_aborted_path)
                     # Send checkpoint notification for best aborted model
-                    if SEND_NOTIFICATION:
+                    if SEND_MID_TRAINING_NOTIFICATION:
                         self.send_checkpoint_notification(e.epoch, is_best=True)
                     print(f"New best model (from aborted training) saved to: {best_aborted_path}")
             else:
@@ -1458,7 +1459,7 @@ class GPT2VQVAETrainer:
             }
             
             # Send the phone notification with aborted status
-            if SEND_NOTIFICATION:
+            if SEND_START_END_NOTIFICATION:
                 _ = self.send_training_completion_phone_notification(
                     final_metrics=final_metrics,
                     training_duration=training_duration,
@@ -1474,7 +1475,7 @@ class GPT2VQVAETrainer:
             print(f"Training error: {e}")
             traceback.print_exc()  
             # Send the phone notification with aborted status
-            if SEND_NOTIFICATION:
+            if SEND_START_END_NOTIFICATION:
                 # Format the message
                 message = f"Training halted for {self.run_name} with error: {e}!\n"
                 send_notification(message)
@@ -1499,7 +1500,7 @@ class GPT2VQVAETrainer:
         }
         
         # Send the phone notification
-        if SEND_NOTIFICATION:
+        if SEND_START_END_NOTIFICATION:
             _ = self.send_training_completion_phone_notification(
                 final_metrics=final_metrics,
                 training_duration=training_duration
