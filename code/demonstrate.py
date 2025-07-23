@@ -564,6 +564,7 @@ def compute_cot_reconstruction_metrics(
     flat_logits = predicted_logits.view(-1, predicted_logits.size(-1))  # [B*M*L, V]
     flat_targets = ground_truth_cots.view(-1)  # [B*M*L]
     flat_mask = mask.view(-1)  # [B*M*L]
+    
     # Per-token loss (no reduction)
     per_token_loss = torch.zeros_like(flat_targets, dtype=predicted_logits.dtype, device=device)
     if flat_mask.sum() > 0:
@@ -577,14 +578,17 @@ def compute_cot_reconstruction_metrics(
     # Avoid division by zero
     num_valid = num_valid + (num_valid == 0)
     reconstruction_losses = (per_token_loss * mask_f).sum(dim=2) / num_valid  # [B, M]
+    
     # Token-level accuracy
     correct = ((predicted_tokens == ground_truth_cots) & mask).float()  # [B, M, L]
     token_level_accuracies = correct.sum(dim=2) / num_valid  # [B, M]
+    
     # Sequence-level accuracy for each threshold
     sequence_level_accuracies = {}
     for thresh in thresholds:
         # For each sequence, is accuracy >= threshold?
         sequence_level_accuracies[thresh] = (token_level_accuracies >= thresh).sum().item()
+    
     # Perplexity (masked)
     # Compute log_probs for all tokens
     log_probs = F.log_softmax(predicted_logits, dim=-1)  # [B, M, L, V]
@@ -603,6 +607,71 @@ def compute_cot_reconstruction_metrics(
         'sequence_level_accuracies': sequence_level_accuracies,
         'perplexities': perplexities
     }
+
+
+def compute_word_latent_mapping_on_dataset(
+    model, tokenizer,
+    prompt_sequences=None, cot_sequences=None, prompt_mask=None, cot_mask=None,
+    split_name=None, checkpoint_path=None,
+    data_dir=None, num_thoughts=None, seed=42,
+    sample_size=None
+):
+    """
+    Compute the word-to-latent mapping analysis for the entire dataset and save the results.
+    Args:
+        model: The model instance
+        tokenizer: The tokenizer instance
+        prompt_sequences: Tensor of prompt sequences (optional if data_dir is provided)
+        cot_sequences: Tensor of CoT sequences (optional if data_dir is provided)
+        prompt_mask: Mask for prompt sequences (optional if data_dir is provided)
+        cot_mask: Mask for CoT sequences (optional if data_dir is provided)
+        split_name: Name of the data split (e.g., 'train', 'test')
+        checkpoint_path: Path to the model checkpoint (used for output directory)
+        data_dir: Path to data directory (optional, alternative to providing sequences directly)
+        num_thoughts: Number of CoT sequences per example (required if data_dir is provided)
+        seed: Random seed for data loading (default: 42)
+        sample_size: Number of samples to analyze (default: None, meaning all samples)
+    """
+    # If data_dir is provided, load data
+    if data_dir is not None:
+        if num_thoughts is None:
+            raise ValueError("num_thoughts must be provided when loading data from data_dir.")
+        print(f"Loading data from {data_dir} for split '{split_name}'...")
+        try:
+            train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, \
+            test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask = load_training_data(
+                data_dir=data_dir, max_samples=None, num_thoughts=num_thoughts, seed=seed
+            )
+            if split_name == "train":
+                prompt_sequences, cot_sequences, prompt_mask, cot_mask = \
+                    train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask
+            elif split_name == "test":
+                prompt_sequences, cot_sequences, prompt_mask, cot_mask = \
+                    test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask
+            else:
+                raise ValueError(f"Unknown split_name: {split_name}. Must be 'train' or 'test'.")
+        except Exception as e:
+            print(f"Error loading data from {data_dir}: {e}")
+            return
+    # Check that required tensors are available
+    if prompt_sequences is None or cot_sequences is None:
+        raise ValueError("Either prompt_sequences/cot_sequences or data_dir and split_name must be provided.")
+    device = next(model.parameters()).device
+    analyzer = LatentVisualizationAnalyzer(model, tokenizer, device)
+    word_mapping_dir = os.path.join(os.path.dirname(checkpoint_path), f"word_mapping_analysis_{split_name}")
+    os.makedirs(word_mapping_dir, exist_ok=True)
+    print(f"Computing word-to-latent mapping analysis for {split_name} data...")
+    analyzer.analyze_word_to_latent_mapping(
+        prompt_sequences=prompt_sequences,
+        cot_sequences=cot_sequences,
+        prompt_mask=prompt_mask,
+        cot_mask=cot_mask,
+        output_dir=word_mapping_dir,
+        sample_size=sample_size,
+        top_k_words=15,
+        top_k_codes=25
+    )
+    print(f"Word-to-latent mapping analysis completed for {split_name} data! Results saved to {word_mapping_dir}.")
 
 
 def demonstrate_model_from_checkpoint(checkpoint_path: str, 
