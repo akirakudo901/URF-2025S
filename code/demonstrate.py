@@ -561,9 +561,9 @@ def compute_cot_reconstruction_metrics(
         mask = torch.ones_like(ground_truth_cots, dtype=torch.bool)
     # Compute reconstruction loss per item
     # Flatten batch and num_thoughts for efficient computation
-    flat_logits = predicted_logits.view(-1, predicted_logits.size(-1))  # [B*M*L, V]
-    flat_targets = ground_truth_cots.view(-1)  # [B*M*L]
-    flat_mask = mask.view(-1)  # [B*M*L]
+    flat_logits = predicted_logits.reshape(-1, predicted_logits.size(-1))  # [B*M*L, V]
+    flat_targets = ground_truth_cots.reshape(-1)  # [B*M*L]
+    flat_mask = mask.reshape(-1)  # [B*M*L]
     
     # Per-token loss (no reduction)
     per_token_loss = torch.zeros_like(flat_targets, dtype=predicted_logits.dtype, device=device)
