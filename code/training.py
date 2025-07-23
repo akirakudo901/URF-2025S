@@ -89,6 +89,10 @@ def main():
                        help='Override minimum batches required to save aborted checkpoint (default: 200)')
     parser.add_argument('--batch-size', type=int, default=None,
                        help='Override batch size from config')
+    parser.add_argument('--num-embeddings', type=int, default=None,
+                       help='Override num_embeddings (codebook size) in model config')
+    parser.add_argument('--reservoir-size', type=int, default=None,
+                       help='Override reservoir_size in model config')
     parser.add_argument('--simple', action='store_true', default=False,
                        help='Use SimpleGPT2VQVAETrainer and SimpleGPT2VQVAE model (default: False)')
     parser.add_argument('--enhanced', action='store_true', default=False,
@@ -232,6 +236,15 @@ def main():
         if args.batch_size:
             training_config['batch_size'] = args.batch_size
             print(f"Overriding batch_size from config to: {args.batch_size}")
+        
+        # Override num_embeddings (codebook size) if specified
+        if args.num_embeddings is not None:
+            model_config['num_embeddings'] = args.num_embeddings
+            print(f"Overriding num_embeddings (codebook size) to: {args.num_embeddings}")
+        # Override reservoir_size if specified
+        if args.reservoir_size is not None:
+            model_config['reservoir_size'] = args.reservoir_size
+            print(f"Overriding reservoir_size to: {args.reservoir_size}")
         
         # Handle use_vq argument
         if args.no_vq:
