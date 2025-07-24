@@ -500,10 +500,9 @@ class GPT2VQVAE(nn.Module):
                  # Decoder-specific parameters (take precedence over unified if specified)
                  decoder_n_layer=None, decoder_n_head=None, decoder_n_inner=None,
                  decoder_dropout=None, decoder_activation_function=None,
-                 # Only latent decode mode
                  only_latent_decode=False,
-                 # Simple decoder mode
-                 simple_decoder=False):
+                 simple_decoder=False,
+                 embed_sum_decode=False):
         """
         GPT2-based VQ-VAE model that uses GPT2 as both encoder and decoder.
         
@@ -546,6 +545,7 @@ class GPT2VQVAE(nn.Module):
             decoder_activation_function (str, optional): Activation function for decoder
             only_latent_decode (bool): If True, use a decoder-only GPT2LMHeadModel and decodes from prompt embeddings + latents only.
             simple_decoder (bool): If True, use a decoder-only GPT2LMHeadModel for the decoder and a simplified decode logic.
+            embed_sum_decode (bool): If True, use the embed_sum_decode mode for decoding.
         """
         super(GPT2VQVAE, self).__init__()
         
@@ -553,6 +553,7 @@ class GPT2VQVAE(nn.Module):
             raise ValueError("Cannot set both only_latent_decode and simple_decoder to True.")
         self.only_latent_decode = only_latent_decode
         self.simple_decoder = simple_decoder
+        self.embed_sum_decode = embed_sum_decode
 
         # TODO ADD INITIALIZATION FOR ENCODER, DECODER AND MLP
         # THOUGHT: COULD ADD output_attentions=True FOR DEBUGGING (E.G. FOR HAND-MADE CROSS-ATTENTION MASK OF DECODER)
@@ -1018,6 +1019,11 @@ class GPT2VQVAE(nn.Module):
         chain_emb = self.chain_embeddings(chain_indices).unsqueeze(1)  # [batch_size*M, 1, d_model]
         chain_memory = memory + chain_emb  # Add to all positions in the sequence
 
+        # --- EMBED_SUM_DECODE MODE ---
+        if self.embed_sum_decode:
+            return self._decode_embed_sum(chain_memory, cot_sequences, cot_mask, ar_position, pad_token_id)
+        # --- END EMBED_SUM_DECODE ---
+
         # Check if gradient checkpointing is enabled to determine caching strategy
         use_caching = not self.is_gradient_checkpointing_enabled()
 
@@ -1033,6 +1039,47 @@ class GPT2VQVAE(nn.Module):
         else:
             return self._decode_normal(chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
                                        ar_position, pad_token_id, use_caching)
+
+    def _decode_embed_sum(self, chain_memory, cot_sequences, cot_mask, ar_position, pad_token_id):
+        """
+        Helper for embed_sum_decode mode. See decode() docstring for details.
+        """
+        _, L, _ = chain_memory.shape
+        B, M, _ = cot_sequences.shape
+        # cot_sequences: [B, M, L]
+        cot_sequences_flat = cot_sequences.reshape(B * M, L)  # [B*M, L]
+        # Prepend filler token (pad_token_id) to each sequence
+        filler = torch.full((B * M, 1), pad_token_id, dtype=cot_sequences_flat.dtype, device=cot_sequences_flat.device)
+        cot_with_filler = torch.cat([filler, cot_sequences_flat[:, :-1]], dim=1)  # [B*M, L]
+        # Get token embeddings for cot_with_filler
+        token_embeds = self.decoder.transformer.wte(cot_with_filler)  # [B*M, L, d_model]
+        # Add latent embeddings
+        input_embeds = token_embeds + chain_memory  # [B*M, L, d_model]
+        # Build attention mask if provided
+        if cot_mask is not None:
+            cot_mask_flat = cot_mask.view(B * M, L)
+            # The mask is shifted to match cot_with_filler
+            cot_mask_flat = torch.cat([
+                torch.ones((B * M, 1), dtype=cot_mask_flat.dtype, device=cot_mask_flat.device),  # filler position
+                cot_mask_flat[:, :-1]
+            ], dim=1)  # [B*M, L]
+        else:
+            cot_mask_flat = torch.ones(B * M, L, device=chain_memory.device)
+        # Run decoder with inputs_embeds
+        decoder_outputs = self.decoder(
+            input_ids=None,
+            inputs_embeds=input_embeds,
+            attention_mask=cot_mask_flat,
+            encoder_hidden_states=None,
+            encoder_attention_mask=None,
+            use_cache=False,
+            return_dict=True
+        )
+        all_logits = decoder_outputs.logits  # [B*M, L, vocab_size]
+        if ar_position is None:
+            return all_logits.view(B, M, L, -1)
+        else:
+            return all_logits.view(B, M, L, -1)[:, :, ar_position:ar_position+1, :]
     
     def _decode_simple_decoder(self, chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
                                ar_position, pad_token_id, use_caching):
