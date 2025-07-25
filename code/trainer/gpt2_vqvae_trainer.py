@@ -43,7 +43,7 @@ TRACK_IN_EPOCH_MEMORY_EVERY_N = 200
 TRACK_IN_EPOCH_MEMORY = False
 TRACK_IN_EPOCH_MEMORY_LOGGING = False
 SEND_START_END_NOTIFICATION = True
-SEND_MID_TRAINING_NOTIFICATION = False
+SEND_MID_TRAINING_NOTIFICATION = True
 
 # Profiler configuration
 TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
@@ -987,34 +987,8 @@ class GPT2VQVAETrainer:
             else:
                 message = f"🎉 Training Complete for {self.run_name}!\n\n"
             
-            # Add basic metrics
-            if 'loss' in final_metrics:
-                message += f"Final Train Loss: {final_metrics['loss']:.4f}\n"
-            if 'recon_loss' in final_metrics:
-                message += f"Final Train Recon Loss: {final_metrics['recon_loss']:.4f}\n"
-            
-            if 'val_loss' in final_metrics:
-                message += f"Final Val Loss: {final_metrics['val_loss']:.4f}\n"
-            if 'val_recon_loss' in final_metrics:
-                message += f"Final Val Recon Loss: {final_metrics['val_recon_loss']:.4f}\n"
-            
-            if 'vq_loss' in final_metrics:
-                message += f"VQ Loss: {final_metrics['vq_loss']:.4f}\n"
-            if 'perplexity' in final_metrics:
-                message += f"Perplexity: {final_metrics['perplexity']:.2f}\n"
-            
-            # Add training duration if provided
-            if training_duration is not None:
-                hours = int(training_duration // 3600)
-                minutes = int((training_duration % 3600) // 60)
-                seconds = int(training_duration % 60)
-                message += f"Duration: {hours:02d}:{minutes:02d}:{seconds:02d}\n"
-            
-            # Add additional information
-            message += f"Model: {self.model_config.get('model_type', 'GPT2VQVAE')}\n"
-            message += f"Device: {self.device}\n"
-            message += f"Best Val Loss: {self.best_val_loss:.4f}\n"
-            message += f"Epochs: {len(self.train_losses)}\n"
+            metric_dict = self._get_training_completion_metric_dict(final_metrics, training_duration)
+            message += self._get_training_completion_message_from_dict(metric_dict)
             
             # Send the phone notification
             return send_notification(message)
@@ -1023,7 +997,45 @@ class GPT2VQVAETrainer:
             print(f"Error sending training completion phone notification: {e}")
             return False
     
+    def _get_training_completion_metric_dict(self, final_metrics: Dict[str, float], 
+                                             training_duration: Optional[float] = None):
+        metric_dict = {}
+        if 'loss' in final_metrics:
+            metric_dict["Final Train Loss"] = f"{final_metrics['loss']:.4f}"
+        if 'recon_loss' in final_metrics:
+            metric_dict["Final Train Recon Loss"] = f"{final_metrics['recon_loss']:.4f}"
+        
+        if 'val_loss' in final_metrics:
+            metric_dict["Final Val Loss"] = f"{final_metrics['val_loss']:.4f}"
+        if 'val_recon_loss' in final_metrics:
+            metric_dict["Final Val Recon Loss"] = f"{final_metrics['val_recon_loss']:.4f}"
+        
+        if 'vq_loss' in final_metrics:
+            metric_dict["VQ Loss"] = f"{final_metrics['vq_loss']:.4f}"
+        if 'perplexity' in final_metrics:
+            metric_dict["Perplexity"] = f"{final_metrics['perplexity']:.2f}"
+        
+        # Add training duration if provided
+        if training_duration is not None:
+            hours = int(training_duration // 3600)
+            minutes = int((training_duration % 3600) // 60)
+            seconds = int(training_duration % 60)
+            metric_dict["Duration"] = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        
+        # Add additional information
+        metric_dict["Model"] = f"{self.model_config.get('model_type', 'GPT2VQVAE')}"
+        metric_dict["Device"] = f"{self.device}"
+        metric_dict["Best Val Loss"] = f"{self.best_val_loss:.4f}"
+        metric_dict["Epochs"] = f"{len(self.train_losses)}"
 
+        return metric_dict
+
+    def _get_training_completion_message_from_dict(self, name_val_dict):
+        """Takes a dict: (metric_name, metric_str) both already formatted & str, and make a message."""
+        msg = ""
+        for metric_name, metric_str in name_val_dict.items():
+            msg += f"{metric_name}: {metric_str}\n"
+        return msg
     
     def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None, remove_other_best_models: bool = True, **kwargs):
         """

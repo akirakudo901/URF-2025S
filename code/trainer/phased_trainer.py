@@ -13,6 +13,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import required modules and functions
+from phone_notification import send_notification
 from train_utils import compute_reconstruction_loss
 
 # Import the parent trainer class
@@ -388,3 +389,51 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
                 self.best_val_loss_per_phase[k] = best
         print(f"Current best val loss per phase: {self.best_val_loss_per_phase}")
         return checkpoint
+
+    def send_training_completion_phone_notification(self, final_metrics: Dict[str, float], 
+                                                  training_duration: Optional[float] = None,
+                                                  aborted: bool = False) -> bool:
+        """
+        Send a formatted phone notification when training is complete.
+        
+        Args:
+            final_metrics: Dictionary containing final training metrics
+            training_duration: Duration of training in seconds (optional)
+            aborted: Whether training was aborted (default: False)
+            auth_info_path: Path to the auth info YAML file (optional)
+            
+        Returns:
+            bool: True if notification was sent successfully, False otherwise
+        """
+        try:
+            # Format the message
+            if aborted:
+                message = f"🛑 Training Aborted for {self.run_name}!\n\n"
+            else:
+                message = f"🎉 Training Complete for {self.run_name}!\n\n"
+            
+            metric_dict = self._get_training_completion_metric_dict(final_metrics, training_duration)
+
+            # Show per-phase best val loss if available, otherwise fallback to overall best
+            if hasattr(self, "best_val_loss_per_phase") and isinstance(self.best_val_loss_per_phase, dict):
+                del metric_dict["Best Val Loss"]
+                
+                formatted_phase_val_loss = ""
+                
+                for phase in ["initialization", "reinitialization", "normal"]:
+                    val = self.best_val_loss_per_phase.get(phase, float('inf'))
+                    if val == float('inf'):
+                        formatted_phase_val_loss += f"  {phase}: N/A\n"
+                    else:
+                        formatted_phase_val_loss += f"  {phase}: {val:.4f}\n"
+                
+                metric_dict["Best Val Loss (per phase)"] = formatted_phase_val_loss
+
+            message += self._get_training_completion_message_from_dict(metric_dict)
+            
+            # Send the phone notification
+            return send_notification(message)
+            
+        except Exception as e:
+            print(f"Error sending training completion phone notification: {e}")
+            return False
