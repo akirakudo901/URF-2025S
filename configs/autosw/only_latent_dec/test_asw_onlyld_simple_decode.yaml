@@ -29,12 +29,12 @@ model_config:
   vocab_size: 50257          # GPT2 vocabulary size
   d_model: 768              # GPT2 model dimension
   n_positions: 1024         # Maximum sequence length for GPT2
-  only_latent_decode: True
+  simple_decoder: True
   
   # ============================================================================
   # VQ-VAE Specific Parameters
   # ============================================================================
-  num_embeddings: 1024       # VQ codebook size
+  num_embeddings: 2048       # VQ codebook size
   commitment_cost: 0.25     # VQ commitment cost
   aggregation_hidden_dim: 1536  # Aggregation MLP hidden dimension
   num_thoughts: 2          # Number of parallel sequences
@@ -82,8 +82,8 @@ training_config:
   # Basic Training Parameters
   # ============================================================================
   learning_rate: 1e-4       # Learning rate
-  num_epochs: 30            # Number of training epochs
-  batch_size: 64            # Batch size (reduced for memory efficiency)
+  num_epochs: 2            # Number of training epochs
+  batch_size: 16            # Batch size (reduced for memory efficiency)
   val_split: 0.1            # Fraction of data for validation
   
   # ============================================================================
@@ -111,11 +111,11 @@ training_config:
   # Memory Optimization Settings
   # ============================================================================
   use_mixed_precision: true           # Enable mixed precision training
-  gradient_accumulation_steps: 2      # Effective batch size = batch_size * gradient_accumulation_steps
-  use_gradient_checkpointing: true    # Enable gradient checkpointing for memory efficiency
+  gradient_accumulation_steps: 8      # Effective batch size = batch_size * gradient_accumulation_steps
+  use_gradient_checkpointing: false    # Enable gradient checkpointing for memory efficiency
   use_dynamic_batching: false         # Enable for variable sequence lengths
   max_tokens_per_batch: 8192          # For dynamic batching
-  max_samples: null                   # Limit samples for debugging (set to number for testing)
+  max_samples: 512                   # Limit samples for debugging (set to number for testing)
   
   # ============================================================================
   # Perplexity Threshold Monitoring
@@ -127,7 +127,7 @@ training_config:
   # Checkpoint and Saving Settings
   # ============================================================================
   save_every: 5                       # Save checkpoint every N epochs
-  checkpoint_dir: checkpoints/asw_onlyld/small/two_thoughts_norm_tracked  # Directory for saving checkpoints
+  checkpoint_dir: checkpoints/asw_onlyld/small/test_two_thoughts_simple_decoder  # Directory for saving checkpoints
   minimum_batches_for_checkpoint: 200 # Minimum number of batches trained before saving aborted checkpoint
   
   # ============================================================================
@@ -140,9 +140,9 @@ training_config:
   # Phased Training Parameters
   # ============================================================================
   # one epoch = 55813 // 128 = 436 (based on calculation) 
-  initialization_steps: 2180          # Steps to train in no-vq mode
-  r_reestim: 43                     # Frequency of codebook reinitialization
-  quantization_start: 4360           # Step to start normal VQ training
+  initialization_steps: 2          # Steps to train in no-vq mode
+  r_reestim: 1                     # Frequency of codebook reinitialization
+  quantization_start: 4           # Step to start normal VQ training
   codebook_lr_multiplier: 1.0        # Codebook learning rate multiplier
 
   # ============================================================================

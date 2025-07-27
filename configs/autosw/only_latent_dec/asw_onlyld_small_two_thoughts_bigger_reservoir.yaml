@@ -49,7 +49,7 @@ model_config:
   use_ema: true             # Whether to use EMA updates
   reset_stop_fraction: 0.2  # Fraction of training during which resets are allowed
   max_reset_steps: null
-  reservoir_size: 10000
+  reservoir_size: 65536
   use_batch_norm: true
   
   # ============================================================================
@@ -83,7 +83,7 @@ training_config:
   # ============================================================================
   learning_rate: 1e-4       # Learning rate
   num_epochs: 30            # Number of training epochs
-  batch_size: 64            # Batch size (reduced for memory efficiency)
+  batch_size: 128            # Batch size (reduced for memory efficiency)
   val_split: 0.1            # Fraction of data for validation
   
   # ============================================================================
@@ -111,7 +111,7 @@ training_config:
   # Memory Optimization Settings
   # ============================================================================
   use_mixed_precision: true           # Enable mixed precision training
-  gradient_accumulation_steps: 2      # Effective batch size = batch_size * gradient_accumulation_steps
+  gradient_accumulation_steps: 1      # Effective batch size = batch_size * gradient_accumulation_steps
   use_gradient_checkpointing: true    # Enable gradient checkpointing for memory efficiency
   use_dynamic_batching: false         # Enable for variable sequence lengths
   max_tokens_per_batch: 8192          # For dynamic batching
@@ -127,7 +127,7 @@ training_config:
   # Checkpoint and Saving Settings
   # ============================================================================
   save_every: 5                       # Save checkpoint every N epochs
-  checkpoint_dir: checkpoints/asw_onlyld/small/two_thoughts_norm_tracked  # Directory for saving checkpoints
+  checkpoint_dir: checkpoints/asw_onlyld/small/two_thoughts_bigger_reservoir  # Directory for saving checkpoints
   minimum_batches_for_checkpoint: 200 # Minimum number of batches trained before saving aborted checkpoint
   
   # ============================================================================
@@ -149,7 +149,7 @@ training_config:
   # Auto Training Parameters
   # ============================================================================
   auto_switch_patience: 3
-  auto_switch_validation_checks_per_epoch: 5
+  auto_switch_validation_checks_per_epoch: 6
   
   # ============================================================================
   # Data Configuration

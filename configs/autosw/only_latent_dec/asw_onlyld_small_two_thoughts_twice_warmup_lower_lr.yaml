@@ -81,8 +81,8 @@ training_config:
   # ============================================================================
   # Basic Training Parameters
   # ============================================================================
-  learning_rate: 1e-4       # Learning rate
-  num_epochs: 30            # Number of training epochs
+  learning_rate: 5e-5       # Learning rate
+  num_epochs: 60            # Number of training epochs
   batch_size: 64            # Batch size (reduced for memory efficiency)
   val_split: 0.1            # Fraction of data for validation
   
@@ -127,7 +127,7 @@ training_config:
   # Checkpoint and Saving Settings
   # ============================================================================
   save_every: 5                       # Save checkpoint every N epochs
-  checkpoint_dir: checkpoints/asw_onlyld/small/two_thoughts_norm_tracked  # Directory for saving checkpoints
+  checkpoint_dir: checkpoints/asw_onlyld/small/two_thoughts_lower_lr  # Directory for saving checkpoints
   minimum_batches_for_checkpoint: 200 # Minimum number of batches trained before saving aborted checkpoint
   
   # ============================================================================
@@ -140,16 +140,17 @@ training_config:
   # Phased Training Parameters
   # ============================================================================
   # one epoch = 55813 // 128 = 436 (based on calculation) 
-  initialization_steps: 2180          # Steps to train in no-vq mode
+  initialization_steps: 9720          # Steps to train in no-vq mode
   r_reestim: 43                     # Frequency of codebook reinitialization
-  quantization_start: 4360           # Step to start normal VQ training
+  reestimation_phase_length: 4360            # How long to do reestimation
+  # quantization_start: 4360           # Step to start normal VQ training
   codebook_lr_multiplier: 1.0        # Codebook learning rate multiplier
 
   # ============================================================================
   # Auto Training Parameters
   # ============================================================================
   auto_switch_patience: 3
-  auto_switch_validation_checks_per_epoch: 5
+  auto_switch_validation_checks_per_epoch: 9
   
   # ============================================================================
   # Data Configuration

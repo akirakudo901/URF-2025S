@@ -36,8 +36,8 @@ model_config:
   # ============================================================================
   num_embeddings: 1024       # VQ codebook size
   commitment_cost: 0.25     # VQ commitment cost
-  aggregation_hidden_dim: 1536  # Aggregation MLP hidden dimension
-  num_thoughts: 2          # Number of parallel sequences
+  aggregation_hidden_dim: 3072  # Aggregation MLP hidden dimension
+  num_thoughts: 4          # Number of parallel sequences
   
   # ============================================================================
   # Enhanced Vector Quantizer Parameters
@@ -49,7 +49,7 @@ model_config:
   use_ema: true             # Whether to use EMA updates
   reset_stop_fraction: 0.2  # Fraction of training during which resets are allowed
   max_reset_steps: null
-  reservoir_size: 10000
+  reservoir_size: 32768
   use_batch_norm: true
   
   # ============================================================================
@@ -81,8 +81,8 @@ training_config:
   # ============================================================================
   # Basic Training Parameters
   # ============================================================================
-  learning_rate: 1e-4       # Learning rate
-  num_epochs: 30            # Number of training epochs
+  learning_rate: 3e-4       # Learning rate
+  num_epochs: 60            # Number of training epochs
   batch_size: 64            # Batch size (reduced for memory efficiency)
   val_split: 0.1            # Fraction of data for validation
   
@@ -98,7 +98,7 @@ training_config:
   # Learning Rate Scheduler
   # ============================================================================
   use_lr_scheduler: true    # Whether to use learning rate scheduler
-  min_lr: 1e-6             # Minimum learning rate for cosine annealing
+  min_lr: 3e-6             # Minimum learning rate for cosine annealing
   
   # ============================================================================
   # Loss Function Parameters
@@ -126,34 +126,34 @@ training_config:
   # ============================================================================
   # Checkpoint and Saving Settings
   # ============================================================================
-  save_every: 5                       # Save checkpoint every N epochs
-  checkpoint_dir: checkpoints/asw_onlyld/small/two_thoughts_norm_tracked  # Directory for saving checkpoints
+  save_every: 10                       # Save checkpoint every N epochs
+  checkpoint_dir: checkpoints/asw_onlyld/small/four_thoughts
   minimum_batches_for_checkpoint: 200 # Minimum number of batches trained before saving aborted checkpoint
   
   # ============================================================================
   # Monitoring and Logging
   # ============================================================================
-  num_measurements_per_epoch: 5      # Number of detailed metrics per epoch
+  num_measurements_per_epoch: 3      # Number of detailed metrics per epoch
   enhanced_codebook_tracking: true    # Enable enhanced codebook monitoring
   
   # ============================================================================
   # Phased Training Parameters
   # ============================================================================
-  # one epoch = 55813 // 128 = 436 (based on calculation) 
-  initialization_steps: 2180          # Steps to train in no-vq mode
-  r_reestim: 43                     # Frequency of codebook reinitialization
-  quantization_start: 4360           # Step to start normal VQ training
+  # one epoch = 29498 // 128 = 230 (based on calculation) 
+  initialization_steps: 4600          # Steps to train in no-vq mode
+  r_reestim: 23                     # Frequency of codebook reinitialization
+  reestimation_phase_length: 2300           # Step to start normal VQ training
   codebook_lr_multiplier: 1.0        # Codebook learning rate multiplier
 
   # ============================================================================
   # Auto Training Parameters
   # ============================================================================
   auto_switch_patience: 3
-  auto_switch_validation_checks_per_epoch: 5
+  auto_switch_validation_checks_per_epoch: 6
   
   # ============================================================================
   # Data Configuration
   # ============================================================================
-  data_dir: data/GSM8K/128_128/batch_2  # Directory containing training data 
+  data_dir: data/GSM8K/128_128/batch_4  # Directory containing training data 
 
   profiler_enabled: False
