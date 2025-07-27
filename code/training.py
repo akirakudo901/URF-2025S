@@ -93,6 +93,8 @@ def main():
                        help='Override num_embeddings (codebook size) in model config')
     parser.add_argument('--reservoir-size', type=int, default=None,
                        help='Override reservoir_size in model config')
+    parser.add_argument('--commitment-cost', type=float, default=None,
+                       help='Override commitment_cost in model config')
     parser.add_argument('--simple', action='store_true', default=False,
                        help='Use SimpleGPT2VQVAETrainer and SimpleGPT2VQVAE model (default: False)')
     parser.add_argument('--enhanced', action='store_true', default=False,
@@ -245,6 +247,11 @@ def main():
         if args.reservoir_size is not None:
             model_config['reservoir_size'] = args.reservoir_size
             print(f"Overriding reservoir_size to: {args.reservoir_size}")
+        
+        # Override commitment_cost if specified
+        if args.commitment_cost is not None:
+            model_config['commitment_cost'] = args.commitment_cost
+            print(f"Overriding commitment_cost to: {args.commitment_cost}")
         
         # Handle use_vq argument
         if args.no_vq:
