@@ -1796,6 +1796,124 @@ class GPT2VQVAETrainer:
                     fig_heat.savefig(heatmap_path, dpi=300, bbox_inches='tight')
                     print(f"Final chain embedding heatmap saved to {heatmap_path}")
                 plt.close(fig_heat)
+                
+                # New: Plot chain embedding norms over time
+                chain_embs = np.stack(self.epoch_chain_embeddings, axis=0)  # shape: (epochs, num_embeddings, emb_dim)
+                num_epochs, num_embeddings, emb_dim = chain_embs.shape
+                
+                # Calculate norms for each embedding at each epoch
+                norms = np.linalg.norm(chain_embs, axis=2)  # shape: (epochs, num_embeddings)
+                norm_means = np.mean(norms, axis=1)  # shape: (epochs,)
+                norm_stds = np.std(norms, axis=1)    # shape: (epochs,)
+                
+                # Plot individual embedding norms and their mean/std
+                fig_norms, ax_norms = plt.subplots(figsize=(12, 6))
+                
+                # Plot individual embedding norms
+                for emb_idx in range(num_embeddings):
+                    ax_norms.plot(range(num_epochs), norms[:, emb_idx], 
+                                label=f'Embedding {emb_idx}', alpha=0.7, linewidth=1)
+                
+                # Plot mean and std
+                ax_norms.plot(range(num_epochs), norm_means, label='Mean Norm', 
+                            color='black', linewidth=2, linestyle='-')
+                ax_norms.fill_between(range(num_epochs), 
+                                    norm_means - norm_stds, 
+                                    norm_means + norm_stds, 
+                                    alpha=0.3, color='gray', label='±1 Std')
+                
+                ax_norms.set_title('Chain Embedding Norms Over Time')
+                ax_norms.set_xlabel('Epoch')
+                ax_norms.set_ylabel('L2 Norm')
+                ax_norms.legend()
+                ax_norms.grid(True, alpha=0.3)
+                
+                if save_path:
+                    norms_path = save_path.replace('.png', '_chain_emb_norms.png')
+                    fig_norms.savefig(norms_path, dpi=300, bbox_inches='tight')
+                    print(f"Chain embedding norms plot saved to {norms_path}")
+                plt.close(fig_norms)
+                
+                # New: Plot similarity matrix between all pairs of embeddings over time
+                # Calculate cosine similarity between all pairs of embeddings at each epoch
+                similarities = []
+                pair_labels = []
+                
+                # Generate all pairs of embeddings
+                for i in range(num_embeddings):
+                    for j in range(i+1, num_embeddings):
+                        pair_labels.append(f"({i},{j})")
+                        
+                        # Calculate cosine similarity for this pair over all epochs
+                        pair_similarities = []
+                        for epoch in range(num_epochs):
+                            emb_i = chain_embs[epoch, i, :]  # shape: (emb_dim,)
+                            emb_j = chain_embs[epoch, j, :]  # shape: (emb_dim,)
+                            
+                            # Cosine similarity
+                            dot_product = np.dot(emb_i, emb_j)
+                            norm_i = np.linalg.norm(emb_i)
+                            norm_j = np.linalg.norm(emb_j)
+                            
+                            if norm_i > 0 and norm_j > 0:
+                                similarity = dot_product / (norm_i * norm_j)
+                            else:
+                                similarity = 0.0
+                            
+                            pair_similarities.append(similarity)
+                        
+                        similarities.append(pair_similarities)
+                
+                # Convert to numpy array for plotting
+                similarities = np.array(similarities)  # shape: (num_pairs, num_epochs)
+                
+                # Create heatmap
+                fig_sim, ax_sim = plt.subplots(figsize=(max(8, num_epochs//2), max(6, len(pair_labels))))
+                
+                # Create heatmap with annotations
+                im = ax_sim.imshow(similarities, aspect='auto', cmap='RdBu_r', 
+                                 vmin=-1, vmax=1, origin='lower')
+                
+                # Add colorbar
+                cbar = fig_sim.colorbar(im, ax=ax_sim, orientation='vertical', label='Cosine Similarity')
+                
+                # Set labels
+                ax_sim.set_title('Chain Embedding Pair Similarities Over Time')
+                ax_sim.set_xlabel('Epoch')
+                ax_sim.set_ylabel('Embedding Pairs')
+                
+                # Set y-axis labels to show pair information
+                ax_sim.set_yticks(range(len(pair_labels)))
+                ax_sim.set_yticklabels(pair_labels)
+                
+                # Set x-axis labels (show every few epochs to avoid crowding)
+                if num_epochs <= 20:
+                    ax_sim.set_xticks(range(num_epochs))
+                    ax_sim.set_xticklabels(range(1, num_epochs + 1))
+                else:
+                    # Show every 5th epoch label
+                    step = max(1, num_epochs // 20)
+                    ax_sim.set_xticks(range(0, num_epochs, step))
+                    ax_sim.set_xticklabels(range(1, num_epochs + 1, step))
+                
+                # Add text annotations to show similarity values
+                for i in range(len(pair_labels)):
+                    for j in range(num_epochs):
+                        value = similarities[i, j]
+                        # Only show text for every few epochs to avoid crowding
+                        if num_epochs <= 10 or j % max(1, num_epochs // 10) == 0:
+                            text_color = 'white' if abs(value) > 0.5 else 'black'
+                            ax_sim.text(j, i, f'{value:.2f}', 
+                                      ha='center', va='center', 
+                                      color=text_color, fontsize=8)
+                
+                plt.tight_layout()
+                
+                if save_path:
+                    sim_path = save_path.replace('.png', '_chain_emb_similarities.png')
+                    fig_sim.savefig(sim_path, dpi=300, bbox_inches='tight')
+                    print(f"Chain embedding similarities heatmap saved to {sim_path}")
+                plt.close(fig_sim)
         else:
             # Fallback to original plots if no detailed data
             axes[1, 1].text(0.5, 0.5, 'No detailed metrics available', ha='center', va='center', transform=axes[1, 1].transAxes)
