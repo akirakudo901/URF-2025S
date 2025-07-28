@@ -715,7 +715,6 @@ class EnhancedVectorQuantizer(nn.Module):
     def disable_ema(self):
         """Disable EMA updates."""
         self.use_ema = False
-        self.embedding.weight.requires_grad = True
         print("EMA updates disabled")
     
     def enable_ema(self, decay=None):
@@ -726,7 +725,6 @@ class EnhancedVectorQuantizer(nn.Module):
             decay (float, optional): New EMA decay rate
         """
         self.use_ema = True
-        self.embedding.weight.requires_grad = False
         if decay is not None:
             self.set_ema_decay(decay)
         print("EMA updates enabled")
@@ -841,6 +839,9 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
                  num_thoughts=32, n_positions=1024, 
                  use_pretrained_encoder=True, use_pretrained_decoder=True,
                  pretrained_model_name="gpt2",
+                 # Text embedding loading and freezing parameters
+                 load_text_embeddings_encoder=False, freeze_text_embeddings_encoder=False,
+                 load_text_embeddings_decoder=False, freeze_text_embeddings_decoder=False,
                  # Vector Quantizer specific parameters
                  ema_decay=0.99, reset_threshold=0.1,
                  reset_frequency=1000, use_ema=True, max_reset_steps=None, reservoir_size=10000,
@@ -866,11 +867,17 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
         - EMA (Exponential Moving Average) updates for codebook learning
         - Automatic codebook reset mechanisms for unused embeddings
         - Enhanced monitoring and statistics for codebook health
+        - Support for loading and freezing text embeddings separately for encoder and decoder
         
         The enhanced codebook training scheme reduces to normal VQ-VAE training when:
         - ema_decay = 0.0 (no EMA updates)
         - reset_threshold = 0.0 (no automatic resets)
         - use_ema = False (EMA disabled)
+        
+        Text embedding loading and freezing:
+        - When use_pretrained_encoder/decoder=False, you can still load text embeddings from pretrained models
+        - This allows initialization with good token representations while keeping other weights random
+        - Text embeddings can be frozen to prevent updates during training
         """
         # Extract vector quantizer parameters
         vq_params = {
@@ -897,6 +904,11 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             use_pretrained_encoder=use_pretrained_encoder,
             use_pretrained_decoder=use_pretrained_decoder,
             pretrained_model_name=pretrained_model_name,
+            # Text embedding loading and freezing parameters
+            load_text_embeddings_encoder=load_text_embeddings_encoder,
+            freeze_text_embeddings_encoder=freeze_text_embeddings_encoder,
+            load_text_embeddings_decoder=load_text_embeddings_decoder,
+            freeze_text_embeddings_decoder=freeze_text_embeddings_decoder,
             # Unified parameters
             n_layer=n_layer,
             n_head=n_head,

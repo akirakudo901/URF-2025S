@@ -492,6 +492,9 @@ class GPT2VQVAE(nn.Module):
                  num_thoughts=32, n_positions=1024, 
                  use_pretrained_encoder=True, use_pretrained_decoder=True,
                  pretrained_model_name="gpt2",
+                 # Text embedding loading and freezing parameters
+                 load_text_embeddings_encoder=False, freeze_text_embeddings_encoder=False,
+                 load_text_embeddings_decoder=False, freeze_text_embeddings_decoder=False,
                  # Unified parameters (applied to both encoder and decoder if specified)
                  n_layer=12, n_head=12, n_inner=None, dropout=0.1, activation_function="gelu",
                  # Encoder-specific parameters (take precedence over unified if specified)
@@ -522,6 +525,12 @@ class GPT2VQVAE(nn.Module):
             use_pretrained_encoder (bool): Whether to load pretrained weights for encoder
             use_pretrained_decoder (bool): Whether to load pretrained weights for decoder
             pretrained_model_name (str): Name of pretrained model to load (default: "gpt2")
+            
+            # Text embedding loading and freezing parameters (only used when not loading full pretrained models)
+            load_text_embeddings_encoder (bool): Whether to load only text embeddings for encoder from pretrained model
+            freeze_text_embeddings_encoder (bool): Whether to freeze text embeddings in encoder after loading
+            load_text_embeddings_decoder (bool): Whether to load only text embeddings for decoder from pretrained model
+            freeze_text_embeddings_decoder (bool): Whether to freeze text embeddings in decoder after loading
             
             # Unified parameters (applied to both encoder and decoder)
             n_layer (int): Number of hidden layers for both encoder and decoder (default: 12)
@@ -617,6 +626,17 @@ class GPT2VQVAE(nn.Module):
                       f"differs from specified vocab_size ({vocab_size}). "
                       f"Using specified vocab_size.")
                 self.encoder.resize_token_embeddings(vocab_size)
+        elif load_text_embeddings_encoder:
+            print(f"\nLoading only text embeddings from {pretrained_model_name} for encoder...")
+            self.encoder = GPT2Model(self.encoder_config)
+            # Load only the text embeddings from pretrained model
+            pretrained_encoder = GPT2Model.from_pretrained(pretrained_model_name)
+            self.encoder.wte.weight.data.copy_(pretrained_encoder.wte.weight.data)
+            if freeze_text_embeddings_encoder:
+                self.encoder.wte.weight.requires_grad = False
+                print("Frozen text embeddings in encoder")
+            else:
+                print("Loaded text embeddings in encoder (trainable)")
         else:
             print("\nInitializing encoder with random weights...")
             self.encoder = GPT2Model(self.encoder_config)
@@ -632,6 +652,17 @@ class GPT2VQVAE(nn.Module):
                       f"differs from specified vocab_size ({vocab_size}). "
                       f"Using specified vocab_size.")
                 self.decoder.resize_token_embeddings(vocab_size)
+        elif load_text_embeddings_decoder:
+            print(f"Loading only text embeddings from {pretrained_model_name} for decoder...")
+            self.decoder = model_class(self.decoder_config)
+            # Load only the text embeddings from pretrained model
+            pretrained_decoder = model_class.from_pretrained(pretrained_model_name)
+            self.decoder.transformer.wte.weight.data.copy_(pretrained_decoder.transformer.wte.weight.data)
+            if freeze_text_embeddings_decoder:
+                self.decoder.transformer.wte.weight.requires_grad = False
+                print("Frozen text embeddings in decoder")
+            else:
+                print("Loaded text embeddings in decoder (trainable)")
         else:
             print("Initializing decoder with random weights...")
             self.decoder = model_class(self.decoder_config)
@@ -660,6 +691,10 @@ class GPT2VQVAE(nn.Module):
         self._use_pretrained_encoder = use_pretrained_encoder
         self._use_pretrained_decoder = use_pretrained_decoder
         self._pretrained_model_name = pretrained_model_name
+        self._load_text_embeddings_encoder = load_text_embeddings_encoder
+        self._freeze_text_embeddings_encoder = freeze_text_embeddings_encoder
+        self._load_text_embeddings_decoder = load_text_embeddings_decoder
+        self._freeze_text_embeddings_decoder = freeze_text_embeddings_decoder
         
         # Store configuration for checkpoint validation
         self._encoder_config_params = {
@@ -1488,6 +1523,10 @@ class GPT2VQVAE(nn.Module):
             'use_pretrained_encoder': hasattr(self, '_use_pretrained_encoder'),
             'use_pretrained_decoder': hasattr(self, '_use_pretrained_decoder'),
             'pretrained_model_name': getattr(self, '_pretrained_model_name', 'gpt2'),
+            'load_text_embeddings_encoder': getattr(self, '_load_text_embeddings_encoder', False),
+            'freeze_text_embeddings_encoder': getattr(self, '_freeze_text_embeddings_encoder', False),
+            'load_text_embeddings_decoder': getattr(self, '_load_text_embeddings_decoder', False),
+            'freeze_text_embeddings_decoder': getattr(self, '_freeze_text_embeddings_decoder', False),
             # Encoder-specific configuration
             'encoder_config': self._encoder_config_params,
             # Decoder-specific configuration
@@ -1584,6 +1623,18 @@ class GPT2VQVAE(nn.Module):
                            'encoder_dropout', 'encoder_activation_function',
                            'decoder_n_layer', 'decoder_n_head', 'decoder_n_inner',
                            'decoder_dropout', 'decoder_activation_function']
+        
+        # Add optional fields with defaults if missing
+        optional_fields_with_defaults = {
+            'load_text_embeddings_encoder': False,
+            'freeze_text_embeddings_encoder': False,
+            'load_text_embeddings_decoder': False,
+            'freeze_text_embeddings_decoder': False,
+        }
+        
+        for field, default_value in optional_fields_with_defaults.items():
+            if field not in model_config:
+                model_config[field] = default_value
         missing_fields = [field for field in required_fields if field not in model_config]
         if missing_fields:
             raise ValueError(f"Missing required model configuration fields: {missing_fields}")

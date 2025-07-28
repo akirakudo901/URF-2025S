@@ -21,6 +21,9 @@ class SimpleGPT2VQVAE(GPT2VQVAE):
                  commitment_cost=0.25, n_positions=1024, 
                  use_pretrained_encoder=True, use_pretrained_decoder=True,
                  pretrained_model_name="gpt2",
+                 # Text embedding loading and freezing parameters
+                 load_text_embeddings_encoder=False, freeze_text_embeddings_encoder=False,
+                 load_text_embeddings_decoder=False, freeze_text_embeddings_decoder=False,
                  # Unified parameters (applied to both encoder and decoder if specified)
                  n_layer=12, n_head=12, n_inner=None, dropout=0.1, activation_function="gelu",
                  # Encoder-specific parameters (take precedence over unified if specified)
@@ -49,6 +52,12 @@ class SimpleGPT2VQVAE(GPT2VQVAE):
             use_pretrained_encoder (bool): Whether to load pretrained weights for encoder
             use_pretrained_decoder (bool): Whether to load pretrained weights for decoder
             pretrained_model_name (str): Name of pretrained model to load (default: "gpt2")
+            
+            # Text embedding loading and freezing parameters (only used when not loading full pretrained models)
+            load_text_embeddings_encoder (bool): Whether to load only text embeddings for encoder from pretrained model
+            freeze_text_embeddings_encoder (bool): Whether to freeze text embeddings in encoder after loading
+            load_text_embeddings_decoder (bool): Whether to load only text embeddings for decoder from pretrained model
+            freeze_text_embeddings_decoder (bool): Whether to freeze text embeddings in decoder after loading
             
             # Unified parameters (applied to both encoder and decoder)
             n_layer (int): Number of hidden layers for both encoder and decoder (default: 12)
@@ -84,6 +93,11 @@ class SimpleGPT2VQVAE(GPT2VQVAE):
             use_pretrained_encoder=use_pretrained_encoder,
             use_pretrained_decoder=use_pretrained_decoder,
             pretrained_model_name=pretrained_model_name,
+            # Text embedding loading and freezing parameters
+            load_text_embeddings_encoder=load_text_embeddings_encoder,
+            freeze_text_embeddings_encoder=freeze_text_embeddings_encoder,
+            load_text_embeddings_decoder=load_text_embeddings_decoder,
+            freeze_text_embeddings_decoder=freeze_text_embeddings_decoder,
             n_layer=n_layer,
             n_head=n_head,
             n_inner=n_inner,
