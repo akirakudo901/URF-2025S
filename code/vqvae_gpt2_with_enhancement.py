@@ -519,7 +519,9 @@ class EnhancedVectorQuantizer(nn.Module):
             regularization_loss = self._compute_regularization_loss(self.embedding.weight)
             
             # Combined loss
-            total_loss = vq_loss + self.diversity_gamma * diversity_loss + 0.01 * regularization_loss
+            weighted_diversity_loss = self.diversity_gamma * diversity_loss
+            weighted_regularization_loss = 0.01 * regularization_loss
+            total_loss = vq_loss + weighted_diversity_loss + weighted_regularization_loss
             
             # Check for NaN and clip if necessary
             if torch.isnan(total_loss) or torch.isinf(total_loss):
@@ -528,7 +530,7 @@ class EnhancedVectorQuantizer(nn.Module):
                 total_loss = vq_loss
             
             # Clip the total loss to prevent explosion
-            return torch.clamp(total_loss, max=100.0)
+            return torch.clamp(total_loss, max=100.0), weighted_diversity_loss, weighted_regularization_loss
 
         # Convert inputs [(batch_size, sequence_length) OR (batch_size x sequence_length), embedding_dim]
         input_shape = inputs.shape
@@ -546,6 +548,7 @@ class EnhancedVectorQuantizer(nn.Module):
             
         # Encoding
         encoding_indices = torch.argmin(distances, dim=1) # [ (batch x seq_len) ]
+        
         encodings = torch.zeros(encoding_indices.shape[0], self.num_embeddings,  # [ (batch x seq_len), emb_num ]
                                 device=inputs.device)
         encodings.scatter_(1, encoding_indices.unsqueeze(1), 1)
@@ -581,11 +584,13 @@ class EnhancedVectorQuantizer(nn.Module):
 
         # Loss computation (only during training)
         if self.training:
-            total_loss = compute_loss(quantized, normalized_inputs, encoding_indices)
+            total_loss, weighted_diversity_loss, weighted_regularization_loss = compute_loss(
+                quantized, normalized_inputs, encoding_indices)
         else:
             # During inference, do not track gradients
             with torch.no_grad():
-                total_loss = compute_loss(quantized, normalized_inputs, encoding_indices)
+                total_loss, weighted_diversity_loss, weighted_regularization_loss = compute_loss(
+                    quantized, normalized_inputs, encoding_indices)
         
         quantized = normalized_inputs + (quantized - normalized_inputs).detach()  # Straight-through estimator
         # Perplexity: diversity of latent code usage, keep it mid (high=uniform, no learning, low=not used fully)
@@ -601,7 +606,9 @@ class EnhancedVectorQuantizer(nn.Module):
         post_bn_norms = torch.norm(normalized_inputs.detach().view(-1, self.embedding_dim), dim=-1)
         debug_stats = {
             'vq_post_bn_input_norm_mean': post_bn_norms.mean().item(),
-            'vq_post_bn_input_norm_std': post_bn_norms.std().item()
+            'vq_post_bn_input_norm_std': post_bn_norms.std().item(),
+            'weighted_diversity_loss': weighted_diversity_loss.item(),
+            'weighted_regularization_loss': weighted_regularization_loss.item()
         }
         return quantized, total_loss, perplexity, encoding_indices.view(indices_shape), debug_stats
     

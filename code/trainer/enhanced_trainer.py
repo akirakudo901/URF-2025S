@@ -121,6 +121,12 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             self.codebook_stats_history = None
             self.diversity_history = None
         
+        # Enhanced loss tracking for diversity and regularization losses
+        self.weighted_diversity_losses = []
+        self.weighted_regularization_losses = []
+        self.detailed_weighted_diversity_losses = []
+        self.detailed_weighted_regularization_losses = []
+        
         if self.enhanced_codebook_tracking:
             print("Enhanced codebook tracking enabled with granular control:")
             print(f"  - Usage stats: {self.track_usage_stats}")
@@ -142,8 +148,12 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
 
         # Training phase tracking - no current use, but might be useful later
         self.current_step = 0
-
+    
+    
     def train_epoch(self, train_loader, num_measurements_per_epoch, current_epoch=0, detailed_metrics_callback=None):
+        """
+        Enhanced train_epoch that tracks diversity and regularization losses in addition to standard losses.
+        """
         # Set max_reset_steps on the first epoch if it's still None
         if self.model.vector_quantizer.max_reset_steps is None:
             # Calculate total training steps
@@ -158,9 +168,12 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             # Set max_reset_steps on the vector quantizer
             self.model.vector_quantizer.max_reset_steps = max_reset_steps
             print(f"Set max_reset_steps to {max_reset_steps} (based on {total_training_steps} total steps, {reset_stop_fraction*100:.0f}% of training)")
-        # Initialize batch norm tracking list for this epoch
+        
+        # Initialize tracking lists for this epoch
         self._current_bn_param_history = []
         self._detailed_post_bn_norm_history = []
+        self._current_detailed_weighted_diversity_losses = []
+        self._current_detailed_weighted_regularization_losses = []
 
         def bn_tracking_callback(**kwargs):
             vq = self.model.vector_quantizer
@@ -181,21 +194,37 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
                         'std': debug_stats['vq_post_bn_input_norm_std'],
                         'step': kwargs.get('batch_idx', None),
                     })
+                if 'weighted_regularization_loss' in debug_stats:
+                    self._current_detailed_weighted_regularization_losses.append(debug_stats['weighted_regularization_loss'])
+                if 'weighted_diversity_loss' in debug_stats:
+                    self._current_detailed_weighted_diversity_losses.append(debug_stats['weighted_diversity_loss'])
+                    
             if detailed_metrics_callback is not None:
                 detailed_metrics_callback(**kwargs)
 
         # Call the parent train_epoch method with the callback
         result = super().train_epoch(train_loader, num_measurements_per_epoch, current_epoch, detailed_metrics_callback=bn_tracking_callback)
+        
         # After each epoch, store a copy of the batch norm parameter history for this epoch
         self.detailed_bn_param_history.append(self._current_bn_param_history)
         del self._current_bn_param_history
         self._current_bn_param_history = None
+        
         # Store post-bn norm history for this epoch
         if not hasattr(self, 'detailed_post_bn_norm_history'):
             self.detailed_post_bn_norm_history = []
         self.detailed_post_bn_norm_history.append(self._detailed_post_bn_norm_history)
         del self._detailed_post_bn_norm_history
         self._detailed_post_bn_norm_history = None
+        
+        # Store enhanced loss history for this epoch
+        self.detailed_weighted_diversity_losses.append(self._current_detailed_weighted_diversity_losses)
+        self.detailed_weighted_regularization_losses.append(self._current_detailed_weighted_regularization_losses)
+        del self._current_detailed_weighted_diversity_losses
+        del self._current_detailed_weighted_regularization_losses
+        self._current_detailed_weighted_diversity_losses = None
+        self._current_detailed_weighted_regularization_losses = None
+        
         return result
 
     def _update_weights(self):
@@ -209,7 +238,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
 
     def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None, remove_other_best_models: bool = True, **kwargs):
         """
-        Enhanced checkpoint saving that includes phased training state.
+        Enhanced checkpoint saving that includes phased training state and enhanced loss tracking.
         
         Args:
             epoch: Current epoch
@@ -218,13 +247,19 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             checkpoint_path: Optional custom checkpoint path
             remove_other_best_models: If True, remove other best model checkpoints (default: True)
         """
-        kwargs.update({ "current_step" : self.current_step })
-        # Call parent save_checkpoint with current_step info as kwargs
+        kwargs.update({ 
+            "current_step": self.current_step,
+            "weighted_diversity_losses": self.weighted_diversity_losses,
+            "weighted_regularization_losses": self.weighted_regularization_losses,
+            "detailed_weighted_diversity_losses": self.detailed_weighted_diversity_losses,
+            "detailed_weighted_regularization_losses": self.detailed_weighted_regularization_losses
+        })
+        # Call parent save_checkpoint with enhanced data as kwargs
         super().save_checkpoint(epoch, metrics, is_best, checkpoint_path, remove_other_best_models, **kwargs)
 
     def load_checkpoint(self, checkpoint_path: str):
         """
-        Enhanced checkpoint loading that restores phased training state.
+        Enhanced checkpoint loading that restores phased training state and enhanced loss tracking.
         
         Args:
             checkpoint_path: Path to checkpoint file
@@ -238,6 +273,31 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             print(f"Restored training step: {self.current_step}")
         else:
             raise Exception("Checkpoint does not contain 'current_step' information. Phased training cannot be resumed properly without this data.")
+        
+        # Restore enhanced loss tracking if available
+        if 'weighted_diversity_losses' in checkpoint:
+            self.weighted_diversity_losses = checkpoint['weighted_diversity_losses']
+            print(f"Restored weighted diversity losses history: {len(self.weighted_diversity_losses)} epochs")
+        else:
+            print("No weighted diversity losses history found in checkpoint")
+            
+        if 'weighted_regularization_losses' in checkpoint:
+            self.weighted_regularization_losses = checkpoint['weighted_regularization_losses']
+            print(f"Restored weighted regularization losses history: {len(self.weighted_regularization_losses)} epochs")
+        else:
+            print("No weighted regularization losses history found in checkpoint")
+            
+        if 'detailed_weighted_diversity_losses' in checkpoint:
+            self.detailed_weighted_diversity_losses = checkpoint['detailed_weighted_diversity_losses']
+            print(f"Restored detailed weighted diversity losses history: {len(self.detailed_weighted_diversity_losses)} epochs")
+        else:
+            print("No detailed weighted diversity losses history found in checkpoint")
+            
+        if 'detailed_weighted_regularization_losses' in checkpoint:
+            self.detailed_weighted_regularization_losses = checkpoint['detailed_weighted_regularization_losses']
+            print(f"Restored detailed weighted regularization losses history: {len(self.detailed_weighted_regularization_losses)} epochs")
+        else:
+            print("No detailed weighted regularization losses history found in checkpoint")
         
         return checkpoint
     
@@ -336,6 +396,41 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         except Exception as e:
             print(f"Warning: Failed to track enhanced codebook usage: {e}")
     
+    def _store_epoch_metrics(self, train_metrics: Dict[str, Any], test_metrics: Dict[str, float]) -> None:
+        """
+        Store epoch-level metrics for enhanced trainer with additional diversity and regularization losses.
+        
+        Args:
+            train_metrics: Training metrics from train_epoch
+            test_metrics: Validation metrics from validate
+        """
+        # Call parent method to store basic metrics
+        super()._store_epoch_metrics(train_metrics, test_metrics)
+        
+        # Store enhanced losses
+        self.weighted_diversity_losses.append(train_metrics['avg_weighted_diversity_loss'])
+        self.weighted_regularization_losses.append(train_metrics['avg_weighted_regularization_loss'])
+        
+        # Store enhanced detailed metrics
+        self.detailed_weighted_diversity_losses.append(train_metrics['detailed_weighted_diversity_losses'])
+        self.detailed_weighted_regularization_losses.append(train_metrics['detailed_weighted_regularization_losses'])
+    
+    def _print_epoch_metrics(self, train_metrics: Dict[str, Any], test_metrics: Dict[str, float]) -> None:
+        """
+        Print epoch metrics for enhanced trainer with additional diversity and regularization losses.
+        
+        Args:
+            train_metrics: Training metrics from train_epoch
+            test_metrics: Validation metrics from validate
+        """
+        # Call parent method to print basic metrics
+        super()._print_epoch_metrics(train_metrics, test_metrics)
+        
+        # Print enhanced metrics
+        print(f"Weighted Diversity Loss: {train_metrics['avg_weighted_diversity_loss']:.4f}")
+        print(f"Weighted Regularization Loss: {train_metrics['avg_weighted_regularization_loss']:.4f}")
+
+
     def _enhanced_save_codebook_plots(self, save_dir: str, epoch: int) -> None:
         """
         Save enhanced codebook tracking visualizations.
@@ -451,6 +546,27 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
     
+    def _get_training_completion_metric_dict(self, final_metrics: Dict[str, float], 
+                                             training_duration: Optional[float] = None):
+        """
+        Enhanced training completion metrics that include diversity and regularization losses.
+        """
+        metric_dict = super()._get_training_completion_metric_dict(final_metrics, training_duration)
+        
+        # Add enhanced loss metrics
+        if 'avg_weighted_diversity_loss' in final_metrics:
+            metric_dict["Final Weighted Diversity Loss"] = f"{final_metrics['avg_weighted_diversity_loss']:.4f}"
+        if 'avg_weighted_regularization_loss' in final_metrics:
+            metric_dict["Final Weighted Regularization Loss"] = f"{final_metrics['avg_weighted_regularization_loss']:.4f}"
+        
+        # Add enhanced loss history if available
+        if self.weighted_diversity_losses:
+            metric_dict["Avg Weighted Diversity Loss"] = f"{sum(self.weighted_diversity_losses) / len(self.weighted_diversity_losses):.4f}"
+        if self.weighted_regularization_losses:
+            metric_dict["Avg Weighted Regularization Loss"] = f"{sum(self.weighted_regularization_losses) / len(self.weighted_regularization_losses):.4f}"
+        
+        return metric_dict
+    
     def _plot_diversity_evolution(self, save_path: str) -> None:
         """Plot codebook diversity metrics over time."""
         if not self.diversity_history or not self.save_tracking_history:
@@ -498,7 +614,74 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         plt.close()
 
     def plot_training_history(self, save_path: Optional[str] = None, log_scale: bool = False):
+        # First call the parent method to get the standard plots
         super().plot_training_history(save_path, log_scale)
+        
+        # Add progressive loss plot if we have the necessary data
+        if (self.detailed_recon_losses and self.detailed_vq_losses and 
+            self.detailed_weighted_diversity_losses and self.detailed_weighted_regularization_losses):
+            
+            # Create a new figure for the progressive loss plot
+            fig, ax = plt.subplots(figsize=(15, 8))
+            
+            # Flatten all epochs into single lists
+            all_recon_losses = [item for epoch in self.detailed_recon_losses for item in epoch]
+            all_vq_losses = [item for epoch in self.detailed_vq_losses for item in epoch]
+            all_weighted_diversity_losses = [item for epoch in self.detailed_weighted_diversity_losses for item in epoch]
+            all_weighted_regularization_losses = [item for epoch in self.detailed_weighted_regularization_losses for item in epoch]
+            
+            # Calculate progressive loss components
+            # 1. Reconstruction loss only
+            recon_only = all_recon_losses
+            
+            # 2. Reconstruction loss + VQ loss
+            recon_plus_vq = [r + v for r, v in zip(all_recon_losses, all_vq_losses)]
+            
+            # 3. Reconstruction loss + VQ loss + weighted diversity loss
+            recon_plus_vq_plus_diversity = [r + v + d for r, v, d in zip(
+                all_recon_losses, all_vq_losses, all_weighted_diversity_losses)]
+            
+            # 4. Total loss (reconstruction + VQ + weighted diversity + weighted regularization)
+            total_loss = [r + v + d + reg for r, v, d, reg in zip(
+                all_recon_losses, all_vq_losses, all_weighted_diversity_losses, all_weighted_regularization_losses)]
+            
+            # Plot the progressive loss components
+            ax.plot(range(recon_only), recon_only, label='1. Reconstruction Loss', color='blue', linewidth=2, alpha=0.8)
+            ax.plot(range(recon_plus_vq), recon_plus_vq, label='2. Reconstruction + VQ Loss', color='green', linewidth=2, alpha=0.8)
+            ax.plot(range(recon_plus_vq_plus_diversity), recon_plus_vq_plus_diversity, label='3. Reconstruction + VQ + Diversity Loss', color='orange', linewidth=2, alpha=0.8)
+            ax.plot(range(total_loss), total_loss, label='4. Total Loss (All Components)', color='red', linewidth=2, alpha=0.8)
+            
+            # Add epoch boundaries
+            epoch_boundaries = []
+            global_batch_idx = 0
+            for epoch_idx, epoch_losses in enumerate(self.detailed_recon_losses):
+                epoch_boundaries.append((global_batch_idx, epoch_idx + 1))
+                global_batch_idx += len(epoch_losses)
+            
+            for boundary, epoch_num in epoch_boundaries:
+                ax.axvline(x=boundary, color='gray', linestyle='--', alpha=0.5)
+                ax.text(boundary, ax.get_ylim()[1], f'Epoch {epoch_num}', 
+                       rotation=90, va='top', ha='right', fontsize=8)
+            
+            ax.set_title('Progressive Loss Components (Within Epochs)', fontsize=14, fontweight='bold')
+            ax.set_xlabel('Measurement Index')
+            ax.set_ylabel('Loss Value')
+            ax.legend(loc='upper right')
+            ax.grid(True, alpha=0.3)
+            
+            if log_scale:
+                ax.set_yscale('log')
+            
+            plt.tight_layout()
+            
+            # Save the progressive loss plot
+            if save_path:
+                progressive_path = save_path.replace('.png', '_progressive_loss.png')
+                fig.savefig(progressive_path, dpi=300, bbox_inches='tight')
+                print(f"Progressive loss plot saved to {progressive_path}")
+            
+            plt.close(fig)
+        
         # Plot batch norm parameter evolution if available
         if self.detailed_bn_param_history and any(len(epoch) > 0 for epoch in self.detailed_bn_param_history):
             # Flatten all epochs into a single list

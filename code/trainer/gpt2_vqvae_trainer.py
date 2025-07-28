@@ -922,6 +922,47 @@ class GPT2VQVAETrainer:
             'perplexity': total_perplexity / num_batches
         }
     
+    def _store_epoch_metrics(self, train_metrics: Dict[str, Any], test_metrics: Dict[str, float]) -> None:
+        """
+        Store epoch-level metrics. This method can be overridden by subclasses to store additional metrics.
+        
+        Args:
+            train_metrics: Training metrics from train_epoch
+            test_metrics: Validation metrics from validate
+        """
+        # Store epoch-level metrics
+        self.train_losses.append(train_metrics['avg_loss'])
+        self.recon_losses.append(train_metrics['avg_recon_loss'])
+        self.val_losses.append(test_metrics['loss'])
+        self.val_recon_losses.append(test_metrics['recon_loss'])
+        self.vq_losses.append(train_metrics['avg_vq_loss'])
+        self.perplexities.append(train_metrics['avg_perplexity'])
+        # New: Track chain embeddings at end of epoch
+        self.epoch_chain_embeddings.append(self.model.chain_embeddings.weight.detach().cpu().numpy())
+        
+        # Store detailed metrics
+        self.detailed_train_losses.append(train_metrics['detailed_losses'])
+        self.detailed_recon_losses.append(train_metrics['detailed_recon_losses'])
+        self.detailed_vq_losses.append(train_metrics['detailed_vq_losses'])
+        self.detailed_perplexities.append(train_metrics['detailed_perplexities'])
+        self.detailed_batch_indices.append(train_metrics['detailed_batch_indices'])
+    
+    def _print_epoch_metrics(self, train_metrics: Dict[str, Any], test_metrics: Dict[str, float]) -> None:
+        """
+        Print epoch metrics. This method can be overridden by subclasses to print additional metrics.
+        
+        Args:
+            train_metrics: Training metrics from train_epoch
+            test_metrics: Validation metrics from validate
+        """
+        print(f"Train Loss: {train_metrics['avg_loss']:.4f}")
+        print(f"Train Recon Loss: {train_metrics['avg_recon_loss']:.4f}")
+        print(f"Val Loss: {test_metrics['loss']:.4f}")
+        print(f"Val Recon Loss: {test_metrics['recon_loss']:.4f}")
+        print(f"VQ Loss: {train_metrics['avg_vq_loss']:.4f}")
+        print(f"Perplexity: {train_metrics['avg_perplexity']:.2f}")
+        print(f"Learning Rate: {self.optimizer.param_groups[0]['lr']:.6f}")
+    
     def send_training_start_phone_notification(self) -> bool:
         try:
             # Format the message
@@ -1280,30 +1321,10 @@ class GPT2VQVAETrainer:
                     self.scheduler.step()
                 
                 # Store epoch-level metrics
-                self.train_losses.append(train_metrics['avg_loss'])
-                self.recon_losses.append(train_metrics['avg_recon_loss'])
-                self.val_losses.append(test_metrics['loss'])
-                self.val_recon_losses.append(test_metrics['recon_loss'])
-                self.vq_losses.append(train_metrics['avg_vq_loss'])
-                self.perplexities.append(train_metrics['avg_perplexity'])
-                # New: Track chain embeddings at end of epoch
-                self.epoch_chain_embeddings.append(self.model.chain_embeddings.weight.detach().cpu().numpy())
-                
-                # Store detailed metrics
-                self.detailed_train_losses.append(train_metrics['detailed_losses'])
-                self.detailed_recon_losses.append(train_metrics['detailed_recon_losses'])
-                self.detailed_vq_losses.append(train_metrics['detailed_vq_losses'])
-                self.detailed_perplexities.append(train_metrics['detailed_perplexities'])
-                self.detailed_batch_indices.append(train_metrics['detailed_batch_indices'])
+                self._store_epoch_metrics(train_metrics, test_metrics)
                 
                 # Print metrics
-                print(f"Train Loss: {train_metrics['avg_loss']:.4f}")
-                print(f"Train Recon Loss: {train_metrics['avg_recon_loss']:.4f}")
-                print(f"Val Loss: {test_metrics['loss']:.4f}")
-                print(f"Val Recon Loss: {test_metrics['recon_loss']:.4f}")
-                print(f"VQ Loss: {train_metrics['avg_vq_loss']:.4f}")
-                print(f"Perplexity: {train_metrics['avg_perplexity']:.2f}")
-                print(f"Learning Rate: {self.optimizer.param_groups[0]['lr']:.6f}")
+                self._print_epoch_metrics(train_metrics, test_metrics)
                 
                 # Save checkpoint
                 is_best = self.is_new_best(test_metrics['loss'])
