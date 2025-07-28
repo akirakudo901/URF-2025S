@@ -20,6 +20,7 @@ from torch.autograd.profiler import record_function
 import sys
 import psutil
 import numpy as np
+import glob
 
 # Add the current directory to the path to import dependencies
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -217,7 +218,8 @@ class GPT2VQVAETrainer:
                  training_config: Dict[str, Any],
                  device: str = "cuda" if torch.cuda.is_available() else "cpu",
                  tracking_functions: Optional[Dict[str, Any]] = None, 
-                 run_name : Optional[str] = "ANONYM_RUN"):
+                 run_name : Optional[str] = "ANONYM_RUN",
+                 overwrite_plots: bool = True):
         """
         Initialize the trainer.
         
@@ -235,6 +237,7 @@ class GPT2VQVAETrainer:
         self.training_config = training_config
         self.device = device
         self.run_name = run_name
+        self.overwrite_plots = overwrite_plots
         
         # Initialize training start time for checkpoint notifications
         self.training_start_time = None
@@ -2045,6 +2048,72 @@ class GPT2VQVAETrainer:
         """Update the best_val_loss if val_loss is better."""
         if self.is_new_best(val_loss):
             self.best_val_loss = val_loss
+    
+    def _cleanup_previous_plots(self, save_dir: str, plot_type: str, current_epoch: Optional[int] = None):
+        """
+        Clean up previous plots of the same type when in overwrite mode.
+        
+        Args:
+            save_dir: Directory where plots are saved
+            plot_type: Type of plot to clean up ('epoch', 'training', 'aborted_training')
+            current_epoch: Current epoch number (for epoch-specific cleanup)
+        """
+        if not self.overwrite_plots:
+            return
+        
+        patterns = [f"epoch_*_history.png",
+                    f"epoch_*_memory_usage.png",
+                    f"epoch_*_chain_emb.png",
+                    f"epoch_*_chain_emb_*_heatmap.png",
+                    f"epoch_*_chain_emb_norms.png",
+                    f"epoch_*_chain_emb_similarities.png",
+                    f"epoch_*_vq_input.png",
+                    f"epoch_*_codebook_tracking"]
+        
+        try:
+            # Define patterns for different plot types
+            if plot_type == 'epoch':
+                # Clean up previous epoch plots
+                if current_epoch is None:
+                    return
+
+                print(f"🗑️  Removing previous plots for previous epochs...", end="")
+
+                # Remove plots from earlier epochs
+                for pattern in patterns:
+                    for file_path in glob.glob(os.path.join(save_dir, pattern)):
+                        file_name = os.path.basename(file_path)
+                        # Extract epoch number from filename
+                        if file_name.startswith("epoch_"):
+                            try:
+                                epoch_str = file_name.split("_")[1]
+                                file_epoch = int(epoch_str)
+                                if file_epoch < current_epoch:
+                                    if os.path.isfile(file_path):
+                                        os.remove(file_path)
+                                        
+                                    elif os.path.isdir(file_path):
+                                        import shutil
+                                        shutil.rmtree(file_path)
+                            except (ValueError, IndexError):
+                                continue
+                print("DONE.")
+                                
+            elif plot_type in ['training', 'aborted_training']:
+                # Clean up all training plots when saving final plots
+                print(f"🗑️  Removing previous plots since we've reached end of training...", end="")
+                for pattern in patterns:
+                    for file_path in glob.glob(os.path.join(save_dir, pattern)):
+                        
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                        elif os.path.isdir(file_path):
+                            import shutil
+                            shutil.rmtree(file_path)
+                print("DONE.")
+                            
+        except Exception as e:
+            print(f"⚠️  Warning: Failed to cleanup previous plots: {e}")
 
 
 def save_training_visualizations(trainer, save_dir: str = None, prefix: str = "training"):
@@ -2066,6 +2135,22 @@ def save_training_visualizations(trainer, save_dir: str = None, prefix: str = "t
                 save_dir = training_config.get('checkpoint_dir', DEFAULT_FOLDER)
         
         os.makedirs(save_dir, exist_ok=True)
+        
+        # Determine plot type for cleanup
+        plot_type = 'epoch' if prefix.startswith('epoch_') else prefix
+        
+        # Clean up previous plots if in overwrite mode
+        if hasattr(trainer, 'overwrite_plots') and trainer.overwrite_plots:
+            if plot_type == 'epoch':
+                # Extract epoch number from prefix
+                try:
+                    epoch_num = int(prefix.split('_')[1])
+                    trainer._cleanup_previous_plots(save_dir, plot_type, epoch_num)
+                except (ValueError, IndexError):
+                    pass
+            else:
+                # Clean up all epoch plots when saving final training plots
+                trainer._cleanup_previous_plots(save_dir, plot_type)
         
         print(f"\n📊 Saving comprehensive training visualizations to {save_dir}")
         

@@ -42,7 +42,8 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
                  training_config: Dict[str, Any], 
                  device: str = "cuda" if torch.cuda.is_available() else "cpu", 
                  tracking_functions: Optional[Dict[str, Any]] = None, 
-                 run_name : Optional[str] = "ANONYM_RUN"):
+                 run_name : Optional[str] = "ANONYM_RUN",
+                 overwrite_plots: bool = False):
         # Filter out enhanced VQ-VAE specific parameters for parent constructor
         enhanced_vq_params = {
             'ema_decay', 'diversity_gamma', 'reset_threshold', 
@@ -63,7 +64,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         }
         
         # Call parent constructor with filtered configs and enhanced tracking functions
-        super().__init__(filtered_model_config, filtered_training_config, device, enhanced_tracking_functions, run_name)
+        super().__init__(filtered_model_config, filtered_training_config, device, enhanced_tracking_functions, run_name, overwrite_plots)
 
         # Store original configs for enhanced features
         self.model_config = model_config
