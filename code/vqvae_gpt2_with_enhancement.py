@@ -210,19 +210,18 @@ class ReservoirSampler:
 class EnhancedVectorQuantizer(nn.Module):
     def __init__(self, num_embeddings: int, embedding_dim: int, 
                  commitment_cost: float = 0.25, ema_decay: float = 0.99,
-                 diversity_gamma: float = 0.1, reset_threshold: float = 0.1,
+                 reset_threshold: float = 0.1,
                  reset_frequency: int = 1000, use_ema: bool = True,
                  max_reset_steps: Optional[int] = None, reservoir_size: int = 10000,
                  reset_strategy: str = 'partial', use_batch_norm: bool = True):
         """
-        Enhanced Vector quantizer initialization with EMA updates and diversity mechanisms.
+        Enhanced Vector quantizer initialization with EMA updates and reset mechanisms.
         
         Args:
             num_embeddings: Number of embeddings in the codebook
             embedding_dim: Dimension of each embedding
             commitment_cost: Weight for the commitment loss
             ema_decay: Decay rate for EMA updates
-            diversity_gamma: Weight for diversity-promoting loss
             reset_threshold: Threshold for triggering codebook reset (usage ratio)
             reset_frequency: Frequency of checking for codebook reset
             use_ema: Whether to use EMA updates
@@ -237,7 +236,6 @@ class EnhancedVectorQuantizer(nn.Module):
         self.embedding_dim = embedding_dim
         self.commitment_cost = commitment_cost
         self.ema_decay = ema_decay
-        self.diversity_gamma = diversity_gamma
         self.reset_threshold = reset_threshold
         self.reset_frequency = reset_frequency
         self.use_ema = use_ema
@@ -274,9 +272,7 @@ class EnhancedVectorQuantizer(nn.Module):
             self.batch_norm = nn.BatchNorm1d(embedding_dim, momentum=0.01, eps=1e-5)
         else:
             self.batch_norm = None
-        # Ensure embedding weight requires_grad is set correctly
-        self.embedding.weight.requires_grad = not self.use_ema
-    
+        
     def _perform_kmeans_clustering(self, samples, num_clusters, device):
         """
         Perform K-means++ clustering on samples and return centroids.
@@ -363,42 +359,6 @@ class EnhancedVectorQuantizer(nn.Module):
             # Add small epsilon to prevent division by zero
             cluster_sizes_safe = self._ema_cluster_size + 1e-8
             self.embedding.weight.data.copy_(self._ema_w / cluster_sizes_safe.unsqueeze(1))
-    
-    def _compute_diversity_loss(self, encoding_indices):
-        """
-        Compute diversity-promoting loss to encourage uniform codebook usage.
-        
-        Args:
-            encoding_indices (torch.Tensor): Indices of nearest embeddings
-            
-        Returns:
-            torch.Tensor: Diversity loss value
-        """
-        # Count usage of each embedding
-        usage_counts = torch.bincount(encoding_indices, minlength=self.num_embeddings)
-        total_usage = usage_counts.sum()
-        
-        # Handle case where no embeddings are used
-        if total_usage == 0:
-            return torch.tensor(0.0, device=encoding_indices.device)
-        
-        usage_probs = usage_counts.float() / total_usage
-        
-        # Target uniform distribution
-        target_probs = torch.ones_like(usage_probs) / self.num_embeddings
-        
-        # Add small epsilon to prevent log(0)
-        epsilon = 1e-8
-        usage_probs_safe = usage_probs + epsilon
-        target_probs_safe = target_probs + epsilon
-        
-        # KL divergence from uniform distribution
-        kl_div = torch.sum(usage_probs_safe * torch.log(usage_probs_safe / target_probs_safe))
-        
-        # Clip the loss to prevent explosion
-        kl_div = torch.clamp(kl_div, max=100.0)
-        
-        return kl_div
     
     def _compute_regularization_loss(self, embedding_weight):
         """
@@ -515,22 +475,20 @@ class EnhancedVectorQuantizer(nn.Module):
                 q_latent_loss = F.mse_loss(quantized, inputs.detach())
                 vq_loss = q_latent_loss + self.commitment_cost * e_latent_loss
             # Additional losses
-            diversity_loss = self._compute_diversity_loss(encoding_indices)
             regularization_loss = self._compute_regularization_loss(self.embedding.weight)
             
             # Combined loss
-            weighted_diversity_loss = self.diversity_gamma * diversity_loss
             weighted_regularization_loss = 0.01 * regularization_loss
-            total_loss = vq_loss + weighted_diversity_loss + weighted_regularization_loss
+            total_loss = vq_loss + weighted_regularization_loss
             
             # Check for NaN and clip if necessary
             if torch.isnan(total_loss) or torch.isinf(total_loss):
-                print(f"Warning: NaN/Inf loss detected. vq_loss: {vq_loss}, diversity_loss: {diversity_loss}, reg_loss: {regularization_loss}")
+                print(f"Warning: NaN/Inf loss detected. vq_loss: {vq_loss}, reg_loss: {regularization_loss}")
                 # Fall back to just VQ loss if other losses are problematic
                 total_loss = vq_loss
             
             # Clip the total loss to prevent explosion
-            return torch.clamp(total_loss, max=100.0), weighted_diversity_loss, weighted_regularization_loss
+            return torch.clamp(total_loss, max=100.0), weighted_regularization_loss
 
         # Convert inputs [(batch_size, sequence_length) OR (batch_size x sequence_length), embedding_dim]
         input_shape = inputs.shape
@@ -543,8 +501,8 @@ class EnhancedVectorQuantizer(nn.Module):
             normalized_inputs = flat_input
         # Calculate distances
         distances = (torch.sum(normalized_inputs**2, dim=1, keepdim=True)           # [ (batch x seq_len), emb_num ]    
-                    + torch.sum(self.embedding.weight**2, dim=1)
-                    - 2 * torch.matmul(normalized_inputs, self.embedding.weight.T))
+                    + torch.sum(self.embedding.weight.detach()**2, dim=1)
+                    - 2 * torch.matmul(normalized_inputs, self.embedding.weight.detach().T))
             
         # Encoding
         encoding_indices = torch.argmin(distances, dim=1) # [ (batch x seq_len) ]
@@ -578,22 +536,22 @@ class EnhancedVectorQuantizer(nn.Module):
             self._inference_usage_counts += current_usage
         
         # Quantize & Reshape
-        quantized = torch.matmul(encodings, self.embedding.weight) # [ (batch x seq_len), emb_dim ]
+        quantized = torch.matmul(encodings, self.embedding.weight.detach()) # [ (batch x seq_len), emb_dim ]
         quantized = quantized.view(input_shape)
         normalized_inputs = normalized_inputs.view(input_shape)
 
         # Loss computation (only during training)
         if self.training:
-            total_loss, weighted_diversity_loss, weighted_regularization_loss = compute_loss(
+            total_loss, weighted_regularization_loss = compute_loss(
                 quantized, normalized_inputs, encoding_indices)
         else:
             # During inference, do not track gradients
             with torch.no_grad():
-                total_loss, weighted_diversity_loss, weighted_regularization_loss = compute_loss(
+                total_loss, weighted_regularization_loss = compute_loss(
                     quantized, normalized_inputs, encoding_indices)
         
         quantized = normalized_inputs + (quantized - normalized_inputs).detach()  # Straight-through estimator
-        # Perplexity: diversity of latent code usage, keep it mid (high=uniform, no learning, low=not used fully)
+        # Perplexity: measure of latent code usage, keep it mid (high=uniform, no learning, low=not used fully)
         perplexity = compute_perplexity(encoding_indices, "indices")
         
         # Handle case where input_shape has only 1 dimension
@@ -607,7 +565,6 @@ class EnhancedVectorQuantizer(nn.Module):
         debug_stats = {
             'vq_post_bn_input_norm_mean': post_bn_norms.mean().item(),
             'vq_post_bn_input_norm_std': post_bn_norms.std().item(),
-            'weighted_diversity_loss': weighted_diversity_loss.item(),
             'weighted_regularization_loss': weighted_regularization_loss.item()
         }
         return quantized, total_loss, perplexity, encoding_indices.view(indices_shape), debug_stats
@@ -885,7 +842,7 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
                  use_pretrained_encoder=True, use_pretrained_decoder=True,
                  pretrained_model_name="gpt2",
                  # Vector Quantizer specific parameters
-                 ema_decay=0.99, diversity_gamma=0.1, reset_threshold=0.1,
+                 ema_decay=0.99, reset_threshold=0.1,
                  reset_frequency=1000, use_ema=True, max_reset_steps=None, reservoir_size=10000,
                  reset_strategy='partial', use_batch_norm=True,
                  # Unified parameters (applied to both encoder and decoder if specified)
@@ -907,13 +864,11 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
         
         This enhanced version includes:
         - EMA (Exponential Moving Average) updates for codebook learning
-        - Diversity-promoting loss to encourage uniform codebook usage
         - Automatic codebook reset mechanisms for unused embeddings
         - Enhanced monitoring and statistics for codebook health
         
         The enhanced codebook training scheme reduces to normal VQ-VAE training when:
         - ema_decay = 0.0 (no EMA updates)
-        - diversity_gamma = 0.0 (no diversity loss)
         - reset_threshold = 0.0 (no automatic resets)
         - use_ema = False (EMA disabled)
         """
@@ -923,7 +878,6 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             'embedding_dim': d_model,
             'commitment_cost': commitment_cost,
             'ema_decay': ema_decay,
-            'diversity_gamma': diversity_gamma,
             'reset_threshold': reset_threshold,
             'reset_frequency': reset_frequency,
             'use_ema': use_ema,
@@ -973,7 +927,6 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
         # Store enhanced configuration for checkpoint validation
         self._enhanced_config = {
             'ema_decay': ema_decay,
-            'diversity_gamma': diversity_gamma,
             'reset_threshold': reset_threshold,
             'reset_frequency': reset_frequency,
             'use_ema': use_ema,
@@ -1070,7 +1023,7 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
         Initialize and load an EnhancedGPT2VQVAE model from a checkpoint file.
         
         This method extends the parent from_checkpoint method to handle enhanced-specific
-        configuration parameters like EMA decay, diversity gamma, reset thresholds, etc.
+        configuration parameters like EMA decay, reset thresholds, etc.
         
         Args:
             checkpoint_path (str): Path to the checkpoint file
@@ -1114,7 +1067,7 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
         enhanced_config = {}
         
         # Check for enhanced configuration in the checkpoint
-        enhanced_keys = ['ema_decay', 'diversity_gamma', 'reset_threshold', 'reset_frequency', 
+        enhanced_keys = ['ema_decay', 'reset_threshold', 'reset_frequency', 
                            'use_ema', 'max_reset_steps', 'reservoir_size', 'reset_strategy', 'use_batch_norm']
         if 'enhanced_config' in checkpoint:
             enhanced_config = checkpoint['enhanced_config'].copy()

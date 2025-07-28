@@ -27,13 +27,11 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
     
     This enhanced trainer provides additional functionality for the enhanced vector quantizer:
     - EMA (Exponential Moving Average) updates for codebook learning
-    - Diversity-promoting loss to encourage uniform codebook usage
     - Automatic codebook reset mechanisms for unused embeddings
     - Enhanced monitoring and statistics for codebook health
     
     The enhanced codebook training scheme reduces to normal VQ-VAE training when:
     - ema_decay = 0.0 (no EMA updates)
-    - diversity_gamma = 0.0 (no diversity loss)
     - reset_threshold = 0.0 (no automatic resets)
     - use_ema = False (EMA disabled)
     """
@@ -46,7 +44,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
                  overwrite_plots: bool = False):
         # Filter out enhanced VQ-VAE specific parameters for parent constructor
         enhanced_vq_params = {
-            'ema_decay', 'diversity_gamma', 'reset_threshold', 
+            'ema_decay', 'reset_threshold', 
             'reset_frequency', 'use_ema', 'reset_stop_fraction',
             # for further enhancement
             'max_reset_steps', 'reservoir_size', 'reset_strategy', 'use_batch_norm'
@@ -122,10 +120,8 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             self.codebook_stats_history = None
             self.diversity_history = None
         
-        # Enhanced loss tracking for diversity and regularization losses
-        self.weighted_diversity_losses = []
+        # Enhanced loss tracking for regularization losses
         self.weighted_regularization_losses = []
-        self.detailed_weighted_diversity_losses = []
         self.detailed_weighted_regularization_losses = []
         
         if self.enhanced_codebook_tracking:
@@ -138,7 +134,6 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             print(f"  - Save history: {self.save_tracking_history}")
             print(f"  - Print info: {self.print_tracking_info}")
             print(f"EMA decay: {model_config.get('ema_decay', 0.99)}")
-            print(f"Diversity gamma: {model_config.get('diversity_gamma', 0.1)}")
             print(f"Reset threshold: {model_config.get('reset_threshold', 0.1)}")
             print(f"Reset frequency: {model_config.get('reset_frequency', 1000)}")
             print(f"Use EMA: {model_config.get('use_ema', True)}")
@@ -153,7 +148,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
     
     def train_epoch(self, train_loader, num_measurements_per_epoch, current_epoch=0, detailed_metrics_callback=None):
         """
-        Enhanced train_epoch that tracks diversity and regularization losses in addition to standard losses.
+        Enhanced train_epoch that tracks regularization losses in addition to standard losses.
         """
         # Set max_reset_steps on the first epoch if it's still None
         if self.model.vector_quantizer.max_reset_steps is None:
@@ -173,7 +168,6 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         # Initialize tracking lists for this epoch
         self._current_bn_param_history = []
         self._detailed_post_bn_norm_history = []
-        self._current_detailed_weighted_diversity_losses = []
         self._current_detailed_weighted_regularization_losses = []
 
         def bn_tracking_callback(**kwargs):
@@ -197,8 +191,6 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
                     })
                 if 'weighted_regularization_loss' in debug_stats:
                     self._current_detailed_weighted_regularization_losses.append(debug_stats['weighted_regularization_loss'])
-                if 'weighted_diversity_loss' in debug_stats:
-                    self._current_detailed_weighted_diversity_losses.append(debug_stats['weighted_diversity_loss'])
                     
             if detailed_metrics_callback is not None:
                 detailed_metrics_callback(**kwargs)
@@ -219,11 +211,8 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         self._detailed_post_bn_norm_history = None
         
         # Store enhanced loss history for this epoch
-        self.detailed_weighted_diversity_losses.append(self._current_detailed_weighted_diversity_losses)
         self.detailed_weighted_regularization_losses.append(self._current_detailed_weighted_regularization_losses)
-        del self._current_detailed_weighted_diversity_losses
         del self._current_detailed_weighted_regularization_losses
-        self._current_detailed_weighted_diversity_losses = None
         self._current_detailed_weighted_regularization_losses = None
         
         return result
@@ -250,9 +239,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         """
         kwargs.update({ 
             "current_step": self.current_step,
-            "weighted_diversity_losses": self.weighted_diversity_losses,
             "weighted_regularization_losses": self.weighted_regularization_losses,
-            "detailed_weighted_diversity_losses": self.detailed_weighted_diversity_losses,
             "detailed_weighted_regularization_losses": self.detailed_weighted_regularization_losses
         })
         # Call parent save_checkpoint with enhanced data as kwargs
@@ -276,23 +263,11 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             raise Exception("Checkpoint does not contain 'current_step' information. Phased training cannot be resumed properly without this data.")
         
         # Restore enhanced loss tracking if available
-        if 'weighted_diversity_losses' in checkpoint:
-            self.weighted_diversity_losses = checkpoint['weighted_diversity_losses']
-            print(f"Restored weighted diversity losses history: {len(self.weighted_diversity_losses)} epochs")
-        else:
-            print("No weighted diversity losses history found in checkpoint")
-            
         if 'weighted_regularization_losses' in checkpoint:
             self.weighted_regularization_losses = checkpoint['weighted_regularization_losses']
             print(f"Restored weighted regularization losses history: {len(self.weighted_regularization_losses)} epochs")
         else:
             print("No weighted regularization losses history found in checkpoint")
-            
-        if 'detailed_weighted_diversity_losses' in checkpoint:
-            self.detailed_weighted_diversity_losses = checkpoint['detailed_weighted_diversity_losses']
-            print(f"Restored detailed weighted diversity losses history: {len(self.detailed_weighted_diversity_losses)} epochs")
-        else:
-            print("No detailed weighted diversity losses history found in checkpoint")
             
         if 'detailed_weighted_regularization_losses' in checkpoint:
             self.detailed_weighted_regularization_losses = checkpoint['detailed_weighted_regularization_losses']
@@ -399,7 +374,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
     
     def _store_epoch_metrics(self, train_metrics: Dict[str, Any], test_metrics: Dict[str, float]) -> None:
         """
-        Store epoch-level metrics for enhanced trainer with additional diversity and regularization losses.
+        Store epoch-level metrics for enhanced trainer with additional regularization losses.
         
         Args:
             train_metrics: Training metrics from train_epoch
@@ -409,16 +384,14 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         super()._store_epoch_metrics(train_metrics, test_metrics)
         
         # Store enhanced losses
-        self.weighted_diversity_losses.append(train_metrics['avg_weighted_diversity_loss'])
         self.weighted_regularization_losses.append(train_metrics['avg_weighted_regularization_loss'])
         
         # Store enhanced detailed metrics
-        self.detailed_weighted_diversity_losses.append(train_metrics['detailed_weighted_diversity_losses'])
         self.detailed_weighted_regularization_losses.append(train_metrics['detailed_weighted_regularization_losses'])
     
     def _print_epoch_metrics(self, train_metrics: Dict[str, Any], test_metrics: Dict[str, float]) -> None:
         """
-        Print epoch metrics for enhanced trainer with additional diversity and regularization losses.
+        Print epoch metrics for enhanced trainer with additional regularization losses.
         
         Args:
             train_metrics: Training metrics from train_epoch
@@ -428,7 +401,6 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         super()._print_epoch_metrics(train_metrics, test_metrics)
         
         # Print enhanced metrics
-        print(f"Weighted Diversity Loss: {train_metrics['avg_weighted_diversity_loss']:.4f}")
         print(f"Weighted Regularization Loss: {train_metrics['avg_weighted_regularization_loss']:.4f}")
 
 
@@ -550,19 +522,15 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
     def _get_training_completion_metric_dict(self, final_metrics: Dict[str, float], 
                                              training_duration: Optional[float] = None):
         """
-        Enhanced training completion metrics that include diversity and regularization losses.
+        Enhanced training completion metrics that include regularization losses.
         """
         metric_dict = super()._get_training_completion_metric_dict(final_metrics, training_duration)
         
         # Add enhanced loss metrics
-        if 'avg_weighted_diversity_loss' in final_metrics:
-            metric_dict["Final Weighted Diversity Loss"] = f"{final_metrics['avg_weighted_diversity_loss']:.4f}"
         if 'avg_weighted_regularization_loss' in final_metrics:
             metric_dict["Final Weighted Regularization Loss"] = f"{final_metrics['avg_weighted_regularization_loss']:.4f}"
         
         # Add enhanced loss history if available
-        if self.weighted_diversity_losses:
-            metric_dict["Avg Weighted Diversity Loss"] = f"{sum(self.weighted_diversity_losses) / len(self.weighted_diversity_losses):.4f}"
         if self.weighted_regularization_losses:
             metric_dict["Avg Weighted Regularization Loss"] = f"{sum(self.weighted_regularization_losses) / len(self.weighted_regularization_losses):.4f}"
         
@@ -620,7 +588,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         
         # Add progressive loss plot if we have the necessary data
         if (self.detailed_recon_losses and self.detailed_vq_losses and 
-            self.detailed_weighted_diversity_losses and self.detailed_weighted_regularization_losses):
+            self.detailed_weighted_regularization_losses):
             
             # Create a new figure for the progressive loss plot
             fig, ax = plt.subplots(figsize=(15, 8))
@@ -628,7 +596,6 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             # Flatten all epochs into single lists
             all_recon_losses = [item for epoch in self.detailed_recon_losses for item in epoch]
             all_vq_losses = [item for epoch in self.detailed_vq_losses for item in epoch]
-            all_weighted_diversity_losses = [item for epoch in self.detailed_weighted_diversity_losses for item in epoch]
             all_weighted_regularization_losses = [item for epoch in self.detailed_weighted_regularization_losses for item in epoch]
             
             # Calculate progressive loss components
@@ -638,19 +605,14 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             # 2. Reconstruction loss + VQ loss
             recon_plus_vq = [r + v for r, v in zip(all_recon_losses, all_vq_losses)]
             
-            # 3. Reconstruction loss + VQ loss + weighted diversity loss
-            recon_plus_vq_plus_diversity = [r + v + d for r, v, d in zip(
-                all_recon_losses, all_vq_losses, all_weighted_diversity_losses)]
-            
-            # 4. Total loss (reconstruction + VQ + weighted diversity + weighted regularization)
-            total_loss = [r + v + d + reg for r, v, d, reg in zip(
-                all_recon_losses, all_vq_losses, all_weighted_diversity_losses, all_weighted_regularization_losses)]
+            # 3. Total loss (reconstruction + VQ + weighted regularization)
+            total_loss = [r + v + reg for r, v, reg in zip(
+                all_recon_losses, all_vq_losses, all_weighted_regularization_losses)]
             
             # Plot the progressive loss components
-            ax.plot(range(recon_only), recon_only, label='1. Reconstruction Loss', color='blue', linewidth=2, alpha=0.8)
-            ax.plot(range(recon_plus_vq), recon_plus_vq, label='2. Reconstruction + VQ Loss', color='green', linewidth=2, alpha=0.8)
-            ax.plot(range(recon_plus_vq_plus_diversity), recon_plus_vq_plus_diversity, label='3. Reconstruction + VQ + Diversity Loss', color='orange', linewidth=2, alpha=0.8)
-            ax.plot(range(total_loss), total_loss, label='4. Total Loss (All Components)', color='red', linewidth=2, alpha=0.8)
+            ax.plot(range(len(recon_only)), recon_only, label='1. Reconstruction Loss', color='blue', linewidth=2, alpha=0.8)
+            ax.plot(range(len(recon_plus_vq)), recon_plus_vq, label='2. Reconstruction + VQ Loss', color='green', linewidth=2, alpha=0.8)
+            ax.plot(range(len(total_loss)), total_loss, label='3. Total Loss (All Components)', color='red', linewidth=2, alpha=0.8)
             
             # Add epoch boundaries
             epoch_boundaries = []
