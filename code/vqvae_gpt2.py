@@ -1135,7 +1135,7 @@ class GPT2VQVAE(nn.Module):
 
         if use_caching and K > 0:
             # Use cache for prompt
-            prompt_cache = self._get_prompt_cache(self.decoder, prompt_sequences, prompt_mask, use_cache=True, return_dict=True)
+            prompt_cache = self._get_prompt_cache(self.decoder, prompt_sequences, prompt_mask)
             padded_cache = self._pad_kv_cache(prompt_cache, B, M)
             # Only pass COT+latent embeddings to decoder, but with cache & full attention mask
             decoder_outputs = self.decoder(
@@ -1188,7 +1188,7 @@ class GPT2VQVAE(nn.Module):
         output_logits = torch.empty((B, M, L, self.decoder_config.vocab_size), device=device)
 
         # 1. Initialize cache with prompt for all batch at once and pad
-        prompt_cache = self._get_prompt_cache(self.decoder, prompt_sequences, prompt_mask, use_cache=True, return_dict=True)
+        prompt_cache = self._get_prompt_cache(self.decoder, prompt_sequences, prompt_mask)
 
         # Pad prompt cache M times to match COT batch size
         padded_cache = self._pad_kv_cache(prompt_cache, B, M)  # [B*M]
@@ -1322,7 +1322,7 @@ class GPT2VQVAE(nn.Module):
             # CACHING APPROACH: Pre-compute KV cache for prompt tokens except the last one
             
             # Step 1: Pre-compute KV cache for prompt tokens except the last one
-            prompt_cache = self._get_prompt_cache(self.decoder, prompt_sequences, prompt_mask, use_cache=True, return_dict=True, exclude_last_token=True, pad_token_id=pad_token_id)
+            prompt_cache = self._get_prompt_cache(self.decoder, prompt_sequences, prompt_mask, exclude_last_token=True, pad_token_id=pad_token_id)
             
             # Pad prompt cache M times using helper method
             padded_cache = self._pad_kv_cache(prompt_cache, B, M)
@@ -1657,7 +1657,7 @@ class GPT2VQVAE(nn.Module):
         
         return model
 
-    def _get_prompt_cache(self, decoder, prompt_sequences, prompt_mask, use_cache=True, return_dict=True, exclude_last_token=False, pad_token_id=0):
+    def _get_prompt_cache(self, decoder, prompt_sequences, prompt_mask, exclude_last_token=False, pad_token_id=0):
         """
         Helper to obtain the prompt cache (and optionally prompt activations) for decoding.
         If exclude_last_token is True, excludes the last token from prompt_sequences (for AR decoding).
@@ -1676,8 +1676,8 @@ class GPT2VQVAE(nn.Module):
             input_ids=prompt_input,
             attention_mask=prompt_mask_input,
             past_key_values=DynamicCache() if not hasattr(decoder, 'is_decoder') or not decoder.is_decoder else EncoderDecoderCache(DynamicCache(), DynamicCache()),
-            use_cache=use_cache,
-            return_dict=return_dict
+            use_cache=True,
+            return_dict=True
         )
         return prompt_outputs.past_key_values
 
