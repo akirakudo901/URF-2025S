@@ -1062,7 +1062,8 @@ class GPT2VQVAE(nn.Module):
 
         # embed_sum_decode mode
         if self.embed_sum_decode:
-            return self._decode_embed_sum(chain_memory, cot_sequences, cot_mask, ar_position, pad_token_id, use_caching)
+            return self._decode_embed_sum(chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
+                                          ar_position, pad_token_id, use_caching)
         
         # simple_decoder mode
         elif self.simple_decoder:
@@ -1077,7 +1078,7 @@ class GPT2VQVAE(nn.Module):
             return self._decode_normal(chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
                                        ar_position, pad_token_id, use_caching)
 
-    def _decode_embed_sum(self, chain_memory, cot_sequences, cot_mask, ar_position, pad_token_id, use_caching, prompt_sequences=None, prompt_mask=None):
+    def _decode_embed_sum(self, chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, ar_position, pad_token_id, use_caching):
         """
         Helper for embed_sum_decode mode. See decode() docstring for details.
         """
@@ -1123,14 +1124,20 @@ class GPT2VQVAE(nn.Module):
             prompt_mask_flat = torch.ones(B * M, K, device=chain_memory.device)
         else:
             prompt_mask_flat = None
+        
+        if prompt_embeds is not None:
+            if prompt_mask_flat is not None:
+                attn_mask = torch.cat([prompt_mask_flat, cot_mask_flat], dim=1)  # [B*M, K+L]
+            else:
+                attn_mask = torch.ones(B * M, K+L, device=chain_memory.device)
+        else:
+            attn_mask = cot_mask_flat
 
         if use_caching and K > 0:
             # Use cache for prompt
             prompt_cache = self._get_prompt_cache(self.decoder, prompt_sequences, prompt_mask, use_cache=True, return_dict=True)
             padded_cache = self._pad_kv_cache(prompt_cache, B, M)
-            # Only pass COT+latent embeddings to decoder, but with cache
-            # The decoder expects the next tokens after the prompt, so we pass cot_input_embeds as inputs_embeds
-            attn_mask = cot_mask_flat  # [B*M, L]
+            # Only pass COT+latent embeddings to decoder, but with cache & full attention mask
             decoder_outputs = self.decoder(
                 input_ids=None,
                 inputs_embeds=cot_input_embeds,
@@ -1146,13 +1153,9 @@ class GPT2VQVAE(nn.Module):
             # No cache: concatenate prompt and COT+latent embeddings
             if prompt_embeds is not None:
                 input_embeds = torch.cat([prompt_embeds, cot_input_embeds], dim=1)  # [B*M, K+L, d_model]
-                if prompt_mask_flat is not None:
-                    attn_mask = torch.cat([prompt_mask_flat, cot_mask_flat], dim=1)  # [B*M, K+L]
-                else:
-                    attn_mask = torch.ones(B * M, K+L, device=chain_memory.device)
             else:
                 input_embeds = cot_input_embeds
-                attn_mask = cot_mask_flat
+            
             decoder_outputs = self.decoder(
                 input_ids=None,
                 inputs_embeds=input_embeds,
