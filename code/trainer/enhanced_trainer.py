@@ -41,7 +41,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
                  device: str = "cuda" if torch.cuda.is_available() else "cpu", 
                  tracking_functions: Optional[Dict[str, Any]] = None, 
                  run_name : Optional[str] = "ANONYM_RUN",
-                 overwrite_plots: bool = False):
+                 overwrite_plots: bool = True):
         # Filter out enhanced VQ-VAE specific parameters for parent constructor
         enhanced_vq_params = {
             'ema_decay', 'reset_threshold', 
@@ -211,6 +211,11 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         self._detailed_post_bn_norm_history = None
         
         # Store enhanced loss history for this epoch
+        reg_losses = self._current_detailed_weighted_regularization_losses
+        if len(reg_losses) > 0:
+            result['avg_weighted_regularization_loss'] = sum(reg_losses) / len(reg_losses)
+        else:
+            result['avg_weighted_regularization_loss'] = 0
         self.detailed_weighted_regularization_losses.append(self._current_detailed_weighted_regularization_losses)
         del self._current_detailed_weighted_regularization_losses
         self._current_detailed_weighted_regularization_losses = None
