@@ -213,7 +213,8 @@ class EnhancedVectorQuantizer(nn.Module):
                  reset_threshold: float = 0.1,
                  reset_frequency: int = 1000, use_ema: bool = True,
                  max_reset_steps: Optional[int] = None, reservoir_size: int = 10000,
-                 reset_strategy: str = 'partial', use_batch_norm: bool = True):
+                 reset_strategy: str = 'partial', use_batch_norm: bool = True,
+                 regularization_loss_weight: float = 0.01):
         """
         Enhanced Vector quantizer initialization with EMA updates and reset mechanisms.
         
@@ -229,6 +230,7 @@ class EnhancedVectorQuantizer(nn.Module):
             reservoir_size: Size of reservoir for data-dependent initialization
             reset_strategy: Strategy for automatic resets - 'partial' (reset unused codes) or 'full' (reset entire codebook)
             use_batch_norm: Whether to use batch normalization before vector quantization
+            regularization_loss_weight: Weight for the regularization loss (L2 + orthogonality regularization)
         """
         super().__init__()
         
@@ -242,6 +244,7 @@ class EnhancedVectorQuantizer(nn.Module):
         self.max_reset_steps = max_reset_steps
         self.reset_strategy = reset_strategy
         self.use_batch_norm = use_batch_norm
+        self.regularization_loss_weight = regularization_loss_weight
         
         # Initialize embeddings
         self.embedding = nn.Embedding(num_embeddings, embedding_dim)
@@ -478,7 +481,7 @@ class EnhancedVectorQuantizer(nn.Module):
             regularization_loss = self._compute_regularization_loss(self.embedding.weight)
             
             # Combined loss
-            weighted_regularization_loss = 0.01 * regularization_loss
+            weighted_regularization_loss = self.regularization_loss_weight * regularization_loss
             total_loss = vq_loss + weighted_regularization_loss
             
             # Check for NaN and clip if necessary
@@ -846,7 +849,7 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
                  ema_decay=0.99, reset_threshold=0.1,
                  diversity_gamma=None, #kept in case we are loading older models - deprecated
                  reset_frequency=1000, use_ema=True, max_reset_steps=None, reservoir_size=10000,
-                 reset_strategy='partial', use_batch_norm=True,
+                 reset_strategy='partial', use_batch_norm=True, regularization_loss_weight=0.01,
                  # Unified parameters (applied to both encoder and decoder if specified)
                  n_layer=12, n_head=12, n_inner=None, dropout=0.1, activation_function="gelu",
                  # Encoder-specific parameters (take precedence over unified if specified)
@@ -869,11 +872,13 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
         - Automatic codebook reset mechanisms for unused embeddings
         - Enhanced monitoring and statistics for codebook health
         - Support for loading and freezing text embeddings separately for encoder and decoder
+        - Configurable regularization loss weight for embedding diversity
         
         The enhanced codebook training scheme reduces to normal VQ-VAE training when:
         - ema_decay = 0.0 (no EMA updates)
         - reset_threshold = 0.0 (no automatic resets)
         - use_ema = False (EMA disabled)
+        - regularization_loss_weight = 0.0 (no regularization)
         
         Text embedding loading and freezing:
         - When use_pretrained_encoder/decoder=False, you can still load text embeddings from pretrained models
@@ -894,7 +899,8 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             'max_reset_steps': max_reset_steps,
             'reservoir_size': reservoir_size,
             'reset_strategy': reset_strategy,
-            'use_batch_norm': use_batch_norm
+            'use_batch_norm': use_batch_norm,
+            'regularization_loss_weight': regularization_loss_weight
         }
         
         # Call parent constructor with remaining parameters
@@ -948,6 +954,7 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             'reservoir_size': reservoir_size,
             'reset_strategy': reset_strategy,
             'use_batch_norm': use_batch_norm,
+            'regularization_loss_weight': regularization_loss_weight
         }
     
     def get_vector_quantizer_stats(self):
@@ -1083,7 +1090,7 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
         
         # Check for enhanced configuration in the checkpoint
         enhanced_keys = ['ema_decay', 'reset_threshold', 'reset_frequency', 
-                           'use_ema', 'max_reset_steps', 'reservoir_size', 'reset_strategy', 'use_batch_norm']
+                           'use_ema', 'max_reset_steps', 'reservoir_size', 'reset_strategy', 'use_batch_norm', 'regularization_loss_weight']
         if 'enhanced_config' in checkpoint:
             enhanced_config = checkpoint['enhanced_config'].copy()
             is_enhanced_checkpoint = True
