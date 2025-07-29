@@ -372,23 +372,6 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         except Exception as e:
             print(f"Warning: Failed to track enhanced codebook usage: {e}")
     
-    def _store_epoch_metrics(self, train_metrics: Dict[str, Any], test_metrics: Dict[str, float]) -> None:
-        """
-        Store epoch-level metrics for enhanced trainer with additional regularization losses.
-        
-        Args:
-            train_metrics: Training metrics from train_epoch
-            test_metrics: Validation metrics from validate
-        """
-        # Call parent method to store basic metrics
-        super()._store_epoch_metrics(train_metrics, test_metrics)
-        
-        # Store enhanced losses
-        self.weighted_regularization_losses.append(train_metrics['avg_weighted_regularization_loss'])
-        
-        # Store enhanced detailed metrics
-        self.detailed_weighted_regularization_losses.append(train_metrics['detailed_weighted_regularization_losses'])
-    
     def _print_epoch_metrics(self, train_metrics: Dict[str, Any], test_metrics: Dict[str, float]) -> None:
         """
         Print epoch metrics for enhanced trainer with additional regularization losses.
