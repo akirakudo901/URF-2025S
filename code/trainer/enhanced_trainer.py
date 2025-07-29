@@ -519,23 +519,6 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
     
-    def _get_training_completion_metric_dict(self, final_metrics: Dict[str, float], 
-                                             training_duration: Optional[float] = None):
-        """
-        Enhanced training completion metrics that include regularization losses.
-        """
-        metric_dict = super()._get_training_completion_metric_dict(final_metrics, training_duration)
-        
-        # Add enhanced loss metrics
-        if 'avg_weighted_regularization_loss' in final_metrics:
-            metric_dict["Final Weighted Regularization Loss"] = f"{final_metrics['avg_weighted_regularization_loss']:.4f}"
-        
-        # Add enhanced loss history if available
-        if self.weighted_regularization_losses:
-            metric_dict["Avg Weighted Regularization Loss"] = f"{sum(self.weighted_regularization_losses) / len(self.weighted_regularization_losses):.4f}"
-        
-        return metric_dict
-    
     def _plot_diversity_evolution(self, save_path: str) -> None:
         """Plot codebook diversity metrics over time."""
         if not self.diversity_history or not self.save_tracking_history:
