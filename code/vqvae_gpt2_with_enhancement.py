@@ -844,6 +844,7 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
                  load_text_embeddings_decoder=False, freeze_text_embeddings_decoder=False,
                  # Vector Quantizer specific parameters
                  ema_decay=0.99, reset_threshold=0.1,
+                 diversity_gamma=None, #kept in case we are loading older models - deprecated
                  reset_frequency=1000, use_ema=True, max_reset_steps=None, reservoir_size=10000,
                  reset_strategy='partial', use_batch_norm=True,
                  # Unified parameters (applied to both encoder and decoder if specified)
@@ -879,6 +880,8 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
         - This allows initialization with good token representations while keeping other weights random
         - Text embeddings can be frozen to prevent updates during training
         """
+        if diversity_gamma is not None:
+            print("Warning: diversity_gamma is deprecated as the diversity loss has been removed.")
         # Extract vector quantizer parameters
         vq_params = {
             'num_embeddings': num_embeddings,
