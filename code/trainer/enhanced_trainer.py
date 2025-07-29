@@ -35,6 +35,12 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
     - reset_threshold = 0.0 (no automatic resets)
     - use_ema = False (EMA disabled)
     """
+    CLEAN_PLOT_PATTERNS = [
+        "epoch_*_history_batchnorm*.png",
+        "epoch_*_history_progressive_loss.png",
+        "epoch_*_history_post_bn_input_norm.png",
+        ] + GPT2VQVAETrainer.CLEAN_PLOT_PATTERNS
+    
     def __init__(self, 
                  model_config: Dict[str, Any], 
                  training_config: Dict[str, Any], 

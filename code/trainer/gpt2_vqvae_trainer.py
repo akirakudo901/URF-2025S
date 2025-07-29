@@ -2,6 +2,7 @@
 # Created: 2025/06/19
 # Last Updated: 2025/06/23
 
+import shutil
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -212,6 +213,16 @@ class GPT2VQVAETrainer:
     """
     Trainer class for GPT2VQVAE model with configurable hyperparameters and memory optimizations.
     """
+    CLEAN_PLOT_PATTERNS = [
+            "epoch_*_history.png",
+            "epoch_*_memory_usage.png",
+            "epoch_*_chain_emb.png",
+            "epoch_*_chain_emb_*_heatmap.png",
+            "epoch_*_chain_emb_norms.png",
+            "epoch_*_chain_emb_similarities.png",
+            "epoch_*_vq_input.png",
+            "epoch_*_codebook_tracking"
+            ]
     
     def __init__(self, 
                  model_config: Dict[str, Any],
@@ -1358,21 +1369,6 @@ class GPT2VQVAETrainer:
                 
                     self.log_memory_usage(f"epoch_{epoch+1}_after_saving")
                 
-                
-                # Save codebook tracking plots
-                if self.tracking_enabled:
-                    if TRACK_MEMORY:
-                        with record_function("## save_codebook_plots ##"):
-                            checkpoint_dir = self.training_config.get('checkpoint_dir', 'checkpoints')
-                            codebook_dir = os.path.join(checkpoint_dir, 'codebook_tracking')
-                            self.save_codebook_plots_func(codebook_dir, epoch + 1)
-                    else:
-                        checkpoint_dir = self.training_config.get('checkpoint_dir', 'checkpoints')
-                        codebook_dir = os.path.join(checkpoint_dir, 'codebook_tracking')
-                        self.save_codebook_plots_func(codebook_dir, epoch + 1)
-                
-                    self.log_memory_usage(f"epoch_{epoch+1}_after_saving_codebook")
-                
                 # Clear cache after each epoch
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -2061,15 +2057,6 @@ class GPT2VQVAETrainer:
         if not self.overwrite_plots:
             return
         
-        patterns = [f"epoch_*_history.png",
-                    f"epoch_*_memory_usage.png",
-                    f"epoch_*_chain_emb.png",
-                    f"epoch_*_chain_emb_*_heatmap.png",
-                    f"epoch_*_chain_emb_norms.png",
-                    f"epoch_*_chain_emb_similarities.png",
-                    f"epoch_*_vq_input.png",
-                    f"epoch_*_codebook_tracking"]
-        
         try:
             # Define patterns for different plot types
             if plot_type == 'epoch':
@@ -2080,7 +2067,7 @@ class GPT2VQVAETrainer:
                 print(f"🗑️  Removing previous plots for previous epochs...", end="")
 
                 # Remove plots from earlier epochs
-                for pattern in patterns:
+                for pattern in self.__class__.CLEAN_PLOT_PATTERNS:
                     for file_path in glob.glob(os.path.join(save_dir, pattern)):
                         file_name = os.path.basename(file_path)
                         # Extract epoch number from filename
@@ -2093,7 +2080,6 @@ class GPT2VQVAETrainer:
                                         os.remove(file_path)
                                         
                                     elif os.path.isdir(file_path):
-                                        import shutil
                                         shutil.rmtree(file_path)
                             except (ValueError, IndexError):
                                 continue
@@ -2102,13 +2088,12 @@ class GPT2VQVAETrainer:
             elif plot_type in ['training', 'aborted_training']:
                 # Clean up all training plots when saving final plots
                 print(f"🗑️  Removing previous plots since we've reached end of training...", end="")
-                for pattern in patterns:
+                for pattern in self.__class__.CLEAN_PLOT_PATTERNS:
                     for file_path in glob.glob(os.path.join(save_dir, pattern)):
                         
                         if os.path.isfile(file_path):
                             os.remove(file_path)
                         elif os.path.isdir(file_path):
-                            import shutil
                             shutil.rmtree(file_path)
                 print("DONE.")
                             
