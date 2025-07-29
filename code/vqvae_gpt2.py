@@ -1048,6 +1048,9 @@ class GPT2VQVAE(nn.Module):
         B, K = prompt_sequences.shape
         _, L, M, _ = memory.shape
 
+        if ar_position is not None and ar_position >= L:
+            raise Exception("ar_position must be smaller than L but was {ar_position} against L={L}.")
+
         # Reshape memory to [batch_size * M, L, d_model] and add chain-positional embeddings
         memory = memory.transpose(1, 2).reshape(B * M, L, -1)
         chain_indices = torch.arange(M, device=memory.device).repeat(B)
@@ -1078,15 +1081,17 @@ class GPT2VQVAE(nn.Module):
         """
         Helper for embed_sum_decode mode. See decode() docstring for details.
         """
+        # TODO: EFFICIENT GENERATION USING SPECIFIED ar_position TO BE IMPLEMENTED
+        
         # chain_memory: [B*M, L, d_model]
         # cot_sequences: [B, M, L]
         # prompt_sequences: [B, K]
         # prompt_mask: [B, K] or None
-        B, M, L = cot_sequences.shape
-        d_model = chain_memory.shape[-1]
-        K = prompt_sequences.shape[1] if prompt_sequences is not None else 0
-
-        cot_sequences_flat = cot_sequences.reshape(B * M, L)  # [B*M, L]
+        B, K = prompt_sequences.shape
+        _, L, d_model = chain_memory.shape
+        _, M, _ = cot_sequences.shape
+        
+        cot_sequences_flat = cot_sequences.reshape(B * M, -1)  # [B*M, L]
         # Prepend filler token (pad_token_id) to each sequence
         filler = torch.full((B * M, 1), pad_token_id, dtype=cot_sequences_flat.dtype, device=cot_sequences_flat.device)
         cot_with_filler = torch.cat([filler, cot_sequences_flat[:, :-1]], dim=1)  # [B*M, L]
@@ -1163,13 +1168,10 @@ class GPT2VQVAE(nn.Module):
         if ar_position is None:
             return all_logits.view(B, M, L, -1)
         else:
-            return all_logits.view(B, M, L, -1)[:, :, ar_position:ar_position+1, :]
+            return all_logits.view(B, M, L, -1)[:, :, ar_position, :]
     
     def _decode_simple_decoder(self, chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
                                ar_position, pad_token_id, use_caching):
-        if ar_position is not None and ar_position >= L:
-            raise Exception("ar_position must be smaller than L but was {ar_position} against L={L}.")
-
         # For now, raise an error if caching isn't possible to avoid wasting lots of compute
         if not use_caching:
             raise RuntimeError("Caching must be enabled for efficiency purpose when using simple_decoder mode in decode().")
@@ -1264,9 +1266,6 @@ class GPT2VQVAE(nn.Module):
     
     def _decode_only_latent(self, chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
                             ar_position, pad_token_id, use_caching):
-        if ar_position is not None and ar_position >= L:
-            raise Exception("ar_position must be smaller than L but was {ar_position} against L={L}.")
-
         # TODO: EFFICIENT GENERATION USING SPECIFIED ar_position TO BE IMPLEMENTED
         # TODO: EFFICIENT GENERATION USING CACHING ON THE PROMPTS
         # There is no choice to generate auto-regressively!
@@ -1305,13 +1304,10 @@ class GPT2VQVAE(nn.Module):
         if ar_position is None:
             return cot_logits.view(B, M, L, -1)
         else:
-            return cot_logits.view(B, M, L, -1)[:, :, ar_position:ar_position+1, :]
+            return cot_logits.view(B, M, L, -1)[:, :, ar_position, :]
     
     def _decode_normal(self, chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
                        ar_position, pad_token_id, use_caching):
-        if ar_position is not None and ar_position >= L:
-            raise Exception("ar_position must be smaller than L but was {ar_position} against L={L}.")
-
         B, K = prompt_sequences.shape
         _, L, _ = chain_memory.shape
         _, M, _ = cot_sequences.shape
@@ -1419,7 +1415,7 @@ class GPT2VQVAE(nn.Module):
         if ar_position is None:
             return cot_logits.view(B, M, L, -1)
         else:
-            return cot_logits.view(B, M, L, -1)[:, :, ar_position:ar_position+1, :]
+            return cot_logits.view(B, M, L, -1)[:, :, ar_position, :]
 
     def forward(self, prompt, cot_sequences, cot_mask=None, prompt_mask=None, inference=False, quantize_cot_only=True, pad_token_id=50256, no_vq=False):
         """
@@ -1473,13 +1469,16 @@ class GPT2VQVAE(nn.Module):
             output_logits = torch.empty((batch_size, M, L, self.decoder_config.vocab_size), device=cot_sequences.device)
         
             # TODO IF I FIND THE TIME : USE KV-CACHING TO SPEED UP AUTO-REGRESSIVE GENERATION
+            # TODO IMPLEMENT LOGIC THAT PASSES SHORTER SEQUENCES AT EACH ITERATION TO SAVE COMPUTATION 
+            #      (CURRENTLY PASSES A FULL SEQUENCE OF LENGTH L AND ASKS TO COMPUTE ON IT)
             # During inference, generate sequence auto-regressively
+            output_sequences = torch.zeros_like(cot_sequences).to(device=cot_sequences.device)
             for t in range(L):
                 current_output = self.decode(cot_quantized, prompt, output_sequences, prompt_mask, cot_mask, 
                                              ar_position=t, pad_token_id=pad_token_id)
                 # Get next token predictions
                 output_logits[:, :, t, :] = current_output  # [batch_size, M, L, vocab_size]
-            output_sequences = torch.argmax(output_logits, dim=-1)  # [batch_size, M, L]
+                output_sequences[:, :, t] = torch.argmax(current_output, dim=-1)  # [batch_size, M, L]
         
         return output_sequences, output_logits, vq_loss, perplexity, indices, debug_stats
 
