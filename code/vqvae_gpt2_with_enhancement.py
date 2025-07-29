@@ -576,7 +576,7 @@ class EnhancedVectorQuantizer(nn.Module):
         Returns:
             dict: Dictionary containing various statistics
         """
-        thresholds = [0.005, 0.01, 0.05]  # 0.5%, 1%, 5%
+        thresholds = [0.000001, 0.00005, 0.0001, 0.0005, 0.01]  # 0.0001%, 0.005%, 0.01%, 0.05%, 1%
         if self.training:
             # During training, return training statistics
             total_usage = self._usage_counts.sum().item()
