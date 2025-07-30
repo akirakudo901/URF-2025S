@@ -872,8 +872,8 @@ class GPT2VQVAE(nn.Module):
         If no_vq is True, bypass vector quantization and return aggregated embeddings directly.
         
         Args:
-            prompt_sequences (torch.Tensor): Prompt sequences [batch_size, K]
-            cot_sequences (torch.Tensor): Chain-of-thought sequences [batch_size, M, L]
+            prompt_sequences (torch.Tensor): Prompt sequences [B, K]
+            cot_sequences (torch.Tensor): Chain-of-thought sequences [B, M, L]
             prompt_mask (torch.Tensor, optional): Prompt attention mask for padding
             cot_mask (torch.Tensor, optional): COT attention mask for padding
             aggregate_mode (str): Mode of aggregation
@@ -882,7 +882,7 @@ class GPT2VQVAE(nn.Module):
             no_vq (bool): If True, bypass vector quantization and return aggregated embeddings.
             
         Returns:
-            tuple: (quantized, vq_loss, perplexity, indices) 
+            tuple: (quantized [B, (L or K+L), M, d_model], vq_loss, perplexity, indices [B, (L or K+L)]).
         """
         batch_size, K = prompt_sequences.shape
         _, M, L = cot_sequences.shape
@@ -1027,8 +1027,8 @@ class GPT2VQVAE(nn.Module):
         quantized = quantized.unsqueeze(1).expand(-1, M, -1)  # [batch_size*(L or K+L), M, d_model]
         
         # Reshape back using the appropriate length
-        quantized = quantized.view(batch_size, -1, M, quantized.size(-1))
-        indices = indices.view(batch_size, -1)
+        quantized = quantized.view(batch_size, -1, M, quantized.size(-1)) # [batch_size, (L or K+L), M, d_model]
+        indices = indices.view(batch_size, -1) # [batch_size, (L or K+L)]
         
         return quantized, vq_loss, perplexity, indices, debug_stats
 
