@@ -1539,16 +1539,30 @@ class LatentVisualizationAnalyzer:
             show_stats=True
         )
         
-        print("\n5. Analyzing word-to-latent mapping...")
-        self.analyze_word_to_latent_mapping(
+        print("\n5. Precomputing mapping statistics...")
+        mapping_stats = self.precompute_mapping_statistics(
             prompt_sequences=prompt_sequences,
             cot_sequences=cot_sequences,
             prompt_mask=prompt_mask,
             cot_mask=cot_mask,
-            output_dir=output_dir,
             sample_size=sample_size,
+            encode_batch_size=128
+        )
+        
+        print("\n6. Analyzing latent-to-word mapping...")
+        self.analyze_latent_to_word_mapping(
+            mapping_stats=mapping_stats,
+            output_dir=output_dir,
             top_k_words=20,
             top_k_codes=30
+        )
+        
+        print("\n7. Analyzing word-to-latent mapping...")
+        self.analyze_word_to_latent_mapping(
+            mapping_stats=mapping_stats,
+            output_dir=output_dir,
+            top_k_codes=20,
+            top_k_words=30
         )
         
         # Save raw data for further analysis
@@ -1575,38 +1589,47 @@ class LatentVisualizationAnalyzer:
         print(f"  - start_end_frequencies.png")
         print(f"  - chain_embeddings_visualization.png")
         print(f"  - word_to_latent_mapping.png")
+        print(f"  - word_to_code_mapping.png")
         print(f"  - position_comparison_analysis.png")
+        print(f"  - word_position_comparison_analysis.png")
         print(f"  - detailed_code_analysis.txt")
         print(f"  - sequence_statistics.txt")
         print(f"  - word_mapping_analysis.txt")
+        print(f"  - word_to_code_analysis.txt")
         print(f"  - position_comparison_statistics.txt")
+        print(f"  - word_position_comparison_statistics.txt")
         print(f"  - analysis_data.json")
         print(f"  - position_analysis/ (directory with per-position analyses)")
+        print(f"  - word_position_analysis/ (directory with per-word-position analyses)")
 
-    def analyze_word_to_latent_mapping(self, prompt_sequences: torch.Tensor, cot_sequences: torch.Tensor,
-                                      prompt_mask: torch.Tensor, cot_mask: torch.Tensor,
-                                      output_dir: str, sample_size: Optional[int] = None,
-                                      top_k_words: int = 20, top_k_codes: int = 30, 
-                                      encode_batch_size: int = 128) -> None:
+    def precompute_mapping_statistics(self, prompt_sequences: torch.Tensor, cot_sequences: torch.Tensor,
+                                    prompt_mask: torch.Tensor, cot_mask: torch.Tensor,
+                                    sample_size: Optional[int] = None, encode_batch_size: int = 128,
+                                    target_codes: Optional[List[int]] = None, 
+                                    target_tokens: Optional[List[str]] = None) -> Dict[str, Any]:
         """
-        Analyze what words/tokens are mapped to each latent embedding and show their distribution.
-        
-        This function performs two types of analysis:
-        1. Per-CoT-position analysis: Analyzes word-to-code mapping for each CoT position separately
-        2. Cross-position analysis: Analyzes word-to-code mapping across all CoT positions
+        Precompute all mapping statistics for both latent-to-word and word-to-latent analysis.
         
         Args:
             prompt_sequences: Prompt sequences tensor
             cot_sequences: CoT sequences tensor
             prompt_mask: Prompt mask tensor
             cot_mask: CoT mask tensor
-            output_dir: Directory to save visualizations
             sample_size: Number of samples to process (None for all)
-            top_k_words: Number of top words to show per code
-            top_k_codes: Number of top codes to analyze in detail
             encode_batch_size: Batch size for encoding samples (default: 128)
+            target_codes: List of specific codes to analyze (if None, analyze all)
+            target_tokens: List of specific tokens to analyze (if None, analyze all)
+        
+        Returns:
+            Dictionary containing:
+            - position_code_to_words: {position -> {code -> {word -> count}}}
+            - word_to_position_codes: {word -> {position -> {code -> count}}}
+            - code_usage_stats: {code -> total_usage_count}
+            - word_usage_stats: {word -> total_usage_count}
+            - position_stats: {position -> {total_codes, total_words, total_mappings}}
+            - num_positions: Number of CoT positions
         """
-        print("Analyzing word-to-latent mapping...")
+        print("Precomputing mapping statistics...")
         _, M, _ = cot_sequences
         
         # Determine sample size
@@ -1618,12 +1641,20 @@ class LatentVisualizationAnalyzer:
         
         # Initialize data structures for per-position analysis
         position_code_to_words = {}  # cot_position -> {code -> {word -> count}}
+        word_to_position_codes = {}  # word -> {position -> {code -> count}}
+        
         for cot_idx in range(M):
             position_code_to_words[cot_idx] = defaultdict(lambda: defaultdict(int))
         
-        # Initialize data structures for cross-position analysis
+        # Initialize cross-position statistics
         cross_position_code_to_words = defaultdict(lambda: defaultdict(int))  # code -> {word -> count}
-
+        cross_position_word_to_codes = defaultdict(lambda: defaultdict(int))  # word -> {code -> count}
+        
+        # Initialize usage statistics
+        code_usage_stats = Counter()
+        word_usage_stats = Counter()
+        position_stats = {}
+        
         # Process samples in batches
         with torch.no_grad():
             for batch_start in range(0, sample_size, encode_batch_size):
@@ -1654,7 +1685,7 @@ class LatentVisualizationAnalyzer:
                         for cot_idx in range(M):
                             cot_tokens = cot_gt_batch[batch_idx, cot_idx]  # [seq_len]
                             cot_mask_sample = cot_mask_batch[batch_idx, cot_idx] if cot_mask_batch is not None else None
-                        
+                            
                             # Apply mask if available
                             if cot_mask_sample is not None:
                                 valid_positions = cot_mask_sample.bool()
@@ -1666,20 +1697,98 @@ class LatentVisualizationAnalyzer:
                             
                             # Map codes to words for this specific CoT position
                             for code, word in zip(indices, words):
-                                position_code_to_words[cot_idx][code.item()][word] += 1
-                                cross_position_code_to_words[code.item()][word] += 1
+                                code_item = code.item()
+                                
+                                # Filter by target codes if specified
+                                if target_codes is not None and code_item not in target_codes:
+                                    continue
+                                
+                                # Filter by target tokens if specified
+                                if target_tokens is not None and word not in target_tokens:
+                                    continue
+                                
+                                # Update position-specific mappings
+                                position_code_to_words[cot_idx][code_item][word] += 1
+                                
+                                # Update word-to-code mappings
+                                if word not in word_to_position_codes:
+                                    word_to_position_codes[word] = {}
+                                if cot_idx not in word_to_position_codes[word]:
+                                    word_to_position_codes[word][cot_idx] = defaultdict(int)
+                                word_to_position_codes[word][cot_idx][code_item] += 1
+                                
+                                # Update cross-position mappings
+                                cross_position_code_to_words[code_item][word] += 1
+                                cross_position_word_to_codes[word][code_item] += 1
+                                
+                                # Update usage statistics
+                                code_usage_stats[code_item] += 1
+                                word_usage_stats[word] += 1
                 
                 except Exception as e:
                     print(f"Error processing batch starting at sample {batch_start}: {e}")
                     continue
+        
+        # Compute position statistics
+        for pos in range(M):
+            total_codes = len(position_code_to_words[pos])
+            total_words = len(set().union(*[set(words.keys()) for words in position_code_to_words[pos].values()]))
+            total_mappings = sum(sum(words.values()) for words in position_code_to_words[pos].values())
+            
+            position_stats[pos] = {
+                'total_codes': total_codes,
+                'total_words': total_words,
+                'total_mappings': total_mappings
+            }
+        
+        # Compile final statistics
+        mapping_stats = {
+            'position_code_to_words': position_code_to_words,
+            'word_to_position_codes': word_to_position_codes,
+            'cross_position_code_to_words': cross_position_code_to_words,
+            'cross_position_word_to_codes': cross_position_word_to_codes,
+            'code_usage_stats': code_usage_stats,
+            'word_usage_stats': word_usage_stats,
+            'position_stats': position_stats,
+            'num_positions': M,
+            'total_samples': sample_size
+        }
+        
+        print(f"Precomputation completed. Processed {sample_size} samples across {M} positions.")
+        print(f"  Total unique codes: {len(code_usage_stats)}")
+        print(f"  Total unique words: {len(word_usage_stats)}")
+        
+        return mapping_stats
+
+    def analyze_latent_to_word_mapping(self, mapping_stats: Dict[str, Any], output_dir: str,
+                                      top_k_words: int = 20, top_k_codes: int = 30) -> None:
+        """
+        Analyze what words/tokens are mapped to each latent embedding and show their distribution.
+        
+        This function performs two types of analysis:
+        1. Per-CoT-position analysis: Analyzes word-to-code mapping for each CoT position separately
+        2. Cross-position analysis: Analyzes word-to-code mapping across all CoT positions
+        
+        Args:
+            mapping_stats: Precomputed statistics from precompute_mapping_statistics
+            output_dir: Directory to save visualizations
+            top_k_words: Number of top words to show per code
+            top_k_codes: Number of top codes to analyze in detail
+        """
+        print("Analyzing latent-to-word mapping...")
+        
+        position_code_to_words = mapping_stats['position_code_to_words']
+        cross_position_code_to_words = mapping_stats['cross_position_code_to_words']
+        code_usage_stats = mapping_stats['code_usage_stats']
+        num_positions = mapping_stats['num_positions']
         
         # Create output directory for position-specific analyses
         position_output_dir = os.path.join(output_dir, 'position_analysis')
         os.makedirs(position_output_dir, exist_ok=True)
         
         # 1. Analyze each CoT position separately
-        print(f"\n1. Analyzing word-to-latent mapping for each CoT position...")
-        for cot_idx in range(M):
+        print(f"\n1. Analyzing latent-to-word mapping for each CoT position...")
+        for cot_idx in range(num_positions):
             print(f"  Analyzing CoT position {cot_idx}...")
             
             # Compile statistics for this position
@@ -1707,15 +1816,10 @@ class LatentVisualizationAnalyzer:
             )
         
         # 2. Analyze across all positions
-        print(f"\n2. Analyzing word-to-latent mapping across all CoT positions...")
-        
-        # Compile cross-position statistics
-        cross_position_code_usage_counts = Counter()
-        for code in cross_position_code_to_words.keys():
-            cross_position_code_usage_counts[code] = sum(cross_position_code_to_words[code].values())
+        print(f"\n2. Analyzing latent-to-word mapping across all CoT positions...")
         
         # Get top used codes across all positions
-        cross_position_top_codes = sorted(cross_position_code_usage_counts.items(), key=lambda x: x[1], reverse=True)[:top_k_codes]
+        cross_position_top_codes = sorted(code_usage_stats.items(), key=lambda x: x[1], reverse=True)[:top_k_codes]
         
         # Create cross-position visualizations
         self._create_word_mapping_visualizations(
@@ -1732,13 +1836,101 @@ class LatentVisualizationAnalyzer:
         # 3. Create position comparison analysis
         print(f"\n3. Creating position comparison analysis...")
         self._create_position_comparison_analysis(
-            position_code_to_words, M, output_dir, top_k_codes, top_k_words
+            position_code_to_words, num_positions, output_dir, top_k_codes, top_k_words
+        )
+        
+        print(f"Latent-to-word mapping analysis completed. Results saved to: {output_dir}")
+        print(f"  - Position-specific analyses: {position_output_dir}")
+        print(f"  - Cross-position analysis: {output_dir}")
+        print(f"  - Position comparison: {output_dir}")
+
+    def analyze_word_to_latent_mapping(self, mapping_stats: Dict[str, Any], output_dir: str,
+                                      top_k_codes: int = 20, top_k_words: int = 30) -> None:
+        """
+        Analyze what latent codes are mapped to each word/token and show their distribution.
+        
+        This function performs two types of analysis:
+        1. Per-CoT-position analysis: Analyzes code-to-word mapping for each CoT position separately
+        2. Cross-position analysis: Analyzes code-to-word mapping across all CoT positions
+        
+        Args:
+            mapping_stats: Precomputed statistics from precompute_mapping_statistics
+            output_dir: Directory to save visualizations
+            top_k_codes: Number of top codes to show per word
+            top_k_words: Number of top words to analyze in detail
+        """
+        print("Analyzing word-to-latent mapping...")
+        
+        word_to_position_codes = mapping_stats['word_to_position_codes']
+        cross_position_word_to_codes = mapping_stats['cross_position_word_to_codes']
+        word_usage_stats = mapping_stats['word_usage_stats']
+        num_positions = mapping_stats['num_positions']
+        
+        # Create output directory for position-specific analyses
+        position_output_dir = os.path.join(output_dir, 'word_position_analysis')
+        os.makedirs(position_output_dir, exist_ok=True)
+        
+        # 1. Analyze each CoT position separately
+        print(f"\n1. Analyzing word-to-latent mapping for each CoT position...")
+        for cot_idx in range(num_positions):
+            print(f"  Analyzing CoT position {cot_idx}...")
+            
+            # Compile statistics for this position
+            position_word_usage_counts = Counter() # { word -> count }
+            position_word_to_codes = {} # {word -> {code -> count} }
+            
+            for word, position_codes in word_to_position_codes.items():
+                if cot_idx in position_codes:
+                    position_word_usage_counts[word] = sum(position_codes[cot_idx].values())
+                    position_word_to_codes[word] = position_codes[cot_idx]
+            
+            # Get top used words for this position
+            position_top_words = sorted(position_word_usage_counts.items(), key=lambda x: x[1], reverse=True)[:top_k_words]
+            
+            # Create position-specific output directory
+            pos_output_dir = os.path.join(position_output_dir, f'cot_position_{cot_idx}')
+            os.makedirs(pos_output_dir, exist_ok=True)
+            
+            # Create visualizations for this position
+            self._create_word_to_code_visualizations(
+                position_word_to_codes, position_top_words, pos_output_dir, top_k_codes,
+                title_suffix=f" - CoT Position {cot_idx}"
+            )
+            
+            # Save detailed word-to-code mapping analysis for this position
+            self._save_word_to_code_analysis(
+                position_word_to_codes, position_top_words, pos_output_dir, top_k_codes,
+                position_suffix=f" (CoT Position {cot_idx})"
+            )
+        
+        # 2. Analyze across all positions
+        print(f"\n2. Analyzing word-to-latent mapping across all CoT positions...")
+        
+        # Get top used words across all positions
+        cross_position_top_words = sorted(word_usage_stats.items(), key=lambda x: x[1], reverse=True)[:top_k_words]
+        
+        # Create cross-position visualizations
+        self._create_word_to_code_visualizations(
+            cross_position_word_to_codes, cross_position_top_words, output_dir, top_k_codes,
+            title_suffix=" - All CoT Positions"
+        )
+        
+        # Save cross-position word-to-code mapping analysis
+        self._save_word_to_code_analysis(
+            cross_position_word_to_codes, cross_position_top_words, output_dir, top_k_codes,
+            position_suffix=" (All CoT Positions)"
+        )
+        
+        # 3. Create word position comparison analysis
+        print(f"\n3. Creating word position comparison analysis...")
+        self._create_word_position_comparison_analysis(
+            word_to_position_codes, num_positions, output_dir, top_k_codes, top_k_words
         )
         
         print(f"Word-to-latent mapping analysis completed. Results saved to: {output_dir}")
         print(f"  - Position-specific analyses: {position_output_dir}")
         print(f"  - Cross-position analysis: {output_dir}")
-        print(f"  - Position comparison: {output_dir}")
+        print(f"  - Word position comparison: {output_dir}")
     
     def _create_word_mapping_visualizations(self, code_to_words: Dict[int, Dict[str, int]],
                                           top_codes: List[Tuple[int, int]], output_dir: str,
@@ -1914,6 +2106,470 @@ class LatentVisualizationAnalyzer:
                 f.write("\n" + "=" * 50 + "\n\n")
         
         print(f"Word mapping analysis saved to: {analysis_file}")
+    
+    def _create_word_to_code_visualizations(self, word_to_codes: Dict[str, Dict[int, int]],
+                                          top_words: List[Tuple[str, int]], output_dir: str,
+                                          top_k_codes: int, title_suffix: str = "") -> None:
+        """
+        Create visualizations for word-to-code mapping analysis.
+        
+        Args:
+            word_to_codes: Dictionary mapping words to code counts
+            top_words: List of (word, count) tuples for top words
+            output_dir: Directory to save visualizations
+            top_k_codes: Number of top codes to show per word
+            title_suffix: Suffix to add to plot titles
+        """
+        print("Creating word-to-code mapping visualizations...")
+        
+        # Create large figure with multiple subplots
+        fig = plt.figure(figsize=(24, 20))
+        
+        # Grid layout: 3 rows, 3 columns
+        gs = fig.add_gridspec(3, 3, hspace=0.4, wspace=0.3)
+        
+        # 1. Top code distribution across words (top left)
+        ax1 = fig.add_subplot(gs[0, 0])
+        all_codes = set()
+        for word in word_to_codes:
+            all_codes.update(word_to_codes[word].keys())
+        
+        # Get top codes overall
+        code_total_counts = Counter()
+        for word in word_to_codes:
+            code_total_counts.update(word_to_codes[word])
+        
+        top_codes_overall = code_total_counts.most_common(top_k_codes)
+        codes, counts = zip(*top_codes_overall)
+        
+        ax1.barh(range(len(codes)), counts, color='skyblue', alpha=0.8)
+        ax1.set_title(f'Most Common Codes Across All Words{title_suffix}', fontsize=14, fontweight='bold')
+        ax1.set_xlabel('Total Count')
+        ax1.set_ylabel('Code Index')
+        ax1.set_yticks(range(len(codes)))
+        ax1.set_yticklabels(codes)
+        ax1.grid(True, alpha=0.3)
+        
+        # 2. Word diversity (top middle)
+        ax2 = fig.add_subplot(gs[0, 1])
+        word_diversity = [len(word_to_codes[word]) for word, _ in top_words[:20]]
+        words = [word for word, _ in top_words[:20]]
+        
+        ax2.bar(range(len(words)), word_diversity, color='lightcoral', alpha=0.8)
+        ax2.set_title(f'Number of Unique Codes per Word{title_suffix}', fontsize=14, fontweight='bold')
+        ax2.set_xlabel('Word')
+        ax2.set_ylabel('Number of Unique Codes')
+        ax2.set_xticks(range(len(words)))
+        ax2.set_xticklabels(words, rotation=45)
+        ax2.grid(True, alpha=0.3)
+        
+        # 3. Usage vs diversity scatter (top right)
+        ax3 = fig.add_subplot(gs[0, 2])
+        usage_counts = [count for _, count in top_words[:20]]
+        
+        ax3.scatter(usage_counts, word_diversity, alpha=0.7, s=100, color='green')
+        ax3.set_title(f'Word Usage vs Code Diversity{title_suffix}', fontsize=14, fontweight='bold')
+        ax3.set_xlabel('Total Usage Count')
+        ax3.set_ylabel('Number of Unique Codes')
+        
+        # Add word labels
+        for i, word in enumerate(words):
+            ax3.annotate(word, (usage_counts[i], word_diversity[i]), 
+                        xytext=(5, 5), textcoords='offset points', fontsize=8)
+        
+        # 4. Code distribution for top words (middle row, spanning all columns)
+        ax4 = fig.add_subplot(gs[1, :])
+        
+        # Create heatmap of code distribution for top words
+        top_words_for_heatmap = top_words[:15]  # Limit to 15 words for readability
+        top_codes_for_heatmap = [code for code, _ in code_total_counts.most_common(20)]
+        
+        heatmap_data = np.zeros((len(top_codes_for_heatmap), len(top_words_for_heatmap)))
+        
+        for i, code in enumerate(top_codes_for_heatmap):
+            for j, (word, _) in enumerate(top_words_for_heatmap):
+                heatmap_data[i, j] = word_to_codes[word].get(code, 0)
+        
+        im = ax4.imshow(heatmap_data, cmap='viridis', aspect='auto', interpolation='nearest')
+        ax4.set_title(f'Code Distribution Across Top Words{title_suffix}', fontsize=14, fontweight='bold')
+        ax4.set_xlabel('Word')
+        ax4.set_ylabel('Code Index')
+        ax4.set_xticks(range(len(top_words_for_heatmap)))
+        ax4.set_xticklabels([word for word, _ in top_words_for_heatmap])
+        ax4.set_yticks(range(len(top_codes_for_heatmap)))
+        ax4.set_yticklabels(top_codes_for_heatmap)
+        plt.colorbar(im, ax=ax4, label='Code Count')
+        
+        # 5. Detailed code breakdown for top 3 words (bottom row)
+        for i, (word, count) in enumerate(top_words[:3]):
+            ax = fig.add_subplot(gs[2, i])
+            
+            # Get top codes for this word
+            word_codes = word_to_codes[word]
+            top_codes = sorted(word_codes.items(), key=lambda x: x[1], reverse=True)[:top_k_codes]
+            
+            if top_codes:
+                codes, counts = zip(*top_codes)
+                ax.barh(range(len(codes)), counts, color=f'C{i}', alpha=0.8)
+                ax.set_title(f'Word "{word}" (used {count} times){title_suffix}', fontsize=12, fontweight='bold')
+                ax.set_xlabel('Code Count')
+                ax.set_ylabel('Code Index')
+                ax.set_yticks(range(len(codes)))
+                ax.set_yticklabels(codes)
+                ax.grid(True, alpha=0.3)
+            else:
+                ax.text(0.5, 0.5, f'No codes found for word "{word}"', 
+                       transform=ax.transAxes, ha='center', va='center',
+                       fontsize=12, style='italic')
+                ax.axis('off')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'word_to_code_mapping.png'), 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Word-to-code mapping visualizations saved to: {output_dir}/word_to_code_mapping.png")
+    
+    def _save_word_to_code_analysis(self, word_to_codes: Dict[str, Dict[int, int]],
+                                  top_words: List[Tuple[str, int]], output_dir: str,
+                                  top_k_codes: int, position_suffix: str = "") -> None:
+        """
+        Save detailed word-to-code mapping analysis to file.
+        
+        Args:
+            word_to_codes: Dictionary mapping words to code counts
+            top_words: List of (word, count) tuples for top words
+            output_dir: Directory to save analysis
+            top_k_codes: Number of top codes to show per word
+            position_suffix: Suffix to add to analysis title
+        """
+        analysis_file = os.path.join(output_dir, 'word_to_code_analysis.txt')
+        
+        with open(analysis_file, 'w') as f:
+            f.write(f"Word-to-Code Mapping Analysis{position_suffix}\n")
+            f.write("=" * 50 + "\n\n")
+            
+            # Overall statistics
+            total_words = len(word_to_codes)
+            total_codes = len(set().union(*[set(codes.keys()) for codes in word_to_codes.values()]))
+            total_mappings = sum(sum(codes.values()) for codes in word_to_codes.values())
+            
+            f.write(f"Overall Statistics:\n")
+            f.write(f"  Total words used: {total_words}\n")
+            f.write(f"  Total unique codes: {total_codes}\n")
+            f.write(f"  Total word-code mappings: {total_mappings}\n")
+            f.write(f"  Average codes per word: {total_mappings / total_words:.2f}\n\n")
+            
+            # Detailed analysis for top words
+            for word, count in top_words:
+                f.write(f'Word "{word}" (used {count} times)\n')
+                f.write("-" * 40 + "\n")
+                
+                # Code statistics
+                codes = word_to_codes[word]
+                unique_codes = len(codes)
+                f.write(f"  Unique codes: {unique_codes}\n")
+                f.write(f"  Average code frequency: {count / unique_codes:.2f}\n\n")
+                
+                # Top codes
+                top_codes = sorted(codes.items(), key=lambda x: x[1], reverse=True)[:top_k_codes]
+                f.write(f"  Top {len(top_codes)} codes:\n")
+                for i, (code, code_count) in enumerate(top_codes):
+                    percentage = (code_count / count) * 100
+                    f.write(f"    {i+1:2d}. Code {code}: {code_count} times ({percentage:.1f}%)\n")
+                
+                f.write("\n" + "=" * 50 + "\n\n")
+        
+        print(f"Word-to-code mapping analysis saved to: {analysis_file}")
+    
+    def _create_word_position_comparison_analysis(self, word_to_position_codes: Dict[str, Dict[int, Dict[int, int]]],
+                                                num_positions: int, output_dir: str, top_k_codes: int, top_k_words: int) -> None:
+        """
+        Create comparison analysis for word-to-code mapping across different CoT positions.
+        
+        Args:
+            word_to_position_codes: Dictionary mapping word -> {position -> {code -> count}}
+            num_positions: Number of CoT positions
+            output_dir: Directory to save analysis
+            top_k_codes: Number of top codes to analyze
+            top_k_words: Number of top words to analyze
+        """
+        print("Creating word position comparison analysis...")
+        
+        # Create large figure for word position comparison
+        fig = plt.figure(figsize=(24, 20))
+        
+        # Grid layout: 2 rows, 3 columns
+        gs = fig.add_gridspec(2, 3, hspace=0.4, wspace=0.3)
+        
+        # 1. Word usage comparison across positions (top left)
+        ax1 = fig.add_subplot(gs[0, 0])
+        
+        # Get top words across all positions
+        all_words = set()
+        for word in word_to_position_codes:
+            all_words.update(word_to_position_codes[word].keys())
+        
+        # Calculate usage for each position
+        position_usage_data = {}
+        for word in all_words:
+            position_usage_data[word] = []
+            for pos in range(num_positions):
+                total_usage = sum(word_to_position_codes[word].get(pos, {}).values())
+                position_usage_data[word].append(total_usage)
+        
+        # Get top words by total usage across all positions
+        total_usage_per_word = {word: sum(usage) for word, usage in position_usage_data.items()}
+        top_words_overall = sorted(total_usage_per_word.items(), key=lambda x: x[1], reverse=True)[:top_k_words]
+        
+        # Create heatmap of word usage across positions
+        heatmap_data = np.zeros((len(top_words_overall), num_positions))
+        for i, (word, _) in enumerate(top_words_overall):
+            for pos in range(num_positions):
+                heatmap_data[i, pos] = position_usage_data[word][pos]
+        
+        im = ax1.imshow(heatmap_data, cmap='viridis', aspect='auto', interpolation='nearest')
+        ax1.set_title('Word Usage Across CoT Positions', fontsize=14, fontweight='bold')
+        ax1.set_xlabel('CoT Position')
+        ax1.set_ylabel('Word')
+        ax1.set_xticks(range(num_positions))
+        ax1.set_xticklabels([f'Pos {i}' for i in range(num_positions)])
+        ax1.set_yticks(range(len(top_words_overall)))
+        ax1.set_yticklabels([word for word, _ in top_words_overall])
+        plt.colorbar(im, ax=ax1, label='Usage Count')
+        
+        # 2. Code diversity comparison across positions (top middle)
+        ax2 = fig.add_subplot(gs[0, 1])
+        
+        position_code_diversity = []
+        for pos in range(num_positions):
+            # Count unique codes across all words for this position
+            unique_codes = set()
+            for word_codes in word_to_position_codes.values():
+                if pos in word_codes:
+                    unique_codes.update(word_codes[pos].keys())
+            position_code_diversity.append(len(unique_codes))
+        
+        ax2.bar(range(num_positions), position_code_diversity, color='lightcoral', alpha=0.8)
+        ax2.set_title('Code Diversity Across CoT Positions', fontsize=14, fontweight='bold')
+        ax2.set_xlabel('CoT Position')
+        ax2.set_ylabel('Number of Unique Codes')
+        ax2.set_xticks(range(num_positions))
+        ax2.set_xticklabels([f'Pos {i}' for i in range(num_positions)])
+        ax2.grid(True, alpha=0.3)
+        
+        # 3. Word diversity comparison across positions (top right)
+        ax3 = fig.add_subplot(gs[0, 2])
+        
+        position_word_diversity = []
+        for pos in range(num_positions):
+            position_word_diversity.append(len([word for word in word_to_position_codes if pos in word_to_position_codes[word]]))
+        
+        ax3.bar(range(num_positions), position_word_diversity, color='skyblue', alpha=0.8)
+        ax3.set_title('Word Diversity Across CoT Positions', fontsize=14, fontweight='bold')
+        ax3.set_xlabel('CoT Position')
+        ax3.set_ylabel('Number of Unique Words')
+        ax3.set_xticks(range(num_positions))
+        ax3.set_xticklabels([f'Pos {i}' for i in range(num_positions)])
+        ax3.grid(True, alpha=0.3)
+        
+        # 4. Most common codes across positions (bottom left)
+        ax4 = fig.add_subplot(gs[1, 0])
+        
+        # Get most common codes across all positions
+        all_codes = Counter()
+        for word_codes in word_to_position_codes.values():
+            for pos_codes in word_codes.values():
+                all_codes.update(pos_codes)
+        
+        top_codes_overall = all_codes.most_common(top_k_codes)
+        codes, counts = zip(*top_codes_overall)
+        
+        ax4.barh(range(len(codes)), counts, color='lightgreen', alpha=0.8)
+        ax4.set_title('Most Common Codes Across All Positions', fontsize=14, fontweight='bold')
+        ax4.set_xlabel('Total Count')
+        ax4.set_ylabel('Code Index')
+        ax4.set_yticks(range(len(codes)))
+        ax4.set_yticklabels(codes)
+        ax4.grid(True, alpha=0.3)
+        
+        # 5. Position-specific code distribution (bottom middle)
+        ax5 = fig.add_subplot(gs[1, 1])
+        
+        # Create heatmap of code usage across positions
+        top_codes_for_heatmap = [code for code, _ in top_codes_overall[:15]]
+        code_position_data = np.zeros((len(top_codes_for_heatmap), num_positions))
+        
+        for i, code in enumerate(top_codes_for_heatmap):
+            for pos in range(num_positions):
+                code_count = 0
+                for word_codes in word_to_position_codes.values():
+                    if pos in word_codes:
+                        code_count += word_codes[pos].get(code, 0)
+                code_position_data[i, pos] = code_count
+        
+        im = ax5.imshow(code_position_data, cmap='viridis', aspect='auto', interpolation='nearest')
+        ax5.set_title('Code Usage Across CoT Positions', fontsize=14, fontweight='bold')
+        ax5.set_xlabel('CoT Position')
+        ax5.set_ylabel('Code Index')
+        ax5.set_xticks(range(num_positions))
+        ax5.set_xticklabels([f'Pos {i}' for i in range(num_positions)])
+        ax5.set_yticks(range(len(top_codes_for_heatmap)))
+        ax5.set_yticklabels(top_codes_for_heatmap)
+        plt.colorbar(im, ax=ax5, label='Code Count')
+        
+        # 6. Position similarity analysis (bottom right)
+        ax6 = fig.add_subplot(gs[1, 2])
+        
+        # Calculate similarity between positions based on code overlap
+        position_similarity = np.zeros((num_positions, num_positions))
+        
+        for i in range(num_positions):
+            for j in range(num_positions):
+                # Get codes for each position
+                codes_i = set()
+                codes_j = set()
+                
+                for word_codes in word_to_position_codes.values():
+                    if i in word_codes:
+                        codes_i.update(word_codes[i].keys())
+                    if j in word_codes:
+                        codes_j.update(word_codes[j].keys())
+                
+                # Calculate Jaccard similarity
+                intersection = len(codes_i.intersection(codes_j))
+                union = len(codes_i.union(codes_j))
+                similarity = intersection / union if union > 0 else 0
+                position_similarity[i, j] = similarity
+        
+        im = ax6.imshow(position_similarity, cmap='RdBu_r', vmin=0, vmax=1, aspect='auto')
+        ax6.set_title('Position Similarity (Code Overlap)', fontsize=14, fontweight='bold')
+        ax6.set_xlabel('CoT Position')
+        ax6.set_ylabel('CoT Position')
+        ax6.set_xticks(range(num_positions))
+        ax6.set_xticklabels([f'Pos {i}' for i in range(num_positions)])
+        ax6.set_yticks(range(num_positions))
+        ax6.set_yticklabels([f'Pos {i}' for i in range(num_positions)])
+        plt.colorbar(im, ax=ax6, label='Jaccard Similarity')
+        
+        # Add similarity values on the heatmap
+        for i in range(num_positions):
+            for j in range(num_positions):
+                text = ax6.text(j, i, f'{position_similarity[i, j]:.2f}',
+                              ha="center", va="center", color="white", fontsize=8,
+                              fontweight='bold')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'word_position_comparison_analysis.png'), 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # Save word position comparison statistics
+        self._save_word_position_comparison_statistics(
+            word_to_position_codes, num_positions, output_dir, top_k_codes, top_k_words
+        )
+        
+        print(f"Word position comparison analysis saved to: {output_dir}/word_position_comparison_analysis.png")
+    
+    def _save_word_position_comparison_statistics(self, word_to_position_codes: Dict[str, Dict[int, Dict[int, int]]],
+                                                num_positions: int, output_dir: str, top_k_codes: int, top_k_words: int) -> None:
+        """
+        Save detailed word position comparison statistics to file.
+        """
+        stats_file = os.path.join(output_dir, 'word_position_comparison_statistics.txt')
+        
+        with open(stats_file, 'w') as f:
+            f.write("Word Position Comparison Statistics\n")
+            f.write("=" * 40 + "\n\n")
+            
+            # Overall statistics
+            total_words = len(word_to_position_codes)
+            total_codes = set()
+            total_mappings = 0
+            
+            for word_codes in word_to_position_codes.values():
+                for pos_codes in word_codes.values():
+                    total_codes.update(pos_codes.keys())
+                    total_mappings += sum(pos_codes.values())
+            
+            f.write(f"Overall Statistics:\n")
+            f.write(f"  Total unique words: {total_words}\n")
+            f.write(f"  Total unique codes: {len(total_codes)}\n")
+            f.write(f"  Total word-code mappings: {total_mappings}\n")
+            f.write(f"  Number of CoT positions: {num_positions}\n\n")
+            
+            # Position-specific statistics
+            for pos in range(num_positions):
+                f.write(f"CoT Position {pos}:\n")
+                f.write("-" * 30 + "\n")
+                
+                # Word statistics
+                words_used = len([word for word in word_to_position_codes if pos in word_to_position_codes[word]])
+                total_usage = sum(sum(pos_codes.values()) for word_codes in word_to_position_codes.values() 
+                                for pos_idx, pos_codes in word_codes.items() if pos_idx == pos)
+                f.write(f"  Words used: {words_used}\n")
+                f.write(f"  Total usage: {total_usage}\n")
+                
+                # Code statistics
+                codes_used = set()
+                for word_codes in word_to_position_codes.values():
+                    if pos in word_codes:
+                        codes_used.update(word_codes[pos].keys())
+                f.write(f"  Unique codes: {len(codes_used)}\n")
+                
+                # Top words for this position
+                word_usage_counts = Counter()
+                for word, word_codes in word_to_position_codes.items():
+                    if pos in word_codes:
+                        word_usage_counts[word] = sum(word_codes[pos].values())
+                
+                top_words = word_usage_counts.most_common(top_k_words)
+                f.write(f"  Top {len(top_words)} words:\n")
+                for i, (word, count) in enumerate(top_words):
+                    f.write(f"    {i+1:2d}. '{word}': {count} times\n")
+                
+                # Top codes for this position
+                code_counts = Counter()
+                for word_codes in word_to_position_codes.values():
+                    if pos in word_codes:
+                        code_counts.update(word_codes[pos])
+                
+                top_codes = code_counts.most_common(top_k_codes)
+                f.write(f"  Top {len(top_codes)} codes:\n")
+                for i, (code, count) in enumerate(top_codes):
+                    f.write(f"    {i+1:2d}. Code {code}: {count} times\n")
+                
+                f.write("\n" + "=" * 40 + "\n\n")
+            
+            # Cross-position analysis
+            f.write("Cross-Position Analysis:\n")
+            f.write("-" * 30 + "\n")
+            
+            # Most common words across positions
+            word_total_usage = Counter()
+            for word, word_codes in word_to_position_codes.items():
+                for pos_codes in word_codes.values():
+                    word_total_usage[word] += sum(pos_codes.values())
+            
+            top_words_overall = word_total_usage.most_common(top_k_words)
+            f.write(f"  Most common words across all positions:\n")
+            for i, (word, count) in enumerate(top_words_overall):
+                f.write(f"    {i+1:2d}. '{word}': {count} times\n")
+            
+            # Most common codes across positions
+            code_total_usage = Counter()
+            for word_codes in word_to_position_codes.values():
+                for pos_codes in word_codes.values():
+                    code_total_usage.update(pos_codes)
+            
+            top_codes_overall = code_total_usage.most_common(top_k_codes)
+            f.write(f"  Most common codes across all positions:\n")
+            for i, (code, count) in enumerate(top_codes_overall):
+                f.write(f"    {i+1:2d}. Code {code}: {count} times\n")
+            
+            f.write("\n" + "=" * 40 + "\n")
+        
+        print(f"Word position comparison statistics saved to: {stats_file}")
     
     def _create_position_comparison_analysis(self, position_code_to_words: Dict[int, Dict[int, Dict[str, int]]],
                                            num_positions: int, output_dir: str, top_k_codes: int, top_k_words: int) -> None:
