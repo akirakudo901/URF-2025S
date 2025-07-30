@@ -191,7 +191,7 @@ class LatentVisualizationAnalyzer:
                 
                 # Get encoding indices
                 try:
-                    _, _, _, indices = self.model.encode(
+                    _, _, _, indices, _ = self.model.encode(
                         prompt, cot_gt, prompt_mask_ex, cot_mask_ex, 
                         quantize_cot_only=True
                     )
@@ -1608,8 +1608,6 @@ class LatentVisualizationAnalyzer:
         
         # Initialize data structures
         code_to_words = defaultdict(lambda: defaultdict(int))  # code -> {word -> count}
-        code_to_tokens = defaultdict(lambda: defaultdict(int))  # code -> {token_id -> count}
-        all_mappings = []  # List of (code, word, token_id) tuples
         
         # Process samples
         with torch.no_grad():
@@ -1625,7 +1623,7 @@ class LatentVisualizationAnalyzer:
                 
                 # Get encoding indices
                 try:
-                    _, _, _, indices = self.model.encode(
+                    _, _, _, indices, _ = self.model.encode(
                         prompt, cot_gt, prompt_mask_ex, cot_mask_ex, 
                         quantize_cot_only=True
                     )
@@ -1649,8 +1647,6 @@ class LatentVisualizationAnalyzer:
                     for pos, (code, word, token_id) in enumerate(zip(indices, words, cot_tokens)):
                         code_item = code.item()
                         code_to_words[code_item][word] += 1
-                        code_to_tokens[code_item][token_id.item()] += 1
-                        all_mappings.append((code_item, word, token_id.item()))
                 
                 except Exception as e:
                     print(f"Error processing sample {i}: {e}")
@@ -1666,18 +1662,17 @@ class LatentVisualizationAnalyzer:
         
         # Create visualizations
         self._create_word_mapping_visualizations(
-            code_to_words, code_to_tokens, top_codes, output_dir, top_k_words
+            code_to_words, top_codes, output_dir, top_k_words
         )
         
         # Save detailed word mapping analysis
         self._save_word_mapping_analysis(
-            code_to_words, code_to_tokens, top_codes, output_dir, top_k_words
+            code_to_words, top_codes, output_dir, top_k_words
         )
         
         print(f"Word-to-latent mapping analysis completed. Results saved to: {output_dir}")
     
     def _create_word_mapping_visualizations(self, code_to_words: Dict[int, Dict[str, int]],
-                                          code_to_tokens: Dict[int, Dict[int, int]],
                                           top_codes: List[Tuple[int, int]], output_dir: str,
                                           top_k_words: int) -> None:
         """
@@ -1794,7 +1789,6 @@ class LatentVisualizationAnalyzer:
         print(f"Word mapping visualizations saved to: {output_dir}/word_to_latent_mapping.png")
     
     def _save_word_mapping_analysis(self, code_to_words: Dict[int, Dict[str, int]],
-                                  code_to_tokens: Dict[int, Dict[int, int]],
                                   top_codes: List[Tuple[int, int]], output_dir: str,
                                   top_k_words: int) -> None:
         """
@@ -1834,18 +1828,6 @@ class LatentVisualizationAnalyzer:
                 for i, (word, word_count) in enumerate(top_words):
                     percentage = (word_count / count) * 100
                     f.write(f"    {i+1:2d}. '{word}': {word_count} times ({percentage:.1f}%)\n")
-                
-                # Token statistics
-                tokens = code_to_tokens[code]
-                unique_tokens = len(tokens)
-                f.write(f"\n  Unique token IDs: {unique_tokens}\n")
-                
-                # Top tokens
-                top_tokens = sorted(tokens.items(), key=lambda x: x[1], reverse=True)[:10]
-                f.write(f"  Top 10 token IDs:\n")
-                for i, (token_id, token_count) in enumerate(top_tokens):
-                    percentage = (token_count / count) * 100
-                    f.write(f"    {i+1:2d}. Token {token_id}: {token_count} times ({percentage:.1f}%)\n")
                 
                 f.write("\n" + "=" * 50 + "\n\n")
         
