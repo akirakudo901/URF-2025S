@@ -45,7 +45,7 @@ TRACK_IN_EPOCH_MEMORY_EVERY_N = 200
 TRACK_IN_EPOCH_MEMORY = False
 TRACK_IN_EPOCH_MEMORY_LOGGING = False
 SEND_START_END_NOTIFICATION = True
-SEND_MID_TRAINING_NOTIFICATION = True
+SEND_MID_TRAINING_NOTIFICATION = False
 
 # Profiler configuration
 TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
@@ -1126,6 +1126,9 @@ class GPT2VQVAETrainer:
             'detailed_perplexities': self.detailed_perplexities,
             'detailed_batch_indices': self.detailed_batch_indices,
             'detailed_recon_losses': self.detailed_recon_losses,
+            'detailed_vq_input_means': self.detailed_vq_input_means,
+            'detailed_vq_input_stds': self.detailed_vq_input_stds,
+            'epoch_chain_embeddings': self.epoch_chain_embeddings,
             'best_val_loss': self.best_val_loss,
         }
         
@@ -1217,6 +1220,9 @@ class GPT2VQVAETrainer:
         self.detailed_perplexities = checkpoint.get('detailed_perplexities', [])
         self.detailed_batch_indices = checkpoint.get('detailed_batch_indices', [])
         self.detailed_recon_losses = checkpoint.get('detailed_recon_losses', [])
+        self.detailed_vq_input_means = checkpoint.get('detailed_vq_input_means', [])
+        self.detailed_vq_input_stds = checkpoint.get('detailed_vq_input_stds', [])
+        self.epoch_chain_embeddings = checkpoint.get('epoch_chain_embeddings', [])
         
         # Restore best_val_loss if present
         if 'best_val_loss' in checkpoint:
@@ -1708,7 +1714,22 @@ class GPT2VQVAETrainer:
             # New: Plot VQ input mean/std
             all_vq_means = np.concatenate(self.detailed_vq_input_means) if self.detailed_vq_input_means else []
             all_vq_stds = np.concatenate(self.detailed_vq_input_stds) if self.detailed_vq_input_stds else []
+            
+            # Check if VQ input data needs padding to match all_detailed_indices
             if len(all_vq_means) > 0:
+                # Check if lengths match
+                if len(all_vq_means) != len(all_detailed_indices):
+                    # Assume VQ data is missing the first part, pad with dummy values
+                    padding_length = len(all_detailed_indices) - len(all_vq_means)
+                    if padding_length > 0:
+                        # Pad with the first value of each array (or 0 if empty)
+                        pad_value_means = all_vq_means[0] if len(all_vq_means) > 0 else 0
+                        pad_value_stds = all_vq_stds[0] if len(all_vq_stds) > 0 else 0
+                        
+                        all_vq_means = np.concatenate([np.full(padding_length, pad_value_means), all_vq_means])
+                        all_vq_stds = np.concatenate([np.full(padding_length, pad_value_stds), all_vq_stds])
+                        print(f"Warning: VQ input data padded with {padding_length} dummy values to match detailed indices length")
+                
                 fig2, ax2 = plt.subplots(figsize=(12, 4))
                 ax2.plot(all_detailed_indices, all_vq_means, label='VQ Input Mean', color='blue')
                 ax2.plot(all_detailed_indices, all_vq_stds, label='VQ Input Std', color='red')

@@ -251,7 +251,9 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         kwargs.update({ 
             "current_step": self.current_step,
             "weighted_regularization_losses": self.weighted_regularization_losses,
-            "detailed_weighted_regularization_losses": self.detailed_weighted_regularization_losses
+            "detailed_weighted_regularization_losses": self.detailed_weighted_regularization_losses,
+            "detailed_bn_param_history": self.detailed_bn_param_history,
+            "detailed_post_bn_norm_history": self.detailed_post_bn_norm_history
         })
         # Call parent save_checkpoint with enhanced data as kwargs
         super().save_checkpoint(epoch, metrics, is_best, checkpoint_path, remove_other_best_models, **kwargs)
@@ -285,6 +287,20 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             print(f"Restored detailed weighted regularization losses history: {len(self.detailed_weighted_regularization_losses)} epochs")
         else:
             print("No detailed weighted regularization losses history found in checkpoint")
+        
+        # Restore batch norm parameter history if available
+        if 'detailed_bn_param_history' in checkpoint:
+            self.detailed_bn_param_history = checkpoint['detailed_bn_param_history']
+            print(f"Restored detailed batch norm parameter history: {len(self.detailed_bn_param_history)} epochs")
+        else:
+            print("No detailed batch norm parameter history found in checkpoint")
+            
+        # Restore post-batch-norm norm history if available
+        if 'detailed_post_bn_norm_history' in checkpoint:
+            self.detailed_post_bn_norm_history = checkpoint['detailed_post_bn_norm_history']
+            print(f"Restored detailed post-batch-norm norm history: {len(self.detailed_post_bn_norm_history)} epochs")
+        else:
+            print("No detailed post-batch-norm norm history found in checkpoint")
         
         return checkpoint
     
