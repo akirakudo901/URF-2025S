@@ -486,6 +486,8 @@ class VectorQuantizer(nn.Module):
         
         return quantized, loss, perplexity, encoding_indices.view(input_shape[:-1])
 
+
+
 class GPT2VQVAE(nn.Module):
     def __init__(self, vocab_size, d_model=768, num_embeddings=512, 
                  commitment_cost=0.25, aggregation_hidden_dim=1024, 
@@ -681,8 +683,14 @@ class GPT2VQVAE(nn.Module):
         
         # Chain-positional embeddings to differentiate M sequences
         self.chain_embeddings = nn.Embedding(num_thoughts, d_model)
-        # Initialize with small values
-        nn.init.normal_(self.chain_embeddings.weight, mean=0.0, std=0.02)
+        # Initialize with values that match typical encoder output norms
+        # Typical encoder outputs have norms around 5-15, so we initialize chain embeddings 
+        # to have similar magnitude to be effective
+        nn.init.normal_(self.chain_embeddings.weight, mean=0.0, std=0.1)
+        # found some info here: https://stats.stackexchange.com/questions/167133/expected-magnitude-of-a-vector-from-a-multivariate-normal
+        # for p = 768, this evaluates to ~27.7 when sigma=1: https://www.wolframalpha.com/input?i=sqrt%282%29+*+gamma%28%28768+%2B+1%29%2F2%29+%2F+gamma%28768%2F2%29
+        # assuming the general encoder input norms are ~15 and we wanna keep the chains smaller, 
+        # std should be 0.1 for now
         
         self.d_model = d_model
         self.num_thoughts = num_thoughts
