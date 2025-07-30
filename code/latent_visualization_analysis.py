@@ -1598,6 +1598,7 @@ class LatentVisualizationAnalyzer:
             top_k_codes: Number of top codes to analyze in detail
         """
         print("Analyzing word-to-latent mapping...")
+        _, M, _ = cot_sequences
         
         # Determine sample size
         total_samples = len(prompt_sequences)
@@ -1608,7 +1609,7 @@ class LatentVisualizationAnalyzer:
         
         # Initialize data structures
         code_to_words = defaultdict(lambda: defaultdict(int))  # code -> {word -> count}
-        
+
         # Process samples
         with torch.no_grad():
             for i in range(sample_size):
@@ -1616,37 +1617,33 @@ class LatentVisualizationAnalyzer:
                     print(f"Processing sample {i}/{sample_size}")
                 
                 # Prepare single example
-                prompt = prompt_sequences[i:i+1].to(self.device)
-                cot_gt = cot_sequences[i:i+1].to(self.device)
-                prompt_mask_ex = prompt_mask[i:i+1].to(self.device) if prompt_mask is not None else None
-                cot_mask_ex = cot_mask[i:i+1].to(self.device) if cot_mask is not None else None
+                prompt = prompt_sequences[i:i+1].to(self.device) # [1, K]
+                cot_gt = cot_sequences[i:i+1].to(self.device) # [1, M, L]
+                prompt_mask_ex = prompt_mask[i:i+1].to(self.device) if prompt_mask is not None else None # [1, K]
+                cot_mask_ex = cot_mask[i:i+1].to(self.device) if cot_mask is not None else None # [1, M, L]
                 
-                # Get encoding indices
+                # Get encoding indices, shape 
                 try:
-                    _, _, _, indices, _ = self.model.encode(
-                        prompt, cot_gt, prompt_mask_ex, cot_mask_ex, 
-                        quantize_cot_only=True
-                    )
+                    _, _, _, indices, _ = self.model.encode(prompt, cot_gt, prompt_mask_ex, cot_mask_ex, quantize_cot_only=True)
                     
-                    # Get CoT tokens for this sample
-                    cot_tokens = cot_gt[0, 0]  # [seq_len]
-                    cot_mask_sample = cot_mask_ex[0, 0] if cot_mask_ex is not None else None
+                    # Get CoT tokens for this sample for each position
+                    indices = indices[0]
+                    for cot_idx in range(M):
+                        cot_tokens = cot_gt[0, cot_idx]  # [seq_len]
+                        cot_mask_sample = cot_mask_ex[0, cot_idx] if cot_mask_ex is not None else None
                     
-                    # Apply mask if available
-                    if cot_mask_sample is not None:
-                        valid_positions = cot_mask_sample.bool()
-                        cot_tokens = cot_tokens[valid_positions]
-                        indices = indices[0][valid_positions]
-                    else:
-                        indices = indices[0]
-                    
-                    # Convert tokens to words
-                    words = self.tokenizer.convert_ids_to_tokens(cot_tokens.tolist())
-                    
-                    # Map codes to words and token IDs
-                    for pos, (code, word, token_id) in enumerate(zip(indices, words, cot_tokens)):
-                        code_item = code.item()
-                        code_to_words[code_item][word] += 1
+                        # Apply mask if available
+                        if cot_mask_sample is not None:
+                            valid_positions = cot_mask_sample.bool()
+                            cot_tokens = cot_tokens[valid_positions]
+                            indices = indices[valid_positions]
+                        
+                        # Convert tokens to words
+                        words = self.tokenizer.convert_ids_to_tokens(cot_tokens.tolist())
+                        
+                        # Map codes to words and token IDs
+                        for code, word in zip(indices, words):
+                            code_to_words[code.item()][word] += 1
                 
                 except Exception as e:
                     print(f"Error processing sample {i}: {e}")
