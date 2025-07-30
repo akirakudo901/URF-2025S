@@ -1586,7 +1586,8 @@ class LatentVisualizationAnalyzer:
     def analyze_word_to_latent_mapping(self, prompt_sequences: torch.Tensor, cot_sequences: torch.Tensor,
                                       prompt_mask: torch.Tensor, cot_mask: torch.Tensor,
                                       output_dir: str, sample_size: Optional[int] = None,
-                                      top_k_words: int = 20, top_k_codes: int = 30) -> None:
+                                      top_k_words: int = 20, top_k_codes: int = 30, 
+                                      encode_batch_size: int = 128) -> None:
         """
         Analyze what words/tokens are mapped to each latent embedding and show their distribution.
         
@@ -1603,6 +1604,7 @@ class LatentVisualizationAnalyzer:
             sample_size: Number of samples to process (None for all)
             top_k_words: Number of top words to show per code
             top_k_codes: Number of top codes to analyze in detail
+            encode_batch_size: Batch size for encoding samples (default: 128)
         """
         print("Analyzing word-to-latent mapping...")
         _, M, _ = cot_sequences
@@ -1622,44 +1624,53 @@ class LatentVisualizationAnalyzer:
         # Initialize data structures for cross-position analysis
         cross_position_code_to_words = defaultdict(lambda: defaultdict(int))  # code -> {word -> count}
 
-        # Process samples
+        # Process samples in batches
         with torch.no_grad():
-            for i in range(sample_size):
-                if i % 100 == 0:
-                    print(f"Processing sample {i}/{sample_size}")
+            for batch_start in range(0, sample_size, encode_batch_size):
+                batch_end = min(batch_start + encode_batch_size, sample_size)
+                batch_size = batch_end - batch_start
                 
-                # Prepare single example
-                prompt = prompt_sequences[i:i+1].to(self.device) # [1, K]
-                cot_gt = cot_sequences[i:i+1].to(self.device) # [1, M, L]
-                prompt_mask_ex = prompt_mask[i:i+1].to(self.device) if prompt_mask is not None else None # [1, K]
-                cot_mask_ex = cot_mask[i:i+1].to(self.device) if cot_mask is not None else None # [1, M, L]
+                if batch_start % (encode_batch_size * 10) == 0:
+                    print(f"Processing batch {batch_start//encode_batch_size + 1}/{(sample_size + encode_batch_size - 1)//encode_batch_size} (samples {batch_start}-{batch_end-1})")
                 
-                # Get encoding indices
+                # Prepare batch
+                prompt_batch = prompt_sequences[batch_start:batch_end].to(self.device)  # [batch_size, K]
+                cot_gt_batch = cot_sequences[batch_start:batch_end].to(self.device)  # [batch_size, M, L]
+                prompt_mask_batch = prompt_mask[batch_start:batch_end].to(self.device) if prompt_mask is not None else None  # [batch_size, K]
+                cot_mask_batch = cot_mask[batch_start:batch_end].to(self.device) if cot_mask is not None else None  # [batch_size, M, L]
+                
+                # Get encoding indices for the batch
                 try:
-                    _, _, _, indices, _ = self.model.encode(prompt, cot_gt, prompt_mask_ex, cot_mask_ex, quantize_cot_only=True)
+                    _, _, _, indices_batch, _ = self.model.encode(prompt_batch, cot_gt_batch, prompt_mask_batch, cot_mask_batch, quantize_cot_only=True)
                     
-                    # Get CoT tokens for this sample for each position
-                    indices = indices[0]
-                    for cot_idx in range(M):
-                        cot_tokens = cot_gt[0, cot_idx]  # [seq_len]
-                        cot_mask_sample = cot_mask_ex[0, cot_idx] if cot_mask_ex is not None else None
-                    
-                        # Apply mask if available
-                        if cot_mask_sample is not None:
-                            valid_positions = cot_mask_sample.bool()
-                            cot_tokens = cot_tokens[valid_positions]
-                            indices = indices[valid_positions]
+                    # Process each sample in the batch
+                    for batch_idx in range(batch_size):
+                        sample_idx = batch_start + batch_idx
                         
-                        # Convert tokens to words
-                        words = self.tokenizer.convert_ids_to_tokens(cot_tokens.tolist())
+                        # Get indices for this sample
+                        indices = indices_batch[batch_idx]  # [seq_len]
                         
-                        # Map codes to words for this specific CoT position
-                        for code, word in zip(indices, words):
-                            position_code_to_words[cot_idx][code.item()][word] += 1
-                            cross_position_code_to_words[code.item()][word] += 1
+                        # Process each CoT position for this sample
+                        for cot_idx in range(M):
+                            cot_tokens = cot_gt_batch[batch_idx, cot_idx]  # [seq_len]
+                            cot_mask_sample = cot_mask_batch[batch_idx, cot_idx] if cot_mask_batch is not None else None
+                        
+                            # Apply mask if available
+                            if cot_mask_sample is not None:
+                                valid_positions = cot_mask_sample.bool()
+                                cot_tokens = cot_tokens[valid_positions]
+                                indices = indices[valid_positions]
+                            
+                            # Convert tokens to words
+                            words = self.tokenizer.convert_ids_to_tokens(cot_tokens.tolist())
+                            
+                            # Map codes to words for this specific CoT position
+                            for code, word in zip(indices, words):
+                                position_code_to_words[cot_idx][code.item()][word] += 1
+                                cross_position_code_to_words[code.item()][word] += 1
                 
                 except Exception as e:
-                    print(f"Error processing sample {i}: {e}")
+                    print(f"Error processing batch starting at sample {batch_start}: {e}")
                     continue
         
         # Create output directory for position-specific analyses
