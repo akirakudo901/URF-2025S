@@ -45,7 +45,7 @@ TRACK_IN_EPOCH_MEMORY_EVERY_N = 200
 TRACK_IN_EPOCH_MEMORY = False
 TRACK_IN_EPOCH_MEMORY_LOGGING = False
 SEND_START_END_NOTIFICATION = True
-SEND_MID_TRAINING_NOTIFICATION = False
+SEND_MID_TRAINING_NOTIFICATION = True
 
 # Profiler configuration
 TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
@@ -365,7 +365,9 @@ class GPT2VQVAETrainer:
         
         # Best model tracking
         self.best_val_loss = float('inf')
+        self.best_recon_loss = float('inf')  # Add tracking for reconstruction loss
         self.best_model_path = None
+        self.best_recon_model_path = None  # Add path for best reconstruction model
         
         # Initialize gradient checkpointing as disabled by default
         self._gradient_checkpointing_enabled = False
@@ -1092,16 +1094,17 @@ class GPT2VQVAETrainer:
             msg += f"{metric_name}: {metric_str}\n"
         return msg
     
-    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None, remove_other_best_models: bool = True, **kwargs):
+    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None, remove_other_best_models: bool = True, loss_type: str = 'total', **kwargs):
         """
         Save model checkpoint.
         
         Args:
             epoch: Current epoch number
             metrics: Current metrics
-            is_best: Whether this is the best model so far
+            is_best: Whether this is the best model so far for the specified loss type
             checkpoint_path: Path to save the checkpoint (optional)
-            remove_other_best_models: If True, remove other best model checkpoints (default: True)
+            remove_other_best_models: If True, remove other best model checkpoints of the same type (default: True)
+            loss_type: Type of loss for best model tracking ('total' or 'recon')
             **kwargs: Additional data to append to the checkpoint
         """
         checkpoint_dir = self.training_config.get('checkpoint_dir', 'checkpoints')
@@ -1130,25 +1133,34 @@ class GPT2VQVAETrainer:
             'detailed_vq_input_stds': self.detailed_vq_input_stds,
             'epoch_chain_embeddings': self.epoch_chain_embeddings,
             'best_val_loss': self.best_val_loss,
+            'best_recon_loss': self.best_recon_loss,
         }
         
         # Add any additional data passed as kwargs
         checkpoint.update(kwargs)
         
-        # Save best model if this is the best so far
+        # Save best model if this is the best so far for the specified loss type
         if is_best:
             if remove_other_best_models:
-                # Remove any existing best model checkpoints
+                # Remove any existing best model checkpoints of the same type
                 for file in os.listdir(checkpoint_dir):
-                    if 'best_model' in file and file.endswith('.pt'):
+                    if f'best_{loss_type}_model' in file and file.endswith('.pt'):
                         os.remove(os.path.join(checkpoint_dir, file))
+            
             if checkpoint_path is None:
-                best_path = os.path.join(checkpoint_dir, f'checkpoint_epoch_{epoch}.pt')
+                best_path = os.path.join(checkpoint_dir, f'best_{loss_type}_model_epoch_{epoch}.pt')
             else:
                 best_path = checkpoint_path
+            
             torch.save(checkpoint, best_path)
-            self.best_model_path = best_path
-            print(f"New best model saved (epoch {epoch}) with validation loss: {metrics['loss']:.4f}")
+            
+            # Update the appropriate path attribute
+            if loss_type == 'total':
+                self.best_model_path = best_path
+                print(f"New best {loss_type} model saved (epoch {epoch}) with validation loss: {metrics['loss']:.4f}")
+            elif loss_type == 'recon':
+                self.best_recon_model_path = best_path
+                print(f"New best {loss_type} model saved (epoch {epoch}) with reconstruction loss: {metrics['recon_loss']:.4f}")
         else:
             # Save regular checkpoint
             if checkpoint_path is None:
@@ -1227,6 +1239,10 @@ class GPT2VQVAETrainer:
         # Restore best_val_loss if present
         if 'best_val_loss' in checkpoint:
             self.best_val_loss = checkpoint['best_val_loss']
+        
+        # Restore best_recon_loss if present
+        if 'best_recon_loss' in checkpoint:
+            self.best_recon_loss = checkpoint['best_recon_loss']
         
         print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
         print("Checkpoint loaded successfully. Configuration validation completed.")
@@ -1347,15 +1363,30 @@ class GPT2VQVAETrainer:
                 self._print_epoch_metrics(train_metrics, test_metrics)
                 
                 # Save checkpoint
-                is_best = self.is_new_best(test_metrics['loss'])
-                if is_best:
-                    self.update_best(test_metrics['loss'])
+                is_best_total = self.is_new_best(test_metrics['loss'], 'total')
+                is_best_recon = self.is_new_best(test_metrics['recon_loss'], 'recon')
+                
+                if is_best_total:
+                    self.update_best(test_metrics['loss'], 'total')
                     if TRACK_MEMORY:
                         with record_function("## save_checkpoint ##"):
-                            self.save_checkpoint(epoch + 1, test_metrics, True)
+                            self.save_checkpoint(epoch + 1, test_metrics, True, loss_type='total')
                     else:
-                        self.save_checkpoint(epoch + 1, test_metrics, True)
+                        self.save_checkpoint(epoch + 1, test_metrics, True, loss_type='total')
                     # Send checkpoint notification
+                    if SEND_MID_TRAINING_NOTIFICATION:
+                        self.send_checkpoint_notification(epoch + 1, is_best=True)
+                    # save training visualizations when saving a checkpoint
+                    save_training_visualizations(self, prefix=f"epoch_{epoch+1}")
+                
+                if is_best_recon:
+                    self.update_best(test_metrics['recon_loss'], 'recon')
+                    if TRACK_MEMORY:
+                        with record_function("## save_checkpoint ##"):
+                            self.save_checkpoint(epoch + 1, test_metrics, True, loss_type='recon')
+                    else:
+                        self.save_checkpoint(epoch + 1, test_metrics, True, loss_type='recon')
+                    # Send checkpoint notification for reconstruction loss
                     if SEND_MID_TRAINING_NOTIFICATION:
                         self.send_checkpoint_notification(epoch + 1, is_best=True)
                     # save training visualizations when saving a checkpoint
@@ -1458,18 +1489,34 @@ class GPT2VQVAETrainer:
                 print(f"Aborted training checkpoint saved (trained {total_batches_trained} batches, threshold: {minimum_batches})")
 
                 # Also save as best model if it's better than previous best
-                if self.is_new_best(e.metrics['avg_loss']):
-                    self.update_best(e.metrics['avg_loss'])
-                    best_aborted_path = os.path.join(checkpoint_dir, f'best_model_aborted_epoch_{e.epoch}.pt')
+                is_best_total_aborted = self.is_new_best(e.metrics['avg_loss'], 'total')
+                is_best_recon_aborted = self.is_new_best(e.metrics['avg_recon_loss'], 'recon')
+                
+                if is_best_total_aborted:
+                    self.update_best(e.metrics['avg_loss'], 'total')
+                    best_aborted_path = os.path.join(checkpoint_dir, f'best_total_model_aborted_epoch_{e.epoch}.pt')
                     if TRACK_MEMORY:
                         with record_function("## save_checkpoint ##"):
-                            self.save_checkpoint(e.epoch, dummy_val_metrics, is_best=True, checkpoint_path=best_aborted_path)
+                            self.save_checkpoint(e.epoch, dummy_val_metrics, is_best=True, checkpoint_path=best_aborted_path, loss_type='total')
                     else:
-                        self.save_checkpoint(e.epoch, dummy_val_metrics, is_best=True, checkpoint_path=best_aborted_path)
+                        self.save_checkpoint(e.epoch, dummy_val_metrics, is_best=True, checkpoint_path=best_aborted_path, loss_type='total')
                     # Send checkpoint notification for best aborted model
                     if SEND_MID_TRAINING_NOTIFICATION:
                         self.send_checkpoint_notification(e.epoch, is_best=True)
-                    print(f"New best model (from aborted training) saved to: {best_aborted_path}")
+                    print(f"New best total model (from aborted training) saved to: {best_aborted_path}")
+                
+                if is_best_recon_aborted:
+                    self.update_best(e.metrics['avg_recon_loss'], 'recon')
+                    best_recon_aborted_path = os.path.join(checkpoint_dir, f'best_recon_model_aborted_epoch_{e.epoch}.pt')
+                    if TRACK_MEMORY:
+                        with record_function("## save_checkpoint ##"):
+                            self.save_checkpoint(e.epoch, dummy_val_metrics, is_best=True, checkpoint_path=best_recon_aborted_path, loss_type='recon')
+                    else:
+                        self.save_checkpoint(e.epoch, dummy_val_metrics, is_best=True, checkpoint_path=best_recon_aborted_path, loss_type='recon')
+                    # Send checkpoint notification for best aborted model
+                    if SEND_MID_TRAINING_NOTIFICATION:
+                        self.send_checkpoint_notification(e.epoch, is_best=True)
+                    print(f"New best reconstruction model (from aborted training) saved to: {best_recon_aborted_path}")
             else:
                 print(f"Skipping checkpoint save - only trained {total_batches_trained} batches, need at least {minimum_batches}")
             
@@ -1477,6 +1524,7 @@ class GPT2VQVAETrainer:
             self.log_memory_usage("training_aborted_end")
             
             print(f"\nTraining aborted! Best validation loss so far: {self.best_val_loss:.4f}")
+            print(f"Best reconstruction loss so far: {self.best_recon_loss:.4f}")
             print(f"Training completed at epoch {e.epoch} due to perplexity threshold.")
             
             # Clear cache after aborted training
@@ -1526,6 +1574,7 @@ class GPT2VQVAETrainer:
         training_duration = (training_end_time - training_start_time).total_seconds()
         
         print(f"\nTraining completed! Best validation loss: {self.best_val_loss:.4f}")
+        print(f"Training completed! Best reconstruction loss: {self.best_recon_loss:.4f}")
         print(f"Training duration: {training_duration:.2f} seconds ({training_duration/3600:.2f} hours)")
         
         
@@ -2057,15 +2106,41 @@ class GPT2VQVAETrainer:
             print(f"Memory usage plot saved to {save_path}")
         plt.close()
 
-    def is_new_best(self, val_loss: float) -> bool:
-        """Return True if val_loss is better than the current best_val_loss."""
-        return val_loss < self.best_val_loss
+    def is_new_best(self, val_loss: float, loss_type: str = 'total') -> bool:
+        """
+        Return True if val_loss is better than the current best loss for the specified type.
+        
+        Args:
+            val_loss: The validation loss to check
+            loss_type: Type of loss to check ('total' or 'recon')
+            
+        Returns:
+            bool: True if this is a new best for the specified loss type
+        """
+        if loss_type == 'total':
+            return val_loss < self.best_val_loss
+        elif loss_type == 'recon':
+            return val_loss < self.best_recon_loss
+        else:
+            raise ValueError(f"Unknown loss type: {loss_type}. Must be 'total' or 'recon'.")
 
-    def update_best(self, val_loss: float):
-        """Update the best_val_loss if val_loss is better."""
-        if self.is_new_best(val_loss):
-            self.best_val_loss = val_loss
-    
+    def update_best(self, val_loss: float, loss_type: str = 'total'):
+        """
+        Update the best loss if val_loss is better for the specified type.
+        
+        Args:
+            val_loss: The validation loss to potentially update
+            loss_type: Type of loss to update ('total' or 'recon')
+        """
+        if loss_type == 'total':
+            if self.is_new_best(val_loss, 'total'):
+                self.best_val_loss = val_loss
+        elif loss_type == 'recon':
+            if self.is_new_best(val_loss, 'recon'):
+                self.best_recon_loss = val_loss
+        else:
+            raise ValueError(f"Unknown loss type: {loss_type}. Must be 'total' or 'recon'.")
+
     def _cleanup_previous_plots(self, save_dir: str, plot_type: str, current_epoch: Optional[int] = None):
         """
         Clean up previous plots of the same type when in overwrite mode.

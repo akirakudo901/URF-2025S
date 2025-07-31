@@ -237,16 +237,17 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         # Increment step counter
         self.current_step += 1
 
-    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None, remove_other_best_models: bool = True, **kwargs):
+    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None, remove_other_best_models: bool = True, loss_type: str = 'total', **kwargs):
         """
         Enhanced checkpoint saving that includes phased training state and enhanced loss tracking.
         
         Args:
             epoch: Current epoch
             metrics: Training metrics
-            is_best: Whether this is the best model so far
+            is_best: Whether this is the best model so far for the specified loss type
             checkpoint_path: Optional custom checkpoint path
-            remove_other_best_models: If True, remove other best model checkpoints (default: True)
+            remove_other_best_models: If True, remove other best model checkpoints of the same type (default: True)
+            loss_type: Type of loss for best model tracking ('total' or 'recon')
         """
         kwargs.update({ 
             "current_step": self.current_step,
@@ -256,7 +257,7 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             "detailed_post_bn_norm_history": self.detailed_post_bn_norm_history
         })
         # Call parent save_checkpoint with enhanced data as kwargs
-        super().save_checkpoint(epoch, metrics, is_best, checkpoint_path, remove_other_best_models, **kwargs)
+        super().save_checkpoint(epoch, metrics, is_best, checkpoint_path, remove_other_best_models, loss_type, **kwargs)
 
     def load_checkpoint(self, checkpoint_path: str):
         """
