@@ -132,7 +132,7 @@ training_config:
   # Checkpoint and Saving Settings
   # ============================================================================
   save_every: 5                       # Save checkpoint every N epochs
-  checkpoint_dir: checkpoints/asw_embsum/big/two_thoughts  # Directory for saving checkpoints
+  checkpoint_dir: checkpoints/asw_embsum/big/two_thoughts/1024  # Directory for saving checkpoints
   minimum_batches_for_checkpoint: 200 # Minimum number of batches trained before saving aborted checkpoint
   
   # ============================================================================
