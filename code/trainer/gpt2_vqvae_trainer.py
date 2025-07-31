@@ -1175,7 +1175,7 @@ class GPT2VQVAETrainer:
         Args:
             checkpoint_path: Path to checkpoint file
         """
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         
         # Validate model and training configurations
         def _check_config_mismatch(checkpoint_config, current_config, config_type):
