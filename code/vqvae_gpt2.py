@@ -615,7 +615,7 @@ class GPT2VQVAE(nn.Module):
             attn_pdrop=final_decoder_dropout,
             activation_function=final_decoder_activation_function,
         )
-        if self.only_latent_decode or self.simple_decoder:
+        if self.only_latent_decode or self.simple_decoder or self.embed_sum_decode:
             self.decoder_config.add_cross_attention = False
         
         # Initialize encoder with or without pretrained weights
@@ -628,6 +628,11 @@ class GPT2VQVAE(nn.Module):
                       f"differs from specified vocab_size ({vocab_size}). "
                       f"Using specified vocab_size.")
                 self.encoder.resize_token_embeddings(vocab_size)
+            if freeze_text_embeddings_encoder:
+                self.encoder.wte.weight.requires_grad = False
+                print("Frozen text embeddings in encoder")
+            else:
+                print("Loaded text embeddings in encoder (trainable)")
         elif load_text_embeddings_encoder:
             print(f"\nLoading only text embeddings from {pretrained_model_name} for encoder...")
             self.encoder = GPT2Model(self.encoder_config)
@@ -654,6 +659,11 @@ class GPT2VQVAE(nn.Module):
                       f"differs from specified vocab_size ({vocab_size}). "
                       f"Using specified vocab_size.")
                 self.decoder.resize_token_embeddings(vocab_size)
+            if freeze_text_embeddings_decoder:
+                self.decoder.transformer.wte.weight.requires_grad = False
+                print("Frozen text embeddings in decoder")
+            else:
+                print("Loaded text embeddings in decoder (trainable)")
         elif load_text_embeddings_decoder:
             print(f"Loading only text embeddings from {pretrained_model_name} for decoder...")
             self.decoder = model_class(self.decoder_config)
@@ -1612,7 +1622,7 @@ class GPT2VQVAE(nn.Module):
         
         # Load checkpoint to extract configuration if not provided
         if model_config is None:
-            checkpoint = torch.load(checkpoint_path, map_location=device)
+            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
             
             if 'model_config' not in checkpoint:
                 raise KeyError(f"Checkpoint file {checkpoint_path} does not contain 'model_config'")
@@ -1621,7 +1631,7 @@ class GPT2VQVAE(nn.Module):
             model_config = checkpoint['model_config'].copy()
         else:
             # If model_config is provided, we still need to load the checkpoint for weights
-            checkpoint = torch.load(checkpoint_path, map_location=device)
+            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         
         # Override with any provided kwargs
         model_config.update(kwargs)

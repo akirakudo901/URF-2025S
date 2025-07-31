@@ -1074,9 +1074,9 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
         """
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
-        
+
         # Load checkpoint to extract configuration
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         
         if 'model_config' not in checkpoint:
             raise KeyError(f"Checkpoint file {checkpoint_path} does not contain 'model_config'")
