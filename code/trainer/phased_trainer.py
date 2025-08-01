@@ -337,56 +337,120 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         
     
     def _init_phase_best_tracking(self):
+        """
+        Initialize the best validation loss tracking per phase and loss type.
+        """
         self.best_val_loss_per_phase = {
-            'initialization': float('inf'),
-            'reinitialization': float('inf'),
-            'normal': float('inf'),
+            'initialization': {'total': float('inf'), 'recon': float('inf')},
+            'reinitialization': {'total': float('inf'), 'recon': float('inf')},
+            'normal': {'total': float('inf'), 'recon': float('inf')},
         }
 
-    def is_new_best(self, val_loss: float) -> bool:
+    def is_new_best(self, val_loss: float, loss_type: str = 'total') -> bool:
+        """
+        Return True if val_loss is better than the current best loss for the specified type.
+        
+        Args:
+            val_loss: The validation loss to check
+            loss_type: Type of loss to check ('total' or 'recon')
+            
+        Returns:
+            bool: True if this is a new best for the specified loss type
+        """
+        if loss_type not in ['total', 'recon']:
+            raise ValueError(f"Unknown loss type: {loss_type}. Must be 'total' or 'recon'.")
+        
         phase = self._determine_training_phase(self.current_step)
-        return val_loss < self.best_val_loss_per_phase[phase]
+        return val_loss < self.best_val_loss_per_phase[phase][loss_type]
 
-    def update_best(self, val_loss: float):
+    def update_best(self, val_loss: float, loss_type: str = 'total'):
+        """
+        Update the best loss if val_loss is better for the specified type.
+        
+        Args:
+            val_loss: The validation loss to update
+            loss_type: Type of loss to update ('total' or 'recon')
+        """
+        if loss_type not in ['total', 'recon']:
+            raise ValueError(f"Unknown loss type: {loss_type}. Must be 'total' or 'recon'.")
+        
         phase = self._determine_training_phase(self.current_step)
-        if self.is_new_best(val_loss):
-            self.best_val_loss_per_phase[phase] = val_loss
+        if self.is_new_best(val_loss, loss_type):
+            self.best_val_loss_per_phase[phase][loss_type] = val_loss
 
-    def get_best_val_loss(self, phase: str = None):
+    def get_best_val_loss(self, phase: str = None, loss_type: str = 'total'):
+        """
+        Get the best validation loss for a specific phase and loss type.
+        
+        Args:
+            phase: Training phase (if None, uses current phase)
+            loss_type: Type of loss ('total' or 'recon')
+            
+        Returns:
+            float: Best validation loss for the specified phase and loss type
+        """
+        if loss_type not in ['total', 'recon']:
+            raise ValueError(f"Unknown loss type: {loss_type}. Must be 'total' or 'recon'.")
+        
         if phase is None:
             phase = self._determine_training_phase(self.current_step)
-        return self.best_val_loss_per_phase[phase]
+        return self.best_val_loss_per_phase[phase][loss_type]
 
-    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None, remove_other_best_models: bool = True, **kwargs):
+    def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None, remove_other_best_models: bool = True, loss_type: str = 'total', **kwargs):
         """
-        Save checkpoint with phase-aware best model logic.
-        If is_best and remove_other_best_models is True, only remove best model checkpoints from the same phase.
+        Save checkpoint with phase-aware and loss-type-aware best model logic.
+        If is_best and remove_other_best_models is True, only remove best model checkpoints 
+        from the same phase and loss type.
         """
         kwargs.update({'best_val_loss_per_phase': self.best_val_loss_per_phase})
         phase = self._determine_training_phase(self.current_step)
         checkpoint_dir = self.training_config.get('checkpoint_dir', 'checkpoints')
         if is_best:
             if remove_other_best_models:
-                # Remove only best model checkpoints from the same phase if folder exists
+                # Remove only best model checkpoints from the same phase and loss type if folder exists
                 if os.path.exists(checkpoint_dir):
                     for file in os.listdir(checkpoint_dir):
-                        if file.startswith(f'best_model_{phase}_') and file.endswith('.pt'):
+                        if file.startswith(f'best_model_{phase}_{loss_type}_') and file.endswith('.pt'):
                             os.remove(os.path.join(checkpoint_dir, file))
             if checkpoint_path is None:
-                checkpoint_path = os.path.join(checkpoint_dir, f'best_model_{phase}_epoch_{epoch}.pt')
-        super().save_checkpoint(epoch, metrics, is_best, checkpoint_path, remove_other_best_models=False, **kwargs)
+                checkpoint_path = os.path.join(checkpoint_dir, f'best_model_{phase}_{loss_type}_epoch_{epoch}.pt')
+        super().save_checkpoint(epoch, metrics, is_best, checkpoint_path, remove_other_best_models=False, loss_type=loss_type, **kwargs)
 
     def load_checkpoint(self, checkpoint_path: str):
         checkpoint = super().load_checkpoint(checkpoint_path)
         # Restore per-phase bests
         if 'best_val_loss_per_phase' in checkpoint:
-            self.best_val_loss_per_phase = checkpoint['best_val_loss_per_phase']
+            loaded_best_val_loss_per_phase = checkpoint['best_val_loss_per_phase']
+            
+            # Check if the loaded data has the new structure (dict with 'total' and 'recon')
+            if isinstance(loaded_best_val_loss_per_phase, dict):
+                # Check if it's the new structure (nested dict) or old structure (simple dict)
+                first_phase = list(loaded_best_val_loss_per_phase.keys())[0]
+                if isinstance(loaded_best_val_loss_per_phase[first_phase], dict):
+                    # New structure: {'phase': {'total': val, 'recon': val}}
+                    self.best_val_loss_per_phase = loaded_best_val_loss_per_phase
+                else:
+                    # Old structure: {'phase': val} - convert to new structure
+                    self._init_phase_best_tracking()
+                    for phase, val in loaded_best_val_loss_per_phase.items():
+                        if phase in self.best_val_loss_per_phase:
+                            self.best_val_loss_per_phase[phase]['total'] = val
+                            self.best_val_loss_per_phase[phase]['recon'] = val
+            else:
+                # Fallback: initialize from best_val_loss if present
+                best = checkpoint.get('best_val_loss', float('inf'))
+                self._init_phase_best_tracking()
+                for phase in self.best_val_loss_per_phase:
+                    self.best_val_loss_per_phase[phase]['total'] = best
+                    self.best_val_loss_per_phase[phase]['recon'] = best
         else:
             # Backward compatibility: initialize from best_val_loss if present
             best = checkpoint.get('best_val_loss', float('inf'))
             self._init_phase_best_tracking()
-            for k in self.best_val_loss_per_phase:
-                self.best_val_loss_per_phase[k] = best
+            for phase in self.best_val_loss_per_phase:
+                self.best_val_loss_per_phase[phase]['total'] = best
+                self.best_val_loss_per_phase[phase]['recon'] = best
+        
         print(f"Current best val loss per phase: {self.best_val_loss_per_phase}")
         return checkpoint
 
@@ -421,11 +485,22 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
                 formatted_phase_val_loss = ""
                 
                 for phase in ["initialization", "reinitialization", "normal"]:
-                    val = self.best_val_loss_per_phase.get(phase, float('inf'))
-                    if val == float('inf'):
-                        formatted_phase_val_loss += f"  {phase}: N/A\n"
+                    phase_data = self.best_val_loss_per_phase.get(phase, {})
+                    if isinstance(phase_data, dict):
+                        # New structure with separate total and recon losses
+                        total_val = phase_data.get('total', float('inf'))
+                        recon_val = phase_data.get('recon', float('inf'))
+                        if total_val == float('inf') and recon_val == float('inf'):
+                            formatted_phase_val_loss += f"  {phase}: N/A\n"
+                        else:
+                            formatted_phase_val_loss += f"  {phase}: total={total_val:.4f}, recon={recon_val:.4f}\n"
                     else:
-                        formatted_phase_val_loss += f"  {phase}: {val:.4f}\n"
+                        # Old structure (backward compatibility)
+                        val = phase_data if isinstance(phase_data, (int, float)) else float('inf')
+                        if val == float('inf'):
+                            formatted_phase_val_loss += f"  {phase}: N/A\n"
+                        else:
+                            formatted_phase_val_loss += f"  {phase}: {val:.4f}\n"
                 
                 metric_dict["Best Val Loss (per phase)"] = formatted_phase_val_loss
 
