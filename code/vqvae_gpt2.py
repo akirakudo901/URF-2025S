@@ -9,8 +9,10 @@ from transformers import GPT2Model, GPT2LMHeadModel, GPT2Config
 from transformers.cache_utils import DynamicCache, EncoderDecoderCache, Cache
 from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions, CausalLMOutputWithCrossAttentions
 from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask_for_sdpa
+
 from typing import Optional, Union, Tuple
 import logging
+import warnings
 
 logger = logging.getLogger(__name__)
 
@@ -555,7 +557,7 @@ class GPT2VQVAE(nn.Module):
             decoder_dropout (float, optional): Dropout probability for decoder
             decoder_activation_function (str, optional): Activation function for decoder
             only_latent_decode (bool): If True, use a decoder-only GPT2LMHeadModel and decodes from prompt embeddings + latents only.
-            simple_decoder (bool): If True, use a decoder-only GPT2LMHeadModel for the decoder and a simplified decode logic.
+            simple_decoder (bool): CURRENTLY DEPRECATED! If True, use a decoder-only GPT2LMHeadModel for the decoder and a simplified decode logic. 
             embed_sum_decode (bool): If True, use the embed_sum_decode mode for decoding.
         """
         super(GPT2VQVAE, self).__init__()
@@ -565,6 +567,9 @@ class GPT2VQVAE(nn.Module):
         self.only_latent_decode = only_latent_decode
         self.simple_decoder = simple_decoder
         self.embed_sum_decode = embed_sum_decode
+
+        if self.simple_decoder:
+            warnings.warn("simple_decoder mode for the GPT2VQVAE is now deprecated...", DeprecationWarning)
 
         # TODO ADD INITIALIZATION FOR ENCODER, DECODER AND MLP
         # THOUGHT: COULD ADD output_attentions=True FOR DEBUGGING (E.G. FOR HAND-MADE CROSS-ATTENTION MASK OF DECODER)
@@ -1048,6 +1053,7 @@ class GPT2VQVAE(nn.Module):
         Decodes using GPT2 decoder. If ar_position is provided, decode for the specific index by truncating input accordingly.
         Otherwise, decode the full sequence via teacher-forcing on the provided cot_sequences.
         If only_latent_decode is True, use a decoder-only GPT2LMHeadModel and decodes from prompt embeddings + latents only.
+        simple_decoder IS DEPRECATED!
         If simple_decoder is True, uses a decoder-only GPT2LMHeadModel and concatenates prompt embeddings with CoT latents.
         
         Args:
@@ -1084,9 +1090,9 @@ class GPT2VQVAE(nn.Module):
                                           ar_position, pad_token_id, use_caching)
         
         # simple_decoder mode
-        elif self.simple_decoder:
-            return self._decode_simple_decoder(chain_memory, prompt_sequences, cot_sequences, prompt_mask, 
-                                               cot_mask, ar_position, pad_token_id, use_caching)
+        # elif self.simple_decoder:
+        #     return self._decode_simple_decoder(chain_memory, prompt_sequences, cot_sequences, prompt_mask, 
+        #                                        cot_mask, ar_position, pad_token_id, use_caching)
         # only_latent_decode mode
         elif self.only_latent_decode:
             return self._decode_only_latent(chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
