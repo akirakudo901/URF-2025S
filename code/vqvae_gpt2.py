@@ -493,7 +493,7 @@ class VectorQuantizer(nn.Module):
 
 class GPT2VQVAE(nn.Module):
     def __init__(self, vocab_size, d_model=768, num_embeddings=512, 
-                 commitment_cost=0.25, aggregation_hidden_dim=1024, 
+                 commitment_cost=0.25, aggregation_hidden_dim=1024, aggregation_hidden_dim2=None,
                  num_thoughts=32, n_positions=1024, 
                  use_pretrained_encoder=True, use_pretrained_decoder=True,
                  pretrained_model_name="gpt2",
@@ -523,7 +523,9 @@ class GPT2VQVAE(nn.Module):
             # VQ-VAE specific parameters
             num_embeddings (int): VQ codebook size
             commitment_cost (float): VQ commitment cost
-            aggregation_hidden_dim (int): Aggregation MLP hidden dimension
+            aggregation_hidden_dim (int): Aggregation MLP first hidden layer dimension
+            aggregation_hidden_dim2 (int, optional): Aggregation MLP second hidden layer dimension. 
+                                                   If None, only one hidden layer is used.
             num_thoughts (int): Number of parallel sequences
             
             # Pretrained model settings
@@ -688,14 +690,28 @@ class GPT2VQVAE(nn.Module):
         # Vector Quantizer
         self.vector_quantizer = VectorQuantizer(num_embeddings, d_model, commitment_cost)
         
-        # Aggregation MLP
+        # Aggregation MLP - configurable with one or two hidden layers
         # TODO: Consider different options - might cause posterior collapse if too strong
-        self.aggregation_mlp = nn.Sequential(
+        mlp_layers = [
             nn.Linear(num_thoughts * d_model, aggregation_hidden_dim),
             nn.ReLU(),
             nn.Dropout(0.1),  # GPT2's default dropout
-            nn.Linear(aggregation_hidden_dim, d_model)
-        )
+        ]
+        
+        # Add second hidden layer if specified
+        if aggregation_hidden_dim2 is not None:
+            mlp_layers.extend([
+                nn.Linear(aggregation_hidden_dim, aggregation_hidden_dim2),
+                nn.ReLU(),
+                nn.Dropout(0.1),  # GPT2's default dropout
+            ])
+            # Final layer maps from second hidden layer to output
+            mlp_layers.append(nn.Linear(aggregation_hidden_dim2, d_model))
+        else:
+            # Final layer maps from first hidden layer to output
+            mlp_layers.append(nn.Linear(aggregation_hidden_dim, d_model))
+        
+        self.aggregation_mlp = nn.Sequential(*mlp_layers)
         
         # Chain-positional embeddings to differentiate M sequences
         self.chain_embeddings = nn.Embedding(num_thoughts, d_model)
@@ -710,6 +726,7 @@ class GPT2VQVAE(nn.Module):
         
         self.d_model = d_model
         self.num_thoughts = num_thoughts
+        self.aggregation_hidden_dim2 = aggregation_hidden_dim2
         
         # Store pretrained model information for checkpoint validation
         self._use_pretrained_encoder = use_pretrained_encoder
@@ -1780,6 +1797,7 @@ class GPT2VQVAE(nn.Module):
             'num_embeddings': self.vector_quantizer.num_embeddings,
             'commitment_cost': self.vector_quantizer.commitment_cost,
             'aggregation_hidden_dim': self.aggregation_mlp[0].out_features,
+            'aggregation_hidden_dim2': getattr(self, 'aggregation_hidden_dim2', None),
             'num_thoughts': self.num_thoughts,
             'n_positions': self.encoder_config.n_positions,
             'use_pretrained_encoder': hasattr(self, '_use_pretrained_encoder'),
@@ -1892,6 +1910,7 @@ class GPT2VQVAE(nn.Module):
             'freeze_text_embeddings_encoder': False,
             'load_text_embeddings_decoder': False,
             'freeze_text_embeddings_decoder': False,
+            'aggregation_hidden_dim2': None,
         }
         
         for field, default_value in optional_fields_with_defaults.items():
