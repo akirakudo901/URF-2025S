@@ -852,6 +852,7 @@ class EnhancedVectorQuantizer(nn.Module):
 class EnhancedGPT2VQVAE(GPT2VQVAE):
     def __init__(self, vocab_size, d_model=768, num_embeddings=512, 
                  commitment_cost=0.25, aggregation_hidden_dim=1024, 
+                 aggregation_hidden_dim2=None,
                  num_thoughts=32, n_positions=1024, 
                  use_pretrained_encoder=True, use_pretrained_decoder=True,
                  pretrained_model_name="gpt2",
@@ -921,6 +922,7 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             vocab_size=vocab_size,
             d_model=d_model,
             aggregation_hidden_dim=aggregation_hidden_dim,
+            aggregation_hidden_dim2=aggregation_hidden_dim2,
             num_thoughts=num_thoughts,
             n_positions=n_positions,
             use_pretrained_encoder=use_pretrained_encoder,
