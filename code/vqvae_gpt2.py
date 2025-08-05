@@ -10,8 +10,9 @@ from transformers.cache_utils import DynamicCache, EncoderDecoderCache, Cache
 from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions, CausalLMOutputWithCrossAttentions
 from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask_for_sdpa
 
-from typing import Optional, Union, Tuple
+import gc
 import logging
+from typing import Optional, Union, Tuple
 import warnings
 
 logger = logging.getLogger(__name__)
@@ -1100,13 +1101,11 @@ class GPT2VQVAE(nn.Module):
     def _decode_embed_sum(self, chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, inference, pad_token_id, use_caching):
         """
         Helper for embed_sum_decode mode. See decode() docstring for details.
-        """
-        # TODO: EFFICIENT GENERATION USING SPECIFIED ar_position TO BE IMPLEMENTED
-        
         # chain_memory: [B*M, L, d_model]
         # cot_sequences: [B, M, L]
         # prompt_sequences: [B, K]
         # prompt_mask: [B, K] or None
+        """
         B, K = prompt_sequences.shape
         _, L, d_model = chain_memory.shape
         _, M, _ = cot_sequences.shape
@@ -1206,12 +1205,10 @@ class GPT2VQVAE(nn.Module):
             
             # For now, implement inefficient version
             output_logits = torch.empty((B, M, L, self.decoder_config.vocab_size), device=chain_memory.device)
-            output_sequences = torch.zeros((B, M, L), dtype=torch.long, device=chain_memory.device)
             
             # First position: use only prompt + (filler embed + latent embed)
             filler = torch.full((B * M, 1), pad_token_id, dtype=torch.long, device=chain_memory.device)
-            filler_embed = self.decoder.transformer.wte(filler)  # [B*M, 1, d_model]
-            input_embeds = filler_embed + chain_memory[:, 0:1, :]  # [B*M, 1, d_model]
+            input_embeds = self.decoder.transformer.wte(filler).add_(chain_memory[:, 0:1, :])  # [B*M, 1, d_model]
                 
             if K > 0:
                 attn_mask = torch.cat((prompt_mask_flat, torch.ones(B * M, L, device=chain_memory.device)), dim=1) # [B*M, K+L]
@@ -1223,6 +1220,7 @@ class GPT2VQVAE(nn.Module):
                 if K > 0:
                     prompt_cache = self._get_prompt_cache(self.decoder, prompt_sequences, prompt_mask)
                     padded_cache = self._pad_kv_cache(prompt_cache, B, M)
+                    del prompt_cache
                 else:
                     padded_cache = None
                 # Only pass COT+latent embeddings to decoder, but with cache & full attention mask
@@ -1236,14 +1234,15 @@ class GPT2VQVAE(nn.Module):
                     return_dict=True,
                     past_key_values=padded_cache
                 )
-                first_logits = decoder_outputs.logits.view(B, M, -1)
-                output_logits[..., 0, :] = first_logits
-                output_sequences[..., 0] = torch.argmax(first_logits, dim=-1)
-                prev_cache = decoder_outputs.past_key_values
-            
+                
                 for t in range(1, L):
+                    latest_logits = decoder_outputs.logits
+                    output_logits[..., t-1, :] = latest_logits.view(B, M, -1)
+                    prev_cache = decoder_outputs.past_key_values
+                    del decoder_outputs
+                    
                     # Subsequent positions: use prompt + generated tokens + current latent
-                    generated_embed = self.decoder.transformer.wte(output_sequences[:, :, t-1:t].reshape(B * M, 1))  # [B*M, 1, d_model]
+                    generated_embed = self.decoder.transformer.wte(torch.argmax(latest_logits, dim=-1))  # [B*M, 1, d_model]
                     generated_embed.add_(chain_memory[:, t:t+1, :])   # [B*M, 1, d_model]
                     
                     decoder_outputs = self.decoder(
@@ -1256,12 +1255,14 @@ class GPT2VQVAE(nn.Module):
                         return_dict=True,
                         past_key_values=prev_cache
                     )
-                    new_logits = decoder_outputs.logits.view(B, M, -1)
-                    output_logits[..., t, :] = new_logits
-                    output_sequences[..., t] = torch.argmax(new_logits, dim=-1)
-                    prev_cache = decoder_outputs.past_key_values
+                    del prev_cache
+                
+                output_logits[..., L-1, :] = decoder_outputs.logits.view(B, M, -1)
+                del decoder_outputs
             else:
                 # TODO FINISH IMPLEMENTING! FOR NOW, I WILL SKIP
+                raise Exception("Auto-regressive generation for embed sum mode isn't implemented efficiently yet.")
+                
                 input_embeds = torch.cat([prompt_embeds, input_embeds], dim=1)  # [B*M, K+1, d_model]
                 for t in range(1, L):
                     generated_embed = self.decoder.transformer.wte(output_sequences[:, :, t-1:t].reshape(B * M, 1))  # [B*M, 1, d_model]
@@ -1277,6 +1278,10 @@ class GPT2VQVAE(nn.Module):
                         use_cache=False,
                         return_dict=True
                     )
+            # Force garbage collection every few steps to prevent memory accumulation
+            gc.collect()
+            if hasattr(torch.cuda, 'empty_cache'):
+                torch.cuda.empty_cache()
             
             return output_logits
     
