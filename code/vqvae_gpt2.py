@@ -1048,10 +1048,9 @@ class GPT2VQVAE(nn.Module):
         return quantized, vq_loss, perplexity, indices, debug_stats
 
     def decode(self, memory, prompt_sequences, cot_sequences, prompt_mask=None, cot_mask=None, 
-               ar_position=None, pad_token_id=0):
+               inference=False, pad_token_id=0):
         """
-        Decodes using GPT2 decoder. If ar_position is provided, decode for the specific index by truncating input accordingly.
-        Otherwise, decode the full sequence via teacher-forcing on the provided cot_sequences.
+        Decodes using GPT2 decoder. Handles both teacher-forcing (inference=False) and auto-regression (inference=True).
         If only_latent_decode is True, use a decoder-only GPT2LMHeadModel and decodes from prompt embeddings + latents only.
         simple_decoder IS DEPRECATED!
         If simple_decoder is True, uses a decoder-only GPT2LMHeadModel and concatenates prompt embeddings with CoT latents.
@@ -1059,21 +1058,17 @@ class GPT2VQVAE(nn.Module):
         Args:
             memory (torch.Tensor): Encoded memory [batch_size, L, M, d_model]
             prompt_sequences (torch.Tensor): Prompt sequences [batch_size, K]
-            cot_sequences (torch.Tensor): Used as part of context (ar_position specified) or otherwise as teacher-forcing template.
+            cot_sequences (torch.Tensor): Used as teacher-forcing template (inference=False) or for auto-regression (inference=True)
             prompt_mask (torch.Tensor, optional): Prompt attention mask for padding
             cot_mask (torch.Tensor, optional): COT attention mask for padding
-            ar_position (int, optional): Index of position to decode within the CoT, starts from 0.
+            inference (bool): If True, performs auto-regressive generation. If False, performs teacher-forcing.
             pad_token_id (int): Token ID to use for padding when K=0, defaults to 0
             
         Returns:
-            torch.Tensor: Decoded output logits [batch_size, M, L, vocab_size] (only COT positions) if ar_position is None,
-                          otherwise [batch_size, M, vocab_size] for one position
+            torch.Tensor: Decoded output logits [batch_size, M, L, vocab_size] (only COT positions)
         """
         B, K = prompt_sequences.shape
         _, L, M, _ = memory.shape
-
-        if ar_position is not None and ar_position >= L:
-            raise Exception("ar_position must be smaller than L but was {ar_position} against L={L}.")
 
         # Reshape memory to [batch_size * M, L, d_model] and add chain-positional embeddings
         memory = memory.transpose(1, 2).reshape(B * M, L, -1)
@@ -1087,22 +1082,22 @@ class GPT2VQVAE(nn.Module):
         # embed_sum_decode mode
         if self.embed_sum_decode:
             return self._decode_embed_sum(chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
-                                          ar_position, pad_token_id, use_caching)
+                                          inference, pad_token_id, use_caching)
         
         # simple_decoder mode
         # elif self.simple_decoder:
         #     return self._decode_simple_decoder(chain_memory, prompt_sequences, cot_sequences, prompt_mask, 
-        #                                        cot_mask, ar_position, pad_token_id, use_caching)
+        #                                        cot_mask, inference, pad_token_id, use_caching)
         # only_latent_decode mode
         elif self.only_latent_decode:
             return self._decode_only_latent(chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
-                                            ar_position, pad_token_id, use_caching)
+                                            inference, pad_token_id, use_caching)
         # normal mode
         else:
             return self._decode_normal(chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
-                                       ar_position, pad_token_id, use_caching)
+                                       inference, pad_token_id, use_caching)
 
-    def _decode_embed_sum(self, chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, ar_position, pad_token_id, use_caching):
+    def _decode_embed_sum(self, chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, inference, pad_token_id, use_caching):
         """
         Helper for embed_sum_decode mode. See decode() docstring for details.
         """
@@ -1115,15 +1110,6 @@ class GPT2VQVAE(nn.Module):
         B, K = prompt_sequences.shape
         _, L, d_model = chain_memory.shape
         _, M, _ = cot_sequences.shape
-        
-        cot_sequences_flat = cot_sequences.reshape(B * M, -1)  # [B*M, L]
-        # Prepend filler token (pad_token_id) to each sequence
-        filler = torch.full((B * M, 1), pad_token_id, dtype=cot_sequences_flat.dtype, device=cot_sequences_flat.device)
-        cot_with_filler = torch.cat([filler, cot_sequences_flat[:, :-1]], dim=1)  # [B*M, L]
-        # Get token embeddings for cot_with_filler
-        token_embeds = self.decoder.transformer.wte(cot_with_filler)  # [B*M, L, d_model]
-        # Add latent embeddings
-        cot_input_embeds = token_embeds + chain_memory  # [B*M, L, d_model]
 
         # Prompt embeddings
         if prompt_sequences is not None and K > 0:
@@ -1132,16 +1118,6 @@ class GPT2VQVAE(nn.Module):
         else:
             prompt_embeds = None
 
-        # Attention masks
-        if cot_mask is not None:
-            cot_mask_flat = cot_mask.view(B * M, L)
-            # The mask is shifted to match cot_with_filler
-            cot_mask_flat = torch.cat([
-                torch.ones((B * M, 1), dtype=cot_mask_flat.dtype, device=cot_mask_flat.device),
-                cot_mask_flat[:, :-1]
-            ], dim=1)  # [B*M, L]
-        else:
-            cot_mask_flat = torch.ones(B * M, L, device=chain_memory.device)
         if prompt_mask is not None and K > 0:
             prompt_mask_flat = prompt_mask.unsqueeze(1).expand(-1, M, -1).reshape(B * M, K)
         elif K > 0:
@@ -1149,56 +1125,163 @@ class GPT2VQVAE(nn.Module):
         else:
             prompt_mask_flat = None
         
-        if prompt_embeds is not None:
-            if prompt_mask_flat is not None:
-                attn_mask = torch.cat([prompt_mask_flat, cot_mask_flat], dim=1)  # [B*M, K+L]
-            else:
-                attn_mask = torch.ones(B * M, K+L, device=chain_memory.device)
-        else:
-            attn_mask = cot_mask_flat
+        if not inference:
+            # TEACHER-FORCING MODE
+            cot_sequences_flat = cot_sequences.reshape(B * M, -1)  # [B*M, L]
+            # Prepend filler token (pad_token_id) to each sequence
+            filler = torch.full((B * M, 1), pad_token_id, dtype=cot_sequences_flat.dtype, device=cot_sequences_flat.device)
+            cot_with_filler = torch.cat([filler, cot_sequences_flat[:, :-1]], dim=1)  # [B*M, L]
+            # Get token embeddings for cot_with_filler
+            token_embeds = self.decoder.transformer.wte(cot_with_filler)  # [B*M, L, d_model]
+            # Add latent embeddings
+            cot_input_embeds = token_embeds + chain_memory  # [B*M, L, d_model]
 
-        if use_caching and K > 0:
-            # Use cache for prompt
-            prompt_cache = self._get_prompt_cache(self.decoder, prompt_sequences, prompt_mask)
-            padded_cache = self._pad_kv_cache(prompt_cache, B, M)
-            # Only pass COT+latent embeddings to decoder, but with cache & full attention mask
-            decoder_outputs = self.decoder(
-                input_ids=None,
-                inputs_embeds=cot_input_embeds,
-                attention_mask=attn_mask,
-                encoder_hidden_states=None,
-                encoder_attention_mask=None,
-                use_cache=True,
-                return_dict=True,
-                past_key_values=padded_cache
-            )
-            all_logits = decoder_outputs.logits  # [B*M, L, vocab_size]
-        else:
-            # No cache: concatenate prompt and COT+latent embeddings
-            if prompt_embeds is not None:
-                input_embeds = torch.cat([prompt_embeds, cot_input_embeds], dim=1)  # [B*M, K+L, d_model]
+            # Attention masks
+            if cot_mask is not None:
+                cot_mask_flat = cot_mask.view(B * M, L)
+                # The mask is shifted to match cot_with_filler
+                cot_mask_flat = torch.cat([
+                    torch.ones((B * M, 1), dtype=cot_mask_flat.dtype, device=cot_mask_flat.device),
+                    cot_mask_flat[:, :-1]
+                ], dim=1)  # [B*M, L]
             else:
-                input_embeds = cot_input_embeds
+                cot_mask_flat = torch.ones(B * M, L, device=chain_memory.device)
             
-            decoder_outputs = self.decoder(
-                input_ids=None,
-                inputs_embeds=input_embeds,
-                attention_mask=attn_mask,
-                encoder_hidden_states=None,
-                encoder_attention_mask=None,
-                use_cache=False,
-                return_dict=True
-            )
-            all_logits = decoder_outputs.logits  # [B*M, K+L, vocab_size] or [B*M, L, vocab_size]
             if prompt_embeds is not None:
-                all_logits = all_logits[:, K:, :]  # Only COT positions
-        if ar_position is None:
+                if prompt_mask_flat is not None:
+                    attn_mask = torch.cat([prompt_mask_flat, cot_mask_flat], dim=1)  # [B*M, K+L]
+                else:
+                    attn_mask = torch.ones(B * M, K+L, device=chain_memory.device)
+            else:
+                attn_mask = cot_mask_flat
+
+            if use_caching and K > 0:
+                # Use cache for prompt
+                prompt_cache = self._get_prompt_cache(self.decoder, prompt_sequences, prompt_mask)
+                padded_cache = self._pad_kv_cache(prompt_cache, B, M)
+                # Only pass COT+latent embeddings to decoder, but with cache & full attention mask
+                decoder_outputs = self.decoder(
+                    input_ids=None,
+                    inputs_embeds=cot_input_embeds,
+                    attention_mask=attn_mask,
+                    encoder_hidden_states=None,
+                    encoder_attention_mask=None,
+                    use_cache=True,
+                    return_dict=True,
+                    past_key_values=padded_cache
+                )
+                all_logits = decoder_outputs.logits  # [B*M, L, vocab_size]
+            else:
+                # No cache: concatenate prompt and COT+latent embeddings
+                if prompt_embeds is not None:
+                    input_embeds = torch.cat([prompt_embeds, cot_input_embeds], dim=1)  # [B*M, K+L, d_model]
+                else:
+                    input_embeds = cot_input_embeds
+                
+                decoder_outputs = self.decoder(
+                    input_ids=None,
+                    inputs_embeds=input_embeds,
+                    attention_mask=attn_mask,
+                    encoder_hidden_states=None,
+                    encoder_attention_mask=None,
+                    use_cache=False,
+                    return_dict=True
+                )
+                all_logits = decoder_outputs.logits  # [B*M, K+L, vocab_size] or [B*M, L, vocab_size]
+                if prompt_embeds is not None:
+                    all_logits = all_logits[:, K:, :]  # Only COT positions
+            
             return all_logits.view(B, M, L, -1)
+        
         else:
-            return all_logits.view(B, M, L, -1)[:, :, ar_position, :]
+            # AUTO-REGRESSION MODE (INEFFICIENT IMPLEMENTATION)
+            # TODO: IMPLEMENT EFFICIENT AUTO-REGRESSION FOR EMBED_SUM_DECODE
+            # High-level proposition for efficient auto-regression in embed_sum_decode:
+            # 1. Pre-compute prompt cache once
+            # 2. For each position t, use the cached prompt + generated tokens up to t-1
+            # 3. Add the latent embedding for position t
+            # 4. Generate one token at position t
+            # 5. Update the cache with the new token
+            # 6. Repeat for all positions
+            
+            # For now, implement inefficient version
+            output_logits = torch.empty((B, M, L, self.decoder_config.vocab_size), device=chain_memory.device)
+            output_sequences = torch.zeros((B, M, L), dtype=torch.long, device=chain_memory.device)
+            
+            # First position: use only prompt + (filler embed + latent embed)
+            filler = torch.full((B * M, 1), pad_token_id, dtype=torch.long, device=chain_memory.device)
+            filler_embed = self.decoder.transformer.wte(filler)  # [B*M, 1, d_model]
+            input_embeds = filler_embed + chain_memory[:, 0:1, :]  # [B*M, 1, d_model]
+                
+            if K > 0:
+                attn_mask = torch.cat((prompt_mask_flat, torch.ones(B * M, L, device=chain_memory.device)), dim=1) # [B*M, K+L]
+            else:
+                attn_mask = torch.ones(B * M, L, device=chain_memory.device)
+            
+            if use_caching:
+                # Use cache for prompt
+                if K > 0:
+                    prompt_cache = self._get_prompt_cache(self.decoder, prompt_sequences, prompt_mask)
+                    padded_cache = self._pad_kv_cache(prompt_cache, B, M)
+                else:
+                    padded_cache = None
+                # Only pass COT+latent embeddings to decoder, but with cache & full attention mask
+                decoder_outputs = self.decoder(
+                    input_ids=None,
+                    inputs_embeds=input_embeds,
+                    attention_mask=attn_mask[:, :K+2],
+                    encoder_hidden_states=None,
+                    encoder_attention_mask=None,
+                    use_cache=True,
+                    return_dict=True,
+                    past_key_values=padded_cache
+                )
+                first_logits = decoder_outputs.logits.view(B, M, -1)
+                output_logits[..., 0, :] = first_logits
+                output_sequences[..., 0] = torch.argmax(first_logits, dim=-1)
+                prev_cache = decoder_outputs.past_key_values
+            
+                for t in range(1, L):
+                    # Subsequent positions: use prompt + generated tokens + current latent
+                    generated_embed = self.decoder.transformer.wte(output_sequences[:, :, t-1:t].reshape(B * M, 1))  # [B*M, 1, d_model]
+                    generated_embed.add_(chain_memory[:, t:t+1, :])   # [B*M, 1, d_model]
+                    
+                    decoder_outputs = self.decoder(
+                        input_ids=None,
+                        inputs_embeds=generated_embed,
+                        attention_mask=attn_mask[:, :K+t+2],
+                        encoder_hidden_states=None,
+                        encoder_attention_mask=None,
+                        use_cache=True,
+                        return_dict=True,
+                        past_key_values=prev_cache
+                    )
+                    new_logits = decoder_outputs.logits.view(B, M, -1)
+                    output_logits[..., t, :] = new_logits
+                    output_sequences[..., t] = torch.argmax(new_logits, dim=-1)
+                    prev_cache = decoder_outputs.past_key_values
+            else:
+                # TODO FINISH IMPLEMENTING! FOR NOW, I WILL SKIP
+                input_embeds = torch.cat([prompt_embeds, input_embeds], dim=1)  # [B*M, K+1, d_model]
+                for t in range(1, L):
+                    generated_embed = self.decoder.transformer.wte(output_sequences[:, :, t-1:t].reshape(B * M, 1))  # [B*M, 1, d_model]
+                    new_embed = generated_embed + chain_memory[:, t:t+1, :]  # [B*M, 1, d_model]
+                    input_embeds = torch.cat([input_embeds, new_embed], dim=1)  # [B*M, K+t+1, d_model]
+                    
+                    decoder_outputs = self.decoder(
+                        input_ids=None,
+                        inputs_embeds=input_embeds,
+                        attention_mask=attn_mask,
+                        encoder_hidden_states=None,
+                        encoder_attention_mask=None,
+                        use_cache=False,
+                        return_dict=True
+                    )
+            
+            return output_logits
     
     def _decode_simple_decoder(self, chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
-                               ar_position, pad_token_id, use_caching):
+                               inference, pad_token_id, use_caching):
         # For now, raise an error if caching isn't possible to avoid wasting lots of compute
         if not use_caching:
             raise RuntimeError("Caching must be enabled for efficiency purpose when using simple_decoder mode in decode().")
@@ -1207,51 +1290,31 @@ class GPT2VQVAE(nn.Module):
         _, L, _ = chain_memory.shape
         _, M, _ = cot_sequences.shape
         
-        # Efficient teacher-forced generation using sequential+cache approach (batched, no for loops)
-        device = cot_sequences.device
-        output_logits = torch.empty((B, M, L, self.decoder_config.vocab_size), device=device)
+        if not inference:
+            # TEACHER-FORCING MODE
+            # Efficient teacher-forced generation using sequential+cache approach (batched, no for loops)
+            device = cot_sequences.device
+            output_logits = torch.empty((B, M, L, self.decoder_config.vocab_size), device=device)
 
-        # 1. Initialize cache with prompt for all batch at once and pad
-        prompt_cache = self._get_prompt_cache(self.decoder, prompt_sequences, prompt_mask)
+            # 1. Initialize cache with prompt for all batch at once and pad
+            prompt_cache = self._get_prompt_cache(self.decoder, prompt_sequences, prompt_mask)
 
-        # Pad prompt cache M times to match COT batch size
-        padded_cache = self._pad_kv_cache(prompt_cache, B, M)  # [B*M]
+            # Pad prompt cache M times to match COT batch size
+            padded_cache = self._pad_kv_cache(prompt_cache, B, M)  # [B*M]
 
-        # Prepare cot_sequences and cot_mask for batched processing
-        cot_sequences_flat = cot_sequences.reshape(B * M, L)  # [B*M, L]
-        
-        if prompt_mask is not None:
-            prompt_mask_b = prompt_mask.unsqueeze(1).expand(-1, M, -1).reshape(B * M, -1)
-        else:
-            prompt_mask_b = torch.ones(B * M, K, device=device)
-        if cot_mask is not None:
-            cot_mask_b = cot_mask.reshape(B * M, L)
-        else:
-            cot_mask_b = torch.ones(B * M, L, device=device)
-        full_attn_mask = torch.cat([prompt_mask_b, cot_mask_b], dim=1)  # [B*M, K+L]
+            # Prepare cot_sequences and cot_mask for batched processing
+            cot_sequences_flat = cot_sequences.reshape(B * M, L)  # [B*M, L]
+            
+            if prompt_mask is not None:
+                prompt_mask_b = prompt_mask.unsqueeze(1).expand(-1, M, -1).reshape(B * M, -1)
+            else:
+                prompt_mask_b = torch.ones(B * M, K, device=device)
+            if cot_mask is not None:
+                cot_mask_b = cot_mask.reshape(B * M, L)
+            else:
+                cot_mask_b = torch.ones(B * M, L, device=device)
+            full_attn_mask = torch.cat([prompt_mask_b, cot_mask_b], dim=1)  # [B*M, K+L]
 
-        # If we wanna generate a specific position
-        if ar_position is not None:
-            # 2. Compute logits directly for the intended index position
-            cot_embeds = self.decoder.transformer.wte(cot_sequences_flat[:, :ar_position])  # [B*M, ar_position, d_model]
-            # Concatenate cot embeddings and latent at index 'ar_position'
-            decoder_inputs_embeds = torch.cat([cot_embeds, chain_memory[:, ar_position:ar_position+1, :]],
-                                               dim=1)  # [B * M, ar_position + 1, d_model]
-            attn_mask = torch.cat([full_attn_mask[:, :K+ar_position], 
-                                   torch.ones(B * M, 1, device=device)],  # for latent embed
-                                   dim=1)  # [B*M, K + ar_position + 1]
-                
-            outputs = self.decoder(
-                input_ids=None,
-                inputs_embeds=decoder_inputs_embeds,
-                attention_mask=attn_mask,
-                use_cache=True,
-                return_dict=True,
-                past_key_values=padded_cache
-            )
-            return outputs.logits[:, -1, :].reshape(B, M, -1)  # [B*M, vocab_size]
-        # Otherwise generate the whole sequence
-        else:
             # 2. Run full forward to get all caches, using padded_cache as the initial past_key_values
             full_outputs = self.decoder(
                 input_ids=cot_sequences_flat,
@@ -1290,9 +1353,71 @@ class GPT2VQVAE(nn.Module):
                 logits = outputs.logits[:, -1, :]  # [B*M, vocab_size]
                 output_logits[:, :, i, :] = logits.view(B, M, -1)
             return output_logits
+        
+        else:
+            # AUTO-REGRESSION MODE (INEFFICIENT IMPLEMENTATION)
+            # TODO: IMPLEMENT EFFICIENT AUTO-REGRESSION FOR SIMPLE_DECODER
+            # High-level proposition for efficient auto-regression in simple_decoder:
+            # 1. Pre-compute prompt cache once
+            # 2. For each position t, use the cached prompt + generated tokens up to t-1
+            # 3. Add the latent embedding for position t
+            # 4. Generate one token at position t
+            # 5. Update the cache with the new token
+            # 6. Repeat for all positions
+            
+            # For now, implement inefficient version
+            output_logits = torch.empty((B, M, L, self.decoder_config.vocab_size), device=chain_memory.device)
+            output_sequences = torch.zeros((B, M, L), dtype=torch.long, device=chain_memory.device)
+            
+            for t in range(L):
+                # Use generated tokens up to position t-1
+                if t == 0:
+                    # First position: use only prompt + latent
+                    if K > 0:
+                        prompt_embeds = self.decoder.transformer.wte(prompt_sequences)  # [B, K, d_model]
+                        prompt_embeds = prompt_embeds.unsqueeze(1).expand(-1, M, -1, -1).reshape(B * M, K, d_model)
+                        input_embeds = torch.cat([prompt_embeds, chain_memory[:, t:t+1, :]], dim=1)  # [B*M, K+1, d_model]
+                        attn_mask = torch.ones(B * M, K+1, device=chain_memory.device)
+                    else:
+                        input_embeds = chain_memory[:, t:t+1, :]  # [B*M, 1, d_model]
+                        attn_mask = torch.ones(B * M, 1, device=chain_memory.device)
+                else:
+                    # Subsequent positions: use prompt + generated tokens + current latent
+                    if K > 0:
+                        prompt_embeds = self.decoder.transformer.wte(prompt_sequences)  # [B, K, d_model]
+                        prompt_embeds = prompt_embeds.unsqueeze(1).expand(-1, M, -1, -1).reshape(B * M, K, d_model)
+                        generated_embeds = self.decoder.transformer.wte(output_sequences[:, :, :t].reshape(B * M, t))  # [B*M, t, d_model]
+                        current_latent = chain_memory[:, t:t+1, :]  # [B*M, 1, d_model]
+                        input_embeds = torch.cat([prompt_embeds, generated_embeds, current_latent], dim=1)  # [B*M, K+t+1, d_model]
+                        attn_mask = torch.ones(B * M, K+t+1, device=chain_memory.device)
+                    else:
+                        generated_embeds = self.decoder.transformer.wte(output_sequences[:, :, :t].reshape(B * M, t))  # [B*M, t, d_model]
+                        current_latent = chain_memory[:, t:t+1, :]  # [B*M, 1, d_model]
+                        input_embeds = torch.cat([generated_embeds, current_latent], dim=1)  # [B*M, t+1, d_model]
+                        attn_mask = torch.ones(B * M, t+1, device=chain_memory.device)
+                
+                decoder_outputs = self.decoder(
+                    input_ids=None,
+                    inputs_embeds=input_embeds,
+                    attention_mask=attn_mask,
+                    encoder_hidden_states=None,
+                    encoder_attention_mask=None,
+                    use_cache=False,
+                    return_dict=True
+                )
+                
+                # Get logits for the last position (the current latent position)
+                current_logits = decoder_outputs.logits[:, -1, :]  # [B*M, vocab_size]
+                output_logits[:, :, t, :] = current_logits.view(B, M, -1)
+                
+                # Get the predicted token
+                predicted_tokens = torch.argmax(current_logits, dim=-1)  # [B*M]
+                output_sequences[:, :, t] = predicted_tokens.view(B, M)
+            
+            return output_logits
     
     def _decode_only_latent(self, chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
-                            ar_position, pad_token_id, use_caching):
+                            inference, pad_token_id, use_caching):
         # TODO: EFFICIENT GENERATION USING SPECIFIED ar_position TO BE IMPLEMENTED
         # TODO: EFFICIENT GENERATION USING CACHING ON THE PROMPTS
         # There is no choice to generate auto-regressively!
@@ -1300,41 +1425,102 @@ class GPT2VQVAE(nn.Module):
         _, L, _ = chain_memory.shape
         _, M, _ = cot_sequences.shape
 
-        # Prepare prompt embeddings [batch_size, K, d_model] -> [batch_size, M, K, d_model] -> [batch_size * M, K, d_model]
-        prompt_embeds = self.decoder.transformer.wte(prompt_sequences)  # [batch_size, K, d_model]
-        prompt_embeds = prompt_embeds.unsqueeze(1).expand(-1, M, -1, -1).reshape(B * M, K, -1)
-        # Concatenate prompt embeddings and latents
-        decoder_inputs_embeds = torch.cat([prompt_embeds, chain_memory], dim=1)  # [batch_size * M, K + L, d_model]
-        # Build attention mask if provided
-        if prompt_mask is not None:
-            prompt_mask_expanded = prompt_mask.unsqueeze(1).expand(-1, M, -1).reshape(B * M, K)
-        else:
-            prompt_mask_expanded = torch.ones(B * M, K, device=chain_memory.device)
-        if cot_mask is not None:
-            cot_mask_flat = cot_mask.view(B * M, L)
-        else:
-            cot_mask_flat = torch.ones(B * M, L, device=chain_memory.device)
-        attention_mask = torch.cat([prompt_mask_expanded, cot_mask_flat], dim=1)  # [batch_size * M, K + L]
-        # Run decoder with no cross-attention, using inputs_embeds
-        decoder_outputs = self.decoder(
-            input_ids=None,
-            inputs_embeds=decoder_inputs_embeds,
-            attention_mask=attention_mask,
-            encoder_hidden_states=None,
-            encoder_attention_mask=None,
-            use_cache=False,
-            return_dict=True
-        )
-        all_logits = decoder_outputs.logits  # [batch_size * M, K + L, vocab_size]
-        # Return only logits for the latent (COT) positions (after prompt)
-        cot_logits = all_logits[:, K:, :]  # [batch_size * M, L, vocab_size]
-        if ar_position is None:
+        if not inference:
+            # TEACHER-FORCING MODE
+            # Prepare prompt embeddings [batch_size, K, d_model] -> [batch_size, M, K, d_model] -> [batch_size * M, K, d_model]
+            prompt_embeds = self.decoder.transformer.wte(prompt_sequences)  # [batch_size, K, d_model]
+            prompt_embeds = prompt_embeds.unsqueeze(1).expand(-1, M, -1, -1).reshape(B * M, K, -1)
+            # Concatenate prompt embeddings and latents
+            decoder_inputs_embeds = torch.cat([prompt_embeds, chain_memory], dim=1)  # [batch_size * M, K + L, d_model]
+            # Build attention mask if provided
+            if prompt_mask is not None:
+                prompt_mask_expanded = prompt_mask.unsqueeze(1).expand(-1, M, -1).reshape(B * M, K)
+            else:
+                prompt_mask_expanded = torch.ones(B * M, K, device=chain_memory.device)
+            if cot_mask is not None:
+                cot_mask_flat = cot_mask.view(B * M, L)
+            else:
+                cot_mask_flat = torch.ones(B * M, L, device=chain_memory.device)
+            attention_mask = torch.cat([prompt_mask_expanded, cot_mask_flat], dim=1)  # [batch_size * M, K + L]
+            # Run decoder with no cross-attention, using inputs_embeds
+            decoder_outputs = self.decoder(
+                input_ids=None,
+                inputs_embeds=decoder_inputs_embeds,
+                attention_mask=attention_mask,
+                encoder_hidden_states=None,
+                encoder_attention_mask=None,
+                use_cache=False,
+                return_dict=True
+            )
+            all_logits = decoder_outputs.logits  # [batch_size * M, K + L, vocab_size]
+            # Return only logits for the latent (COT) positions (after prompt)
+            cot_logits = all_logits[:, K:, :]  # [batch_size * M, L, vocab_size]
             return cot_logits.view(B, M, L, -1)
+        
         else:
-            return cot_logits.view(B, M, L, -1)[:, :, ar_position, :]
+            # AUTO-REGRESSION MODE (INEFFICIENT IMPLEMENTATION)
+            # TODO: IMPLEMENT EFFICIENT AUTO-REGRESSION FOR ONLY_LATENT_DECODE
+            # High-level proposition for efficient auto-regression in only_latent_decode:
+            # 1. Pre-compute prompt cache once
+            # 2. For each position t, use the cached prompt + generated tokens up to t-1
+            # 3. Add the latent embedding for position t
+            # 4. Generate one token at position t
+            # 5. Update the cache with the new token
+            # 6. Repeat for all positions
+            
+            # For now, implement inefficient version
+            output_logits = torch.empty((B, M, L, self.decoder_config.vocab_size), device=chain_memory.device)
+            output_sequences = torch.zeros((B, M, L), dtype=torch.long, device=chain_memory.device)
+            
+            for t in range(L):
+                # Use generated tokens up to position t-1
+                if t == 0:
+                    # First position: use only prompt + latent
+                    if K > 0:
+                        prompt_embeds = self.decoder.transformer.wte(prompt_sequences)  # [B, K, d_model]
+                        prompt_embeds = prompt_embeds.unsqueeze(1).expand(-1, M, -1, -1).reshape(B * M, K, d_model)
+                        input_embeds = torch.cat([prompt_embeds, chain_memory[:, t:t+1, :]], dim=1)  # [B*M, K+1, d_model]
+                        attn_mask = torch.ones(B * M, K+1, device=chain_memory.device)
+                    else:
+                        input_embeds = chain_memory[:, t:t+1, :]  # [B*M, 1, d_model]
+                        attn_mask = torch.ones(B * M, 1, device=chain_memory.device)
+                else:
+                    # Subsequent positions: use prompt + generated tokens + current latent
+                    if K > 0:
+                        prompt_embeds = self.decoder.transformer.wte(prompt_sequences)  # [B, K, d_model]
+                        prompt_embeds = prompt_embeds.unsqueeze(1).expand(-1, M, -1, -1).reshape(B * M, K, d_model)
+                        generated_embeds = self.decoder.transformer.wte(output_sequences[:, :, :t].reshape(B * M, t))  # [B*M, t, d_model]
+                        current_latent = chain_memory[:, t:t+1, :]  # [B*M, 1, d_model]
+                        input_embeds = torch.cat([prompt_embeds, generated_embeds, current_latent], dim=1)  # [B*M, K+t+1, d_model]
+                        attn_mask = torch.ones(B * M, K+t+1, device=chain_memory.device)
+                    else:
+                        generated_embeds = self.decoder.transformer.wte(output_sequences[:, :, :t].reshape(B * M, t))  # [B*M, t, d_model]
+                        current_latent = chain_memory[:, t:t+1, :]  # [B*M, 1, d_model]
+                        input_embeds = torch.cat([generated_embeds, current_latent], dim=1)  # [B*M, t+1, d_model]
+                        attn_mask = torch.ones(B * M, t+1, device=chain_memory.device)
+                
+                decoder_outputs = self.decoder(
+                    input_ids=None,
+                    inputs_embeds=input_embeds,
+                    attention_mask=attn_mask,
+                    encoder_hidden_states=None,
+                    encoder_attention_mask=None,
+                    use_cache=False,
+                    return_dict=True
+                )
+                
+                # Get logits for the last position (the current latent position)
+                current_logits = decoder_outputs.logits[:, -1, :]  # [B*M, vocab_size]
+                output_logits[:, :, t, :] = current_logits.view(B, M, -1)
+                
+                # Get the predicted token
+                predicted_tokens = torch.argmax(current_logits, dim=-1)  # [B*M]
+                output_sequences[:, :, t] = predicted_tokens.view(B, M)
+            
+            return output_logits
     
     def _decode_normal(self, chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
-                       ar_position, pad_token_id, use_caching):
+                       inference, pad_token_id, use_caching):
         B, K = prompt_sequences.shape
         _, L, _ = chain_memory.shape
         _, M, _ = cot_sequences.shape
@@ -1342,107 +1528,168 @@ class GPT2VQVAE(nn.Module):
         # TODO: AUTO-REGRESSIVE GENERATION USING CACHING TO BE IMPLEMENTED
         # TODO: EFFICIENT AUTO-REGRESSIVE GENERATION USING SPECIFIED ar_position TO BE IMPLEMENTED
         
-        if use_caching:
-            # CACHING APPROACH: Pre-compute KV cache for prompt tokens except the last one
-            
-            # Step 1: Pre-compute KV cache for prompt tokens except the last one
-            prompt_cache = self._get_prompt_cache(self.decoder, prompt_sequences, prompt_mask, exclude_last_token=True, pad_token_id=pad_token_id)
-            
-            # Pad prompt cache M times using helper method
-            padded_cache = self._pad_kv_cache(prompt_cache, B, M)
-            
-            # Step 2: Pad the last prompt token M times and concatenate with COT sequences
-            # Prepare last prompt token (either from prompt or padding)
-            if K > 0:
-                last_prompt_token = prompt_sequences[:, K-1:K].unsqueeze(1).expand(-1, M, -1)  # [batch_size, M, 1]
+        if not inference:
+            # TEACHER-FORCING MODE
+            if use_caching:
+                # CACHING APPROACH: Pre-compute KV cache for prompt tokens except the last one
+                
+                # Step 1: Pre-compute KV cache for prompt tokens except the last one
+                prompt_cache = self._get_prompt_cache(self.decoder, prompt_sequences, prompt_mask, exclude_last_token=True, pad_token_id=pad_token_id)
+                
+                # Pad prompt cache M times using helper method
+                padded_cache = self._pad_kv_cache(prompt_cache, B, M)
+                
+                # Step 2: Pad the last prompt token M times and concatenate with COT sequences
+                # Prepare last prompt token (either from prompt or padding)
+                if K > 0:
+                    last_prompt_token = prompt_sequences[:, K-1:K].unsqueeze(1).expand(-1, M, -1)  # [batch_size, M, 1]
+                else:
+                    last_prompt_token = torch.full((B, M, 1), pad_token_id, 
+                                                dtype=torch.long, device=cot_sequences.device)  # [batch_size, M, 1]
+
+                # Concatenate sequences
+                combined_sequences = torch.cat([last_prompt_token, cot_sequences], dim=2)  # [batch_size, M, L+1]
+                combined_sequences_flat = combined_sequences.view(B * M, L + 1)  # [batch_size * M, L+1]
+                
+                # Step 3: Create combined mask using _create_combined_mask for full extent
+                if cot_mask is not None:
+                    cot_mask_flat = cot_mask.view(B * M, L)  # [batch_size * M, L]
+                else:
+                    cot_mask_flat = None
+                
+                # Use _create_combined_mask to get the full combined mask (K+L length)
+                full_combined_mask = self._create_combined_mask(prompt_mask, cot_mask_flat, B, M, K, L, cot_sequences.device)
+                
+                # Step 4: Create cross-attention mask for memory attention
+                # For each position i in the combined sequence, can attend to memory tokens 0 to i
+                cross_attention_mask = create_cross_attention_mask(L+1, L, chain_memory.device)
+                
+                # Expand to match batch and sequence dimensions for GPT2 
+                cross_attention_mask = cross_attention_mask.unsqueeze(0).unsqueeze(0).expand(
+                    B * M, -1, -1, -1) # [batch_size*M, 1, L+1, L]
+                
+                # Step 5: Compute all logits in one forward pass
+                decoder_outputs = self.decoder(
+                    input_ids=combined_sequences_flat,  # [batch_size * M, L+1]
+                    attention_mask=full_combined_mask,
+                    encoder_hidden_states=chain_memory,  # [batch_size * M, L, d_model]
+                    extra_cross_attention_mask=cross_attention_mask,  # [batch_size * M, 1, L+1, L]
+                    past_key_values=padded_cache,  # Use padded EncoderDecoderCache
+                    use_cache=False,
+                    return_dict=True
+                )
+                
+                # Get all logits
+                all_logits = decoder_outputs.logits  # [batch_size * M, L+1, vocab_size]
+                
+                # Extract only the COT logits (discard last position that predicts beyond COT length)
+                cot_logits = all_logits[:, :-1, :]  # [batch_size * M, L, vocab_size]
+                
             else:
-                last_prompt_token = torch.full((B, M, 1), pad_token_id, 
+                # Pad prompt sequences M times to match COT batch size
+                if K > 0:
+                    padded_prompt = prompt_sequences.unsqueeze(1).expand(-1, M, -1)  # [batch_size, M, K]
+                else:
+                    padded_prompt = torch.full((B, M, 1), pad_token_id, 
                                             dtype=torch.long, device=cot_sequences.device)  # [batch_size, M, 1]
 
-            # Concatenate sequences
-            combined_sequences = torch.cat([last_prompt_token, cot_sequences], dim=2)  # [batch_size, M, L+1]
-            combined_sequences_flat = combined_sequences.view(B * M, L + 1)  # [batch_size * M, L+1]
+                # Concatenate prompt and COT sequences
+                combined_sequences = torch.cat([padded_prompt, cot_sequences], dim=2)  # [batch_size, M, K + L]
+                combined_sequences_flat = combined_sequences.view(B * M, K + L)  # [batch_size * M, K + L]
+                
+                # Create combined attention mask using helper method
+                if cot_mask is not None:
+                    cot_mask_flat = cot_mask.view(B * M, L)  # [batch_size * M, L]
+                else:
+                    cot_mask_flat = None
+                
+                combined_mask = self._create_combined_mask(prompt_mask, cot_mask_flat, B, M, K, L, cot_sequences.device)
+                
+                # Create cross-attention mask for memory attention
+                cross_attention_mask = create_cross_attention_mask(K + L, L, chain_memory.device)
+                cross_attention_mask = cross_attention_mask.unsqueeze(0).unsqueeze(0).expand(
+                    B * M, -1, -1, -1) # [batch_size*M, 1, K+L, L]
+                
+                # Decode full sequence in one pass
+                decoder_outputs = self.decoder(
+                    input_ids=combined_sequences_flat,  # [batch_size * M, K + L]
+                    attention_mask=combined_mask,
+                    encoder_hidden_states=chain_memory,  # [batch_size * M, L, d_model]
+                    extra_cross_attention_mask=cross_attention_mask,  # [batch_size * M, 1, K+L, L]
+                    use_cache=False,  # No caching when gradient checkpointing is enabled
+                    return_dict=True
+                )
+                
+                # Get all logits
+                all_logits = decoder_outputs.logits  # [batch_size * M, K + L, vocab_size]
+                
+                # Extract only the COT logits (positions K-1 to K+L-2)
+                cot_logits = all_logits[:, K-1:-1, :]  # [batch_size * M, L, vocab_size]
             
-            # Step 3: Create combined mask using _create_combined_mask for full extent
-            if cot_mask is not None:
-                cot_mask_flat = cot_mask.view(B * M, L)  # [batch_size * M, L]
-            else:
-                cot_mask_flat = None
-            
-            # Use _create_combined_mask to get the full combined mask (K+L length)
-            full_combined_mask = self._create_combined_mask(prompt_mask, cot_mask_flat, B, M, K, L, cot_sequences.device)
-            
-            # Step 4: Create cross-attention mask for memory attention
-            # For each position i in the combined sequence, can attend to memory tokens 0 to i
-            cross_attention_mask = create_cross_attention_mask(L+1, L, chain_memory.device)
-            
-            # Expand to match batch and sequence dimensions for GPT2 
-            cross_attention_mask = cross_attention_mask.unsqueeze(0).unsqueeze(0).expand(
-                B * M, -1, -1, -1) # [batch_size*M, 1, L+1, L]
-            
-            # Step 5: Compute all logits in one forward pass
-            decoder_outputs = self.decoder(
-                input_ids=combined_sequences_flat,  # [batch_size * M, L+1]
-                attention_mask=full_combined_mask,
-                encoder_hidden_states=chain_memory,  # [batch_size * M, L, d_model]
-                extra_cross_attention_mask=cross_attention_mask,  # [batch_size * M, 1, L+1, L]
-                past_key_values=padded_cache,  # Use padded EncoderDecoderCache
-                use_cache=False,
-                return_dict=True
-            )
-            
-            # Get all logits
-            all_logits = decoder_outputs.logits  # [batch_size * M, L+1, vocab_size]
-            
-            # Extract only the COT logits (discard last position that predicts beyond COT length)
-            cot_logits = all_logits[:, :-1, :]  # [batch_size * M, L, vocab_size]
-            
-        else:
-            # Pad prompt sequences M times to match COT batch size
-            if K > 0:
-                padded_prompt = prompt_sequences.unsqueeze(1).expand(-1, M, -1)  # [batch_size, M, K]
-            else:
-                padded_prompt = torch.full((B, M, 1), pad_token_id, 
-                                        dtype=torch.long, device=cot_sequences.device)  # [batch_size, M, 1]
-
-            # Concatenate prompt and COT sequences
-            combined_sequences = torch.cat([padded_prompt, cot_sequences], dim=2)  # [batch_size, M, K + L]
-            combined_sequences_flat = combined_sequences.view(B * M, K + L)  # [batch_size * M, K + L]
-            
-            # Create combined attention mask using helper method
-            if cot_mask is not None:
-                cot_mask_flat = cot_mask.view(B * M, L)  # [batch_size * M, L]
-            else:
-                cot_mask_flat = None
-            
-            combined_mask = self._create_combined_mask(prompt_mask, cot_mask_flat, B, M, K, L, cot_sequences.device)
-            
-            # Create cross-attention mask for memory attention
-            cross_attention_mask = create_cross_attention_mask(K + L, L, chain_memory.device)
-            cross_attention_mask = cross_attention_mask.unsqueeze(0).unsqueeze(0).expand(
-                B * M, -1, -1, -1) # [batch_size*M, 1, K+L, L]
-            
-            # Decode full sequence in one pass
-            decoder_outputs = self.decoder(
-                input_ids=combined_sequences_flat,  # [batch_size * M, K + L]
-                attention_mask=combined_mask,
-                encoder_hidden_states=chain_memory,  # [batch_size * M, L, d_model]
-                extra_cross_attention_mask=cross_attention_mask,  # [batch_size * M, 1, K+L, L]
-                use_cache=False,  # No caching when gradient checkpointing is enabled
-                return_dict=True
-            )
-            
-            # Get all logits
-            all_logits = decoder_outputs.logits  # [batch_size * M, K + L, vocab_size]
-            
-            # Extract only the COT logits (positions K-1 to K+L-2)
-            cot_logits = all_logits[:, K-1:-1, :]  # [batch_size * M, L, vocab_size]
-        
-        # COMMON PROCESSING: Reshape back to [batch_size, M, L, vocab_size]
-        if ar_position is None:
+            # COMMON PROCESSING: Reshape back to [batch_size, M, L, vocab_size]
             return cot_logits.view(B, M, L, -1)
+        
         else:
-            return cot_logits.view(B, M, L, -1)[:, :, ar_position, :]
+            # AUTO-REGRESSION MODE (INEFFICIENT IMPLEMENTATION)
+            # TODO: IMPLEMENT EFFICIENT AUTO-REGRESSION FOR NORMAL_DECODE
+            # High-level proposition for efficient auto-regression in normal_decode:
+            # 1. Pre-compute prompt cache once
+            # 2. For each position t, use the cached prompt + generated tokens up to t-1
+            # 3. Add the latent embedding for position t
+            # 4. Generate one token at position t
+            # 5. Update the cache with the new token
+            # 6. Repeat for all positions
+            
+            # For now, implement inefficient version
+            output_logits = torch.empty((B, M, L, self.decoder_config.vocab_size), device=chain_memory.device)
+            output_sequences = torch.zeros((B, M, L), dtype=torch.long, device=chain_memory.device)
+            
+            for t in range(L):
+                # Use generated tokens up to position t-1
+                if t == 0:
+                    # First position: use only prompt + latent
+                    if K > 0:
+                        prompt_embeds = self.decoder.transformer.wte(prompt_sequences)  # [B, K, d_model]
+                        prompt_embeds = prompt_embeds.unsqueeze(1).expand(-1, M, -1, -1).reshape(B * M, K, d_model)
+                        input_embeds = torch.cat([prompt_embeds, chain_memory[:, t:t+1, :]], dim=1)  # [B*M, K+1, d_model]
+                        attn_mask = torch.ones(B * M, K+1, device=chain_memory.device)
+                    else:
+                        input_embeds = chain_memory[:, t:t+1, :]  # [B*M, 1, d_model]
+                        attn_mask = torch.ones(B * M, 1, device=chain_memory.device)
+                else:
+                    # Subsequent positions: use prompt + generated tokens + current latent
+                    if K > 0:
+                        prompt_embeds = self.decoder.transformer.wte(prompt_sequences)  # [B, K, d_model]
+                        prompt_embeds = prompt_embeds.unsqueeze(1).expand(-1, M, -1, -1).reshape(B * M, K, d_model)
+                        generated_embeds = self.decoder.transformer.wte(output_sequences[:, :, :t].reshape(B * M, t))  # [B*M, t, d_model]
+                        current_latent = chain_memory[:, t:t+1, :]  # [B*M, 1, d_model]
+                        input_embeds = torch.cat([prompt_embeds, generated_embeds, current_latent], dim=1)  # [B*M, K+t+1, d_model]
+                        attn_mask = torch.ones(B * M, K+t+1, device=chain_memory.device)
+                    else:
+                        generated_embeds = self.decoder.transformer.wte(output_sequences[:, :, :t].reshape(B * M, t))  # [B*M, t, d_model]
+                        current_latent = chain_memory[:, t:t+1, :]  # [B*M, 1, d_model]
+                        input_embeds = torch.cat([generated_embeds, current_latent], dim=1)  # [B*M, t+1, d_model]
+                        attn_mask = torch.ones(B * M, t+1, device=chain_memory.device)
+                
+                decoder_outputs = self.decoder(
+                    input_ids=None,
+                    inputs_embeds=input_embeds,
+                    attention_mask=attn_mask,
+                    encoder_hidden_states=None,
+                    encoder_attention_mask=None,
+                    use_cache=False,
+                    return_dict=True
+                )
+                
+                # Get logits for the last position (the current latent position)
+                current_logits = decoder_outputs.logits[:, -1, :]  # [B*M, vocab_size]
+                output_logits[:, :, t, :] = current_logits.view(B, M, -1)
+                
+                # Get the predicted token
+                predicted_tokens = torch.argmax(current_logits, dim=-1)  # [B*M]
+                output_sequences[:, :, t] = predicted_tokens.view(B, M)
+            
+            return output_logits
 
     def forward(self, prompt, cot_sequences, cot_mask=None, prompt_mask=None, inference=False, quantize_cot_only=True, pad_token_id=50256, no_vq=False):
         """
@@ -1486,26 +1733,10 @@ class GPT2VQVAE(nn.Module):
         else:                          # if False: [batch_size, K+L, M, d_model] (all positions)
             cot_quantized = quantized[:, K:, :, :]
         
-        if not inference or self.only_latent_decode:
-            # Decode in a single call; if not 'inference', or anytime only_latent_decode is true
-            output_logits = self.decode(cot_quantized, prompt, cot_sequences, prompt_mask, cot_mask, 
-                                        ar_position=None, pad_token_id=pad_token_id) # [batch_size, M, L, vocab_size]
-            output_sequences = torch.argmax(output_logits, dim=-1)
-        else:
-            # Initialize tensor to store generation results and logits
-            output_logits = torch.empty((batch_size, M, L, self.decoder_config.vocab_size), device=cot_sequences.device)
-        
-            # TODO IF I FIND THE TIME : USE KV-CACHING TO SPEED UP AUTO-REGRESSIVE GENERATION
-            # TODO IMPLEMENT LOGIC THAT PASSES SHORTER SEQUENCES AT EACH ITERATION TO SAVE COMPUTATION 
-            #      (CURRENTLY PASSES A FULL SEQUENCE OF LENGTH L AND ASKS TO COMPUTE ON IT)
-            # During inference, generate sequence auto-regressively
-            output_sequences = torch.zeros_like(cot_sequences).to(device=cot_sequences.device)
-            for t in range(L):
-                current_output = self.decode(cot_quantized, prompt, output_sequences, prompt_mask, cot_mask, 
-                                             ar_position=t, pad_token_id=pad_token_id)
-                # Get next token predictions
-                output_logits[:, :, t, :] = current_output  # [batch_size, M, L, vocab_size]
-                output_sequences[:, :, t] = torch.argmax(current_output, dim=-1)  # [batch_size, M, L]
+        # Decode using the updated decode function that handles both teacher-forcing and auto-regression
+        output_logits = self.decode(cot_quantized, prompt, cot_sequences, prompt_mask, cot_mask, 
+                                    inference=inference, pad_token_id=pad_token_id) # [batch_size, M, L, vocab_size]
+        output_sequences = torch.argmax(output_logits, dim=-1)
         
         return output_sequences, output_logits, vq_loss, perplexity, indices, debug_stats
 
