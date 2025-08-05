@@ -2,9 +2,13 @@
 # Created: 2025/06/19
 # Last Updated: 2025/06/23
 
+import gc
 import heapq
 import os
 import sys
+import time
+import matplotlib.pyplot as plt
+import numpy as np
 
 import torch
 import torch.nn.functional as F
@@ -15,10 +19,12 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from latent_visualization_analysis import LatentVisualizationAnalyzer
 from trainer.train_utils import compute_reconstruction_loss, create_codebook_usage_heatmap, load_training_data
+from trainer.gpt2_vqvae_trainer import GPUMemoryMonitor
 from vqvae_gpt2 import GPT2VQVAE
 from vqvae_gpt2_simple import SimpleGPT2VQVAE
 from vqvae_gpt2_with_enhancement import EnhancedGPT2VQVAE
 
+TRACK_BATCH_MEMORY_USE = False
 
 def visualize_token_latent_alignment(original_token_ids, latent_indices, reconstructed_token_ids, tokenizer, 
                                    mode_name="", max_tokens_per_line=20):
@@ -166,7 +172,6 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
         tf_mean_per_example_accs = []
         ar_mean_per_example_accs = []
         for i in range(min(num_examples, len(prompt_sequences))):
-            print(f"\n--- Example {i+1} ---")
             prompt = prompt_sequences[i:i+1].to(device)  # [1, K]
             cot_gt = cot_sequences[i:i+1].to(device)     # [1, M, L]
             prompt_mask_ex = prompt_mask[i:i+1].to(device) if prompt_mask is not None else None
@@ -181,7 +186,6 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                 except Exception as e:
                     return f"[Decode error: {e}, tokens: {tokens.tolist()}]"
             prompt_text = decode_tokens(prompt[0], prompt_mask_ex[0] if prompt_mask_ex is not None else None)
-            print(f"Prompt: {prompt_text}")
             # Teacher forcing
             try:
                 model_inputs = {
@@ -230,107 +234,59 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                 vq_loss_ar = None
                 perplexity_ar = None
                 indices_ar = None
-            print(f"\n{'='*120}")
-            print(f"SIDE-BY-SIDE COMPARISON FOR EXAMPLE {i+1}")
-            print(f"{'='*120}")
-            if vq_loss_tf is not None and perplexity_tf is not None:
-                print(f"Teacher Forcing - VQ Loss: {vq_loss_tf.item():.4f}, Perplexity: {perplexity_tf.item():.2f}")
-                if indices_tf is not None:
-                    unique_indices = torch.unique(indices_tf).numel()
-                    print(f"  Codebook usage: {unique_indices} unique indices out of {indices_tf.numel()} total")
-                if output_logits_tf is not None and cot_gt is not None and cot_mask_ex is not None:
-                    recon_loss_tf = compute_reconstruction_loss(output_logits_tf, cot_gt, cot_mask_ex)
-                    print(f"  Reconstruction Loss: {recon_loss_tf.item():.4f}")
-            if vq_loss_ar is not None and perplexity_ar is not None:
-                print(f"Auto-regressive - VQ Loss: {vq_loss_ar.item():.4f}, Perplexity: {perplexity_ar.item():.2f}")
-                if indices_ar is not None:
-                    unique_indices = torch.unique(indices_ar).numel()
-                    print(f"  Codebook usage: {unique_indices} unique indices out of {indices_ar.numel()} total")
-                if output_logits_ar is not None and cot_gt is not None and cot_mask_ex is not None:
-                    recon_loss_ar = compute_reconstruction_loss(output_logits_ar, cot_gt, cot_mask_ex)
-                    print(f"  Reconstruction Loss: {recon_loss_ar.item():.4f}")
-            # Compute and print reconstruction accuracies for all CoTs and examples
+            # Prepare texts for printing
+            cot_gt_texts = []
+            cot_tf_texts = []
+            cot_ar_texts = []
+            
+            for j in range(num_thoughts):
+                cot_gt_texts.append(decode_tokens(cot_gt[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None))
+                if predicted_tokens_tf is not None:
+                    cot_tf_texts.append(decode_tokens(predicted_tokens_tf[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None))
+                else:
+                    cot_tf_texts.append("FAILED")
+                if output_sequences_ar is not None:
+                    cot_ar_texts.append(decode_tokens(output_sequences_ar[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None))
+                else:
+                    cot_ar_texts.append("FAILED")
+            
+            # Compute metrics
+            tf_metrics = None
+            ar_metrics = None
+            recon_loss_tf = None
+            recon_loss_ar = None
+            
             if predicted_tokens_tf is not None and output_logits_tf is not None:
                 tf_metrics = compute_cot_reconstruction_metrics(cot_gt, output_logits_tf, cot_mask_ex)
-                tf_token_acc = tf_metrics['token_level_accuracies'][0]
-                tf_seq_accs = tf_metrics['sequence_level_accuracies']
-                print(f"\n[Teacher-forced] Token-level accuracy (per CoT, per example):")
-                print(" | ".join(
-                    [f"CoT {i}: {tf_token_acc[i].item():.4f}" for i in range(tf_token_acc.size(0))]
-                    ))
-                print(f"[Teacher-forced] Sequence-level accuracy (thresholds):")
-                for thresh, count in tf_seq_accs.items():
-                    print(f"  Threshold {int(thresh*100)}%: {int(count)} sequences correct")
-                mean_per_example_tf = tf_token_acc.mean().item() 
-                print(f"[Teacher-forced] Mean token-level accuracy per example:")
-                print(f"{mean_per_example_tf:.4f}")
-                tf_mean_per_example_accs.append(mean_per_example_tf)
-                print(f"[Teacher-forced] Perplexity (per CoT, per example):")
-                tf_ppl = tf_metrics['perplexities'][0]
-                print(" | ".join([f"CoT {i}: {tf_ppl[i]:.4f}" for i in range(tf_ppl.size(0))]))
+                tf_mean_per_example_accs.append(tf_metrics['token_level_accuracies'][0].mean().item())
+                if output_logits_tf is not None and cot_gt is not None and cot_mask_ex is not None:
+                    recon_loss_tf = compute_reconstruction_loss(output_logits_tf, cot_gt, cot_mask_ex)
                 
             if output_sequences_ar is not None and output_logits_ar is not None:
                 ar_metrics = compute_cot_reconstruction_metrics(cot_gt, output_logits_ar, cot_mask_ex)
-                ar_token_acc = ar_metrics['token_level_accuracies'][0]
-                ar_seq_accs = ar_metrics['sequence_level_accuracies']
-                print(f"\n[Auto-regressive] Token-level accuracy (per CoT, per example):")
-                print(" | ".join(
-                    [f"CoT {i}: {ar_token_acc[i].item():.4f}" for i in range(ar_token_acc.size(0))]
-                    ))
-                print(f"[Auto-regressive] Sequence-level accuracy (thresholds):")
-                for thresh, count in ar_seq_accs.items():
-                    print(f"  Threshold {int(thresh*100)}%: {int(count)} sequences correct")
-                mean_per_example_ar = ar_token_acc.mean().item()
-                print(f"[Auto-regressive] Mean token-level accuracy per example:")
-                print(f"{mean_per_example_ar:.4f}")
-                ar_mean_per_example_accs.append(mean_per_example_ar)
-                print(f"[Auto-regressive] Perplexity (per CoT, per example):")
-                ar_ppl = ar_metrics['perplexities'][0]
-                print(" | ".join([f"CoT {i}: {ar_ppl[i]:.4f}" for i in range(ar_ppl.size(0))]))
-
-            def chunk_text(text, chunk_size=20):
-                if not text:
-                    return []
-                lines = text.split('\n')
-                chunks = []
-                for line in lines:
-                    line = line.strip()
-                    if not line: continue
-                    words = line.split()
-                    for i in range(0, len(words), chunk_size):
-                        chunk = ' '.join(words[i:i + chunk_size])
-                        if chunk:
-                            chunks.append(chunk)
-                return chunks
-            for j in range(num_thoughts):
-                print(f"\n--- CoT {j+1} ---")
-                cot_gt_text = decode_tokens(cot_gt[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)
-                if predicted_tokens_tf is not None:
-                    cot_tf_text = decode_tokens(predicted_tokens_tf[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)
-                else:
-                    cot_tf_text = "FAILED"
-                if output_sequences_ar is not None:
-                    cot_ar_text = decode_tokens(output_sequences_ar[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)
-                else:
-                    cot_ar_text = "FAILED"
-                gt_chunks = chunk_text(cot_gt_text)
-                tf_chunks = chunk_text(cot_tf_text)
-                ar_chunks = chunk_text(cot_ar_text)
-                max_chunks = max(len(gt_chunks), len(tf_chunks), len(ar_chunks))
-                for chunk_idx in range(max_chunks):
-                    gt_chunk = gt_chunks[chunk_idx] if chunk_idx < len(gt_chunks) else ""
-                    tf_chunk = tf_chunks[chunk_idx] if chunk_idx < len(tf_chunks) else ""
-                    ar_chunk = ar_chunks[chunk_idx] if chunk_idx < len(ar_chunks) else ""
-                    max_length = max(len(gt_chunk), len(tf_chunk), len(ar_chunk))
-                    gt_chunk_padded = gt_chunk.ljust(max_length)
-                    tf_chunk_padded = tf_chunk.ljust(max_length)
-                    ar_chunk_padded = ar_chunk.ljust(max_length)
-                    print(f"Original:        {gt_chunk_padded}")
-                    print(f"Teacher Forced:  {tf_chunk_padded}")
-                    print(f"Auto-regressive: {ar_chunk_padded}")
-                    if chunk_idx < max_chunks - 1:
-                        print("-" * 60)
-            print("\n" + "="*120)
+                ar_mean_per_example_accs.append(ar_metrics['token_level_accuracies'][0].mean().item())
+                if output_logits_ar is not None and cot_gt is not None and cot_mask_ex is not None:
+                    recon_loss_ar = compute_reconstruction_loss(output_logits_ar, cot_gt, cot_mask_ex)
+            
+            # Print results using the helper function
+            print_demonstration_results(
+                example_num=i+1,
+                prompt_text=prompt_text,
+                cot_gt_texts=cot_gt_texts,
+                cot_tf_texts=cot_tf_texts,
+                cot_ar_texts=cot_ar_texts,
+                tf_metrics=tf_metrics,
+                ar_metrics=ar_metrics,
+                tf_indices=indices_tf,
+                ar_indices=indices_ar,
+                vq_loss_tf=vq_loss_tf,
+                perplexity_tf=perplexity_tf,
+                vq_loss_ar=vq_loss_ar,
+                perplexity_ar=perplexity_ar,
+                recon_loss_tf=recon_loss_tf,
+                recon_loss_ar=recon_loss_ar,
+                num_thoughts=num_thoughts
+            )
             # Add latent visualization if available and for the first example
             if tokenizer is not None and do_figure_analyses:
                 try:
@@ -705,6 +661,84 @@ def compute_dataset_reconstruction_metrics_with_examples(
     device = next(model.parameters()).device
     model.eval()
     
+    # Initialize GPU memory monitoring
+    gpu_monitor = GPUMemoryMonitor(device_id=device.index if device.type == 'cuda' else None)
+    memory_usage_data = []
+    start_time = time.time()
+    
+    def log_memory_point(stage: str, batch_idx: int = None):
+        """Log memory usage at a specific point"""
+        timestamp = time.time() - start_time
+        mem_info = gpu_monitor.log_memory_usage(stage, print_info=False)
+        memory_usage_data.append({
+            'timestamp': timestamp,
+            'stage': stage,
+            'batch_idx': batch_idx,
+            'used_gb': mem_info['used_gb'],
+            'free_gb': mem_info['free_gb'],
+            'total_gb': mem_info['total_gb'],
+            'utilization_percent': mem_info['utilization_percent']
+        })
+    
+    def plot_memory_usage():
+        """Plot GPU memory usage over time"""
+        if not memory_usage_data:
+            print("No memory usage data to plot.")
+            return
+        
+        try:
+            # timestamps = [data['timestamp'] for data in memory_usage_data]
+            used_gb = [data['used_gb'] for data in memory_usage_data]
+            utilization = [data['utilization_percent'] for data in memory_usage_data]
+            stages = [data['stage'] for data in memory_usage_data]
+            
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
+            
+            # Plot memory usage in GB
+            ax1.plot(range(len(stages)), used_gb, 'b-', label='Used Memory (GB)', linewidth=2)
+            ax1.set_ylabel('Memory (GB)')
+            ax1.set_title('GPU Memory Usage Over Time')
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+            ax1.set_xticks(range(len(stages)))
+            ax1.set_xticklabels(stages, rotation=45, ha='right')    
+            
+            # Plot utilization percentage
+            ax2.plot(range(len(stages)), utilization, 'r-', label='Utilization (%)', linewidth=2)
+            ax2.set_xlabel('Time (seconds)')
+            ax2.set_ylabel('Utilization (%)')
+            ax2.set_title('GPU Memory Utilization')
+            ax2.legend()
+            ax2.grid(True, alpha=0.3)
+            ax2.set_xticks(range(len(stages)))
+            ax2.set_xticklabels(stages, rotation=45, ha='right')
+            
+            plt.tight_layout()
+            savepath = "gpu_memory_usage.png"
+            while os.path.exists(savepath):
+                savepath = savepath.replace(".png", "D.png")
+            plt.savefig(savepath)
+            plt.close(fig)
+            
+            # Print summary statistics
+            print(f"\n{'='*60}")
+            print("GPU MEMORY USAGE SUMMARY")
+            print(f"{'='*60}")
+            print(f"Peak memory usage: {max(used_gb):.2f} GB")
+            print(f"Average memory usage: {sum(used_gb)/len(used_gb):.2f} GB")
+            print(f"Peak utilization: {max(utilization):.1f}%")
+            print(f"Average utilization: {sum(utilization)/len(utilization):.1f}%")
+            print(f"Number of memory measurements: {len(memory_usage_data)}")
+            print(f"{'='*60}")
+            
+        except Exception as e:
+            print(f"Error plotting memory usage: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # Log initial memory state
+    log_memory_point("function_start")
+    
     total_samples = len(prompt_sequences)
     num_batches = (total_samples + batch_size - 1) // batch_size
     
@@ -715,39 +749,45 @@ def compute_dataset_reconstruction_metrics_with_examples(
     total_sequences = 0
     
     # For sequence-level accuracies, we need to track all individual accuracies
-    all_token_accuracies = []
+    sequence_level_accuracies = {}
+    thresholds = [1.0, 0.95, 0.9, 0.8, 0.7]
     
-    # Track best and worst examples using heaps
-    best_loss_heap = []  # Max heap for lowest loss (negate values)
-    worst_loss_heap = []  # Min heap for highest loss
-    best_perplexity_heap = []  # Max heap for lowest perplexity (negate values)
-    worst_perplexity_heap = []  # Min heap for highest perplexity
+    # Track best and worst examples using lists
+    best_loss_list = []  # List for lowest loss (low to high)
+    worst_loss_list = []  # List for highest loss (high to low)
+    best_perplexity_list = []  # List for lowest perplexity (low to high)
+    worst_perplexity_list = []  # List for highest perplexity (high to low)
     
     print(f"Computing dataset reconstruction metrics over {total_samples} samples in {num_batches} batches...")
     
-    def update_heap(heap, new_example, k, is_max_heap=False):
-        """Update a heap to maintain top k examples"""
-        # Create a tuple with the key for comparison and the example data
-        if 'avg_loss' in new_example:
-            key = new_example['avg_loss']
-        else:
-            key = new_example['avg_perplexity']
+    def update_tracked_list(tracked_list, precopy_example, k, is_best, use_loss):
+        """Update a tracked list to maintain top k examples efficiently"""
+        # Determine the key for comparison
+        key = precopy_example['avg_loss'] if use_loss else precopy_example['avg_perplexity']
         
-        # For max heap (best cases), negate the key to simulate max heap behavior
-        if is_max_heap:
-            key = -key
+        # Check if we should insert this new example
+        worst_key = tracked_list[-1][0] if len(tracked_list) > 0 else None
+        # For loss & perplexity, the lower the better!
+        if len(tracked_list) < k or (is_best and key < worst_key) or (not is_best and key > worst_key):
+            copy_example = dict([(k, (v.clone() if type(v) == torch.Tensor else v)) 
+                                 for (k, v) in precopy_example.items()])
+
+            if len(tracked_list) >= k:
+                _, deleted = tracked_list.pop()
+                for v in deleted.values(): del v
+                del deleted
+                        
+            tracked_list.append((key, copy_example))
+            tracked_list.sort(key=lambda x: x[0], reverse=not is_best)
         
-        # Push the new example onto the heap
-        heapq.heappush(heap, (key, new_example))
-        
-        # If heap exceeds k elements, remove the worst one
-        if len(heap) > k:
-            heapq.heappop(heap)
-        
-        return heap
+        return tracked_list
     
     with torch.no_grad():
         for batch_idx in tqdm.tqdm(range(num_batches)):
+            # Log memory before each batch
+            if TRACK_BATCH_MEMORY_USE:
+                log_memory_point(f"batch_{batch_idx}_start", batch_idx)
+            
             start_idx = batch_idx * batch_size
             end_idx = min(start_idx + batch_size, total_samples)
             
@@ -757,111 +797,135 @@ def compute_dataset_reconstruction_metrics_with_examples(
             batch_prompt_mask = prompt_mask[start_idx:end_idx].to(device) if prompt_mask is not None else None
             batch_cot_mask = cot_mask[start_idx:end_idx].to(device) if cot_mask is not None else None
             
+            # Log memory after data loading
+            if TRACK_BATCH_MEMORY_USE:
+                log_memory_point(f"batch_{batch_idx}_data_loaded", batch_idx)
+            
             # Forward pass (teacher forcing)
-            try:
-                model_inputs = {
-                    'prompt': batch_prompts,
-                    'cot_sequences': batch_cots,
-                    'cot_mask': batch_cot_mask,
-                    'prompt_mask': batch_prompt_mask,
-                    'inference': False,  # Teacher forcing
-                    'quantize_cot_only': True
-                }
-                if hasattr(model, 'use_vq'):
-                    model_inputs['use_vq'] = use_vq
-                else:
-                    model_inputs['no_vq'] = not use_vq
-                
-                _, output_logits, _, _, _, _ = model(**model_inputs)
-                
-                # Compute metrics for this batch
-                batch_metrics = compute_cot_reconstruction_metrics(
-                    batch_cots, output_logits, batch_cot_mask
-                )
-                
-                # Accumulate metrics
-                batch_size_actual = batch_cots.size(0)
-                total_sequences += batch_size_actual * batch_cots.size(1)  # batch_size * num_thoughts
-                
-                # Average over batch and num_thoughts dimensions
-                total_reconstruction_loss += batch_metrics['reconstruction_losses'].mean().item() * batch_size_actual
-                total_token_accuracy += batch_metrics['token_level_accuracies'].mean().item() * batch_size_actual
-                total_perplexity += batch_metrics['perplexities'].mean().item() * batch_size_actual
-                
-                # Store token accuracies for sequence-level computation
-                all_token_accuracies.append(batch_metrics['token_level_accuracies'].flatten())
-                
-                if k is not None:
-                    # Track examples (multiple CoTs) with their average metrics
-                    for i in range(batch_size_actual):
-                        example_idx = start_idx + i
-                        
-                        # Compute average metrics across all CoTs for this example
-                        avg_loss = batch_metrics['reconstruction_losses'][i].mean().item()
-                        avg_perplexity = batch_metrics['perplexities'][i].mean().item()
-                        
-                        # Get original prompt and all cots for this example
-                        prompt = batch_prompts[i]
-                        cots = batch_cots[i]  # [num_thoughts, seq_len]
-                        prompt_mask_ex = batch_prompt_mask[i] if batch_prompt_mask is not None else None
-                        cot_mask_ex = batch_cot_mask[i] if batch_cot_mask is not None else None  # [num_thoughts, seq_len]
-                        
-                        example_data = {
-                            'example_idx': example_idx,
-                            'avg_loss': avg_loss,
-                            'avg_perplexity': avg_perplexity,
-                            'prompt': prompt,
-                            'cots': cots,
-                            'prompt_mask': prompt_mask_ex,
-                            'cot_mask': cot_mask_ex,
-                            'individual_losses': batch_metrics['reconstruction_losses'][i].tolist(),
-                            'individual_perplexities': batch_metrics['perplexities'][i].tolist()
-                        }
-                        
-                        # Update heaps for best/worst examples
-                        best_loss_heap = update_heap(best_loss_heap, example_data, k, is_max_heap=True)
-                        worst_loss_heap = update_heap(worst_loss_heap, example_data, k, is_max_heap=False)
-                        best_perplexity_heap = update_heap(best_perplexity_heap, example_data, k, is_max_heap=True)
-                        worst_perplexity_heap = update_heap(worst_perplexity_heap, example_data, k, is_max_heap=False)
-                
-                if (batch_idx + 1) % 10 == 0:
-                    print(f"Processed {batch_idx + 1}/{num_batches} batches...")
+            model_inputs = {
+                'prompt': batch_prompts,
+                'cot_sequences': batch_cots,
+                'cot_mask': batch_cot_mask,
+                'prompt_mask': batch_prompt_mask,
+                'inference': False,  # Teacher forcing
+                'quantize_cot_only': True
+            }
+            if hasattr(model, 'use_vq'):
+                model_inputs['use_vq'] = use_vq
+            else:
+                model_inputs['no_vq'] = not use_vq
+            
+            if TRACK_BATCH_MEMORY_USE:
+                log_memory_point(f"batch_{batch_idx}_after_input_ready", batch_idx)
+            
+            _, output_logits, _, _, _, _ = model(**model_inputs)
+
+            for v in model_inputs.values(): del v
+            del model_inputs
+            
+            # Log memory after forward pass
+            if TRACK_BATCH_MEMORY_USE:
+                log_memory_point(f"batch_{batch_idx}_forward_pass", batch_idx)
+            
+            # Compute metrics for this batch
+            batch_metrics = compute_cot_reconstruction_metrics(
+                batch_cots, output_logits, batch_cot_mask
+            )
+            
+            # Log memory after metrics computation
+            if TRACK_BATCH_MEMORY_USE:
+                log_memory_point(f"batch_{batch_idx}_metrics_computed", batch_idx)
+            
+            # Accumulate metrics
+            batch_size_actual = batch_cots.size(0)
+            total_sequences += batch_size_actual * batch_cots.size(1)  # batch_size * num_thoughts
+            
+            # Average over batch and num_thoughts dimensions
+            total_reconstruction_loss += batch_metrics['reconstruction_losses'].mean().item() * batch_size_actual
+            total_token_accuracy += batch_metrics['token_level_accuracies'].mean().item() * batch_size_actual
+            total_perplexity += batch_metrics['perplexities'].mean().item() * batch_size_actual
+            
+            # Compute and store sequence-level accuracies
+            token_accuracies = batch_metrics['token_level_accuracies'].flatten()
+            for thresh in thresholds:
+                sequence_level_accuracies[thresh] = (token_accuracies >= thresh).sum().item()
+            del token_accuracies
+            
+            if k is not None:
+                # Track examples (multiple CoTs) with their average metrics
+                for i in range(batch_size_actual):
+                    example_idx = start_idx + i
                     
-            except Exception as e:
-                print(f"Error processing batch {batch_idx}: {e}")
-                continue
+                    # Compute average metrics across all CoTs for this example
+                    avg_loss = batch_metrics['reconstruction_losses'][i].mean().item()
+                    avg_perplexity = batch_metrics['perplexities'][i].mean().item()
+                    
+                    # Get original prompt and all cots for this example
+                    prompt = batch_prompts[i]
+                    cots = batch_cots[i]  # [num_thoughts, seq_len]
+                    recon_logits = output_logits[i] # [num_thoughts, seq_len]
+                    prompt_mask_ex = batch_prompt_mask[i] if batch_prompt_mask is not None else None
+                    cot_mask_ex = batch_cot_mask[i] if batch_cot_mask is not None else None  # [num_thoughts, seq_len]
+                    
+                    example_data_precopy = { # torch.tensor or int
+                        'example_idx': example_idx,
+                        'avg_loss': avg_loss,
+                        'avg_perplexity': avg_perplexity,
+                        'prompt': prompt,
+                        'cots': cots,
+                        'recon_logits' : recon_logits,
+                        'prompt_mask': prompt_mask_ex,
+                        'cot_mask': cot_mask_ex,
+                        'individual_losses': batch_metrics['reconstruction_losses'][i],
+                        'individual_perplexities': batch_metrics['perplexities'][i],
+                        'individual_token_accuracies': batch_metrics['token_level_accuracies'][i]
+                    }
+                    
+                    # Update tracked lists for best/worst examples
+                    best_loss_list        = update_tracked_list(best_loss_list,        example_data_precopy, k, is_best=True,  use_loss=True)
+                    worst_loss_list       = update_tracked_list(worst_loss_list,       example_data_precopy, k, is_best=False, use_loss=True)
+                    best_perplexity_list  = update_tracked_list(best_perplexity_list,  example_data_precopy, k, is_best=True,  use_loss=False)
+                    worst_perplexity_list = update_tracked_list(worst_perplexity_list, example_data_precopy, k, is_best=False, use_loss=False)
+
+                    del prompt, cots, recon_logits, prompt_mask_ex, cot_mask_ex
+                    for v in example_data_precopy.values(): del v
+                    del example_data_precopy
+
+            if (batch_idx + 1) % 10 == 0:
+                print(f"Processed {batch_idx + 1}/{num_batches} batches...")
+                    
+            del batch_prompts, batch_cots, batch_prompt_mask, batch_cot_mask, output_logits, batch_metrics
+            
+            # Log memory after cleanup
+            if TRACK_BATCH_MEMORY_USE:
+                log_memory_point(f"batch_{batch_idx}_cleanup_complete", batch_idx)
+    
+    # Log memory after main processing
+    log_memory_point("main_processing_complete")
     
     # Compute final averages
     avg_reconstruction_loss = total_reconstruction_loss / total_samples
     avg_token_accuracy = total_token_accuracy / total_samples
     avg_perplexity = total_perplexity / total_samples
     
-    # Compute sequence-level accuracies across all samples
-    all_token_accuracies = torch.cat(all_token_accuracies, dim=0)
-    sequence_level_accuracies = {}
-    thresholds = [1.0, 0.95, 0.9, 0.8, 0.7]
-    for thresh in thresholds:
-        sequence_level_accuracies[thresh] = (all_token_accuracies >= thresh).sum().item()
-    
-    # Prepare tracked examples from heaps
-    # Extract examples from heaps and sort them properly
-    def extract_from_heap(heap, reverse=False):
-        """Extract examples from heap and sort them by the original metric"""
-        examples = [item[1] for item in heap]  # Extract example data from (key, example) tuples
-        if 'avg_loss' in examples[0] if examples else {}:
-            examples.sort(key=lambda x: x['avg_loss'], reverse=reverse)
-        else:
-            examples.sort(key=lambda x: x['avg_perplexity'], reverse=reverse)
-        return examples
+    # Prepare tracked examples from lists
+    # Extract examples from tracked lists
+    def extract_from_tracked_list(tracked_list):
+        """Extract examples from tracked list (already sorted)"""
+        return [item[1] for item in tracked_list]  # Extract example data from (key, example) tuples
     
     if k is not None:
         tracked_examples = {
-            'highest_loss': extract_from_heap(worst_loss_heap, reverse=True),
-            'lowest_loss': extract_from_heap(best_loss_heap, reverse=False),
-            'highest_perplexity': extract_from_heap(worst_perplexity_heap, reverse=True),
-            'lowest_perplexity': extract_from_heap(best_perplexity_heap, reverse=False)
+            'highest_loss': extract_from_tracked_list(worst_loss_list),
+            'lowest_loss': extract_from_tracked_list(best_loss_list),
+            'highest_perplexity': extract_from_tracked_list(worst_perplexity_list),
+            'lowest_perplexity': extract_from_tracked_list(best_perplexity_list)
         }
-    
+
+        del worst_loss_list, best_loss_list, worst_perplexity_list, best_perplexity_list
+        # Log memory before random examples processing
+        log_memory_point("random_examples_start")
+        
         # Sample k random examples by selecting random indices and recomputing
         # Use torch.randperm for reproducibility and efficiency
         generator = torch.Generator().manual_seed(42)
@@ -871,59 +935,70 @@ def compute_dataset_reconstruction_metrics_with_examples(
 
         for batch_start in range(0, len(indices), batch_size_random):
             batch_indices = indices[batch_start:batch_start + batch_size_random]
-            try:
-                # Advanced indexing to get batch of random examples
-                batch_prompts = prompt_sequences[batch_indices].to(device)
-                batch_cots = cot_sequences[batch_indices].to(device)
-                batch_prompt_mask = prompt_mask[batch_indices].to(device) if prompt_mask is not None else None
-                batch_cot_mask = cot_mask[batch_indices].to(device) if cot_mask is not None else None
+                
+            # Advanced indexing to get batch of random examples
+            batch_prompts = prompt_sequences[batch_indices].to(device)
+            batch_cots = cot_sequences[batch_indices].to(device)
+            batch_prompt_mask = prompt_mask[batch_indices].to(device) if prompt_mask is not None else None
+            batch_cot_mask = cot_mask[batch_indices].to(device) if cot_mask is not None else None
 
-                model_inputs = {
-                    'prompt': batch_prompts,
-                    'cot_sequences': batch_cots,
-                    'cot_mask': batch_cot_mask,
-                    'prompt_mask': batch_prompt_mask,
-                    'inference': False,  # Teacher forcing
-                    'quantize_cot_only': True
-                }
-                if hasattr(model, 'use_vq'):
-                    model_inputs['use_vq'] = use_vq
-                else:
-                    model_inputs['no_vq'] = not use_vq
+            model_inputs = {
+                'prompt': batch_prompts,
+                'cot_sequences': batch_cots,
+                'cot_mask': batch_cot_mask,
+                'prompt_mask': batch_prompt_mask,
+                'inference': False,  # Teacher forcing
+                'quantize_cot_only': True
+            }
 
-                _, output_logits, _, _, _, _ = model(**model_inputs)
+            if hasattr(model, 'use_vq'):
+                model_inputs['use_vq'] = use_vq
+            else:
+                model_inputs['no_vq'] = not use_vq
 
-                # Compute metrics for this batch
-                batch_metrics = compute_cot_reconstruction_metrics(
-                    batch_cots, output_logits, batch_cot_mask
-                )
+            _, output_logits, _, _, _, _ = model(**model_inputs)
 
-                for i in range(batch_prompts.size(0)):
-                    example_idx = batch_indices[i].item()
-                    prompt = batch_prompts[i]
-                    cots = batch_cots[i]
-                    prompt_mask_ex = batch_prompt_mask[i] if batch_prompt_mask is not None else None
-                    cot_mask_ex = batch_cot_mask[i] if batch_cot_mask is not None else None
+            for v in model_inputs.values(): del v
+            del model_inputs
 
-                    avg_loss = batch_metrics['reconstruction_losses'][i].mean().item()
-                    avg_perplexity = batch_metrics['perplexities'][i].mean().item()
+            # Compute metrics for this batch
+            batch_metrics = compute_cot_reconstruction_metrics(
+                batch_cots, output_logits, batch_cot_mask
+            )
 
-                    random_examples.append({
-                        'example_idx': example_idx,
-                        'avg_loss': avg_loss,
-                        'avg_perplexity': avg_perplexity,
-                        'prompt': prompt,
-                        'cots': cots,
-                        'prompt_mask': prompt_mask_ex,
-                        'cot_mask': cot_mask_ex,
-                        'individual_losses': batch_metrics['reconstruction_losses'][i].tolist(),
-                        'individual_perplexities': batch_metrics['perplexities'][i].tolist()
-                    })
-            except Exception as e:
-                print(f"Error computing random example batch {batch_start}-{batch_start+batch_size_random}: {e}")
-                continue
-        
+            for i in range(batch_prompts.size(0)):
+                example_idx = batch_indices[i].item()
+                prompt = batch_prompts[i]
+                cots = batch_cots[i]
+                recon_logits = output_logits[i]
+                prompt_mask_ex = batch_prompt_mask[i] if batch_prompt_mask is not None else None
+                cot_mask_ex = batch_cot_mask[i] if batch_cot_mask is not None else None
+
+                avg_loss = batch_metrics['reconstruction_losses'][i].mean().item()
+                avg_perplexity = batch_metrics['perplexities'][i].mean().item()
+
+                random_examples.append({
+                    'example_idx': example_idx,
+                    'avg_loss': avg_loss,
+                    'avg_perplexity': avg_perplexity,
+                    'prompt': prompt.clone(),
+                    'cots': cots.clone(),
+                    'recon_logits' : recon_logits.clone(),
+                    'prompt_mask': prompt_mask_ex.clone(),
+                    'cot_mask': cot_mask_ex.clone(),
+                    'individual_losses': batch_metrics['reconstruction_losses'][i].clone(),
+                    'individual_perplexities': batch_metrics['perplexities'][i].clone(),
+                    'individual_token_accuracies': batch_metrics['token_level_accuracies'][i].clone()
+                })
+
+                del prompt, cots, recon_logits, prompt_mask_ex, cot_mask_ex
+            
+            del batch_metrics, batch_prompts, batch_cots, batch_prompt_mask, batch_cot_mask
+                
         tracked_examples['random'] = random_examples
+        
+        # Log memory after random examples processing
+        log_memory_point("random_examples_complete")
     else:
         tracked_examples = {}
     
@@ -945,8 +1020,10 @@ def compute_dataset_reconstruction_metrics_with_examples(
         percentage = (count / total_sequences) * 100
         print(f"  Threshold {int(thresh*100)}%: {count}/{total_sequences} sequences ({percentage:.1f}%)")
     
+    # Plot memory usage at the end
+    plot_memory_usage()
+    
     return results
-
 
 def compute_dataset_reconstruction_metrics_from_checkpoint_and_keep_examples(
     checkpoint_path: str,
@@ -1105,22 +1182,46 @@ def compute_dataset_reconstruction_metrics_from_checkpoint_and_keep_examples(
                 print(f"\nExample {i+1} (Example {example['example_idx']}):")
                 print(f"Average Reconstruction Loss: {example['avg_loss']:.4f}")
                 print(f"Average Perplexity: {example['avg_perplexity']:.4f}")
-                print(f"Prompt: {prompt_text}")
+                print(f"Average Token-Level Accuracy: {example['individual_token_accuracies'].mean().item():.4f}")
                 
-                # Display all CoTs for this example
+                # Prepare CoT texts for side-by-side comparison
                 num_thoughts = example['cots'].size(0)
+                cot_gt_texts = []
+                cot_recon_texts = []
+                
                 for j in range(num_thoughts):
                     cot = example['cots'][j]
+                    recon_cot = torch.argmax(example['recon_logits'][j], dim=-1)
                     cot_mask = example['cot_mask'][j] if example['cot_mask'] is not None else None
                     cot_text = decode_tokens(cot, cot_mask)
-                    individual_loss = example['individual_losses'][j]
-                    individual_perplexity = example['individual_perplexities'][j]
-                    
-                    print(f"  CoT {j+1}:")
-                    print(f"    Loss: {individual_loss:.4f}, Perplexity: {individual_perplexity:.4f}")
-                    print(f"    Text: {cot_text}")
+                    recon_cot_text = decode_tokens(recon_cot, cot_mask)
+                    cot_gt_texts.append(cot_text)
+                    cot_recon_texts.append(recon_cot_text)
                 
-                print("-" * 60)
+                # Compute tf_metrics using available data
+                tf_metrics = compute_cot_reconstruction_metrics(
+                    example['cots'].unsqueeze(0), example['recon_logits'].unsqueeze(0), example['cot_mask'].unsqueeze(0)
+                )
+
+                # Use print_demonstration_results for side-by-side comparison
+                print_demonstration_results(
+                    example_num=i+1,
+                    prompt_text=prompt_text,
+                    cot_gt_texts=cot_gt_texts,
+                    cot_tf_texts=cot_recon_texts,  # Use reconstructed as teacher-forced
+                    cot_ar_texts=None,  # No auto-regressive in this context
+                    tf_metrics=tf_metrics,
+                    ar_metrics=None,
+                    tf_indices=None,
+                    ar_indices=None,
+                    vq_loss_tf=None,
+                    perplexity_tf=None,
+                    vq_loss_ar=None,
+                    perplexity_ar=None,
+                    recon_loss_tf=example['avg_loss'],  # Use average loss as reconstruction loss
+                    recon_loss_ar=None,
+                    num_thoughts=num_thoughts
+                )
         
         # Display examples for each split
         for split in ['train', 'test']:
@@ -1134,6 +1235,144 @@ def compute_dataset_reconstruction_metrics_from_checkpoint_and_keep_examples(
                             display_examples(category, tracked_examples[category], split)
     
     return results
+
+
+def print_demonstration_results(
+    example_num, prompt_text, cot_gt_texts, cot_tf_texts, cot_ar_texts,
+    tf_metrics=None, ar_metrics=None, tf_indices=None, ar_indices=None,
+    vq_loss_tf=None, perplexity_tf=None, vq_loss_ar=None, perplexity_ar=None,
+    recon_loss_tf=None, recon_loss_ar=None, num_thoughts=None
+):
+    """
+    Print demonstration results in a formatted way.
+    
+    Args:
+        example_num: Example number (1-indexed)
+        prompt_text: The prompt text
+        cot_gt_texts: List of ground truth CoT texts
+        cot_tf_texts: List of teacher-forced CoT texts (can be None)
+        cot_ar_texts: List of auto-regressive CoT texts (can be None)
+        tf_metrics: Teacher-forced metrics dict (optional)
+        ar_metrics: Auto-regressive metrics dict (optional)
+        tf_indices: Teacher-forced indices (optional)
+        ar_indices: Auto-regressive indices (optional)
+        vq_loss_tf: Teacher-forced VQ loss (optional)
+        perplexity_tf: Teacher-forced perplexity (optional)
+        vq_loss_ar: Auto-regressive VQ loss (optional)
+        perplexity_ar: Auto-regressive perplexity (optional)
+        recon_loss_tf: Teacher-forced reconstruction loss (optional)
+        recon_loss_ar: Auto-regressive reconstruction loss (optional)
+        num_thoughts: Number of thoughts (if None, inferred from cot_gt_texts)
+    """
+    if num_thoughts is None:
+        num_thoughts = len(cot_gt_texts)
+    
+    print(f"\n--- Example {example_num} ---")
+    print(f"Prompt: {prompt_text}")
+    
+    print(f"\n{'='*120}")
+    print(f"SIDE-BY-SIDE COMPARISON FOR EXAMPLE {example_num}")
+    print(f"{'='*120}")
+    
+    # Print metrics for teacher-forced
+    if vq_loss_tf is not None and perplexity_tf is not None:
+        print(f"Teacher Forcing - VQ Loss: {vq_loss_tf.item():.4f}, Perplexity: {perplexity_tf.item():.2f}")
+        if tf_indices is not None:
+            unique_indices = torch.unique(tf_indices).numel()
+            print(f"  Codebook usage: {unique_indices} unique indices out of {tf_indices.numel()} total")
+        if recon_loss_tf is not None:
+            print(f"  Reconstruction Loss: {recon_loss_tf.item():.4f}")
+    
+    # Print metrics for auto-regressive
+    if vq_loss_ar is not None and perplexity_ar is not None:
+        print(f"Auto-regressive - VQ Loss: {vq_loss_ar.item():.4f}, Perplexity: {perplexity_ar.item():.2f}")
+        if ar_indices is not None:
+            unique_indices = torch.unique(ar_indices).numel()
+            print(f"  Codebook usage: {unique_indices} unique indices out of {ar_indices.numel()} total")
+        if recon_loss_ar is not None:
+            print(f"  Reconstruction Loss: {recon_loss_ar.item():.4f}")
+    
+    # Print detailed metrics for teacher-forced
+    if tf_metrics is not None:
+        tf_token_acc = tf_metrics['token_level_accuracies'][0]
+        tf_seq_accs = tf_metrics['sequence_level_accuracies']
+        print(f"\n[Teacher-forced] Token-level accuracy (per CoT, per example):")
+        print(" | ".join(
+            [f"CoT {i}: {tf_token_acc[i].item():.4f}" for i in range(tf_token_acc.size(0))]
+        ))
+        print(f"[Teacher-forced] Sequence-level accuracy (thresholds):")
+        for thresh, count in tf_seq_accs.items():
+            print(f"  Threshold {int(thresh*100)}%: {int(count)} sequences correct")
+        mean_per_example_tf = tf_token_acc.mean().item() 
+        print(f"[Teacher-forced] Mean token-level accuracy per example:")
+        print(f"{mean_per_example_tf:.4f}")
+        print(f"[Teacher-forced] Perplexity (per CoT, per example):")
+        tf_ppl = tf_metrics['perplexities'][0]
+        print(" | ".join([f"CoT {i}: {tf_ppl[i]:.4f}" for i in range(tf_ppl.size(0))]))
+    
+    # Print detailed metrics for auto-regressive
+    if ar_metrics is not None:
+        ar_token_acc = ar_metrics['token_level_accuracies'][0]
+        ar_seq_accs = ar_metrics['sequence_level_accuracies']
+        print(f"\n[Auto-regressive] Token-level accuracy (per CoT, per example):")
+        print(" | ".join(
+            [f"CoT {i}: {ar_token_acc[i].item():.4f}" for i in range(ar_token_acc.size(0))]
+        ))
+        print(f"[Auto-regressive] Sequence-level accuracy (thresholds):")
+        for thresh, count in ar_seq_accs.items():
+            print(f"  Threshold {int(thresh*100)}%: {int(count)} sequences correct")
+        mean_per_example_ar = ar_token_acc.mean().item()
+        print(f"[Auto-regressive] Mean token-level accuracy per example:")
+        print(f"{mean_per_example_ar:.4f}")
+        print(f"[Auto-regressive] Perplexity (per CoT, per example):")
+        ar_ppl = ar_metrics['perplexities'][0]
+        print(" | ".join([f"CoT {i}: {ar_ppl[i]:.4f}" for i in range(ar_ppl.size(0))]))
+    
+    # Helper function for chunking text
+    def chunk_text(text, chunk_size=20):
+        if not text:
+            return []
+        lines = text.split('\n')
+        chunks = []
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+            words = line.split()
+            for i in range(0, len(words), chunk_size):
+                chunk = ' '.join(words[i:i + chunk_size])
+                if chunk:
+                    chunks.append(chunk)
+        return chunks
+    
+    # Print side-by-side text comparison for each CoT
+    for j in range(num_thoughts):
+        print(f"\n--- CoT {j+1} ---")
+        cot_gt_text = cot_gt_texts[j] if j < len(cot_gt_texts) else ""
+        cot_tf_text = cot_tf_texts[j] if cot_tf_texts and j < len(cot_tf_texts) else "FAILED"
+        cot_ar_text = cot_ar_texts[j] if cot_ar_texts and j < len(cot_ar_texts) else "FAILED"
+        
+        gt_chunks = chunk_text(cot_gt_text)
+        tf_chunks = chunk_text(cot_tf_text)
+        ar_chunks = chunk_text(cot_ar_text)
+        max_chunks = max(len(gt_chunks), len(tf_chunks), len(ar_chunks))
+        
+        for chunk_idx in range(max_chunks):
+            gt_chunk = gt_chunks[chunk_idx] if chunk_idx < len(gt_chunks) else ""
+            tf_chunk = tf_chunks[chunk_idx] if chunk_idx < len(tf_chunks) else ""
+            ar_chunk = ar_chunks[chunk_idx] if chunk_idx < len(ar_chunks) else ""
+            max_length = max(len(gt_chunk), len(tf_chunk), len(ar_chunk))
+            gt_chunk_padded = gt_chunk.ljust(max_length)
+            tf_chunk_padded = tf_chunk.ljust(max_length)
+            ar_chunk_padded = ar_chunk.ljust(max_length)
+            print(f"Original:        {gt_chunk_padded}")
+            if cot_tf_texts:
+                print(f"Teacher Forced:  {tf_chunk_padded}")
+            if cot_ar_texts:
+                print(f"Auto-regressive: {ar_chunk_padded}")
+            if chunk_idx < max_chunks - 1:
+                print("-" * 60)
+    
+    print("\n" + "="*120)
 
 
 def demonstrate_model_from_checkpoint(checkpoint_path: str, 
@@ -1279,17 +1518,65 @@ def demonstrate_custom_prompt_cot(checkpoint_path: str,
     print("\nCustom prompt-CoT demonstration completed!")
 
 if __name__ == "__main__":
-    path = r"checkpoints/asw_embsum/big/two_thoughts/512/best_model_normal_recon_epoch_22.pt"
+    two_paths = [
+        # r"checkpoints/asw_embsum/big/two_thoughts/512/best_model_normal_recon_epoch_22.pt",
+        r"checkpoints/asw_embsum/big/two_thoughts/512/checkpoint_epoch_40.pt",
+        # r"checkpoints/asw_embsum/big/two_thoughts/1024/best_model_normal_recon_epoch_30.pt",
+        r"checkpoints/asw_embsum/big/two_thoughts/1024/checkpoint_epoch_40.pt",
+        # r"checkpoints/asw_embsum/big/two_thoughts/2048/best_model_normal_recon_epoch_30.pt",
+        r"checkpoints/asw_embsum/big/two_thoughts/2048/best_model_normal_recon_epoch_37.pt",
+        # r"checkpoints/asw_embsum/big/two_thoughts/4096/best_model_normal_recon_epoch_24.pt"
+        r"checkpoints/asw_embsum/big/two_thoughts/4096/best_model_normal_total_epoch_31.pt"
+    ]
+
+    four_paths = [
+        # r"checkpoints/asw_embsum/big/four_thoughts/512/best_model_normal_recon_epoch_39.pt",
+        r"checkpoints/asw_embsum/big/four_thoughts/512/checkpoint_epoch_40.pt",
+        # r"checkpoints/asw_embsum/big/four_thoughts/1024/best_model_normal_recon_epoch_25.pt",
+        r"checkpoints/asw_embsum/big/four_thoughts/1024/checkpoint_epoch_35.pt",
+        # r"checkpoints/asw_embsum/big/four_thoughts/2048/best_model_normal_recon_epoch_23.pt",
+        r"checkpoints/asw_embsum/big/four_thoughts/2048/best_model_normal_recon_epoch_31.pt",
+        # r"checkpoints/asw_embsum/big/four_thoughts/4096/best_model_reinitialization_recon_epoch_19.pt"
+        r"checkpoints/asw_embsum/big/four_thoughts/4096/best_model_normal_recon_epoch_26.pt"
+    ]
     
-    compute_dataset_reconstruction_metrics_from_checkpoint_and_keep_examples(
-        checkpoint_path=path,
-        data_dir=None, #assigns default
-        split_name="both",  # "train", "test", or "both"
-        num_examples_train=None, #all
-        num_examples_test=None, #all
-        batch_size=200,
-        k=5,  # Number of examples to keep for each category
-        device= "cuda:1",
-        use_vq=True,
-        seed=42
-    )
+    TRAIN_SAMPLES = None
+    TEST_SAMPLES = None
+    BATCH_SIZE_2 = 200
+    BATCH_SIZE_4 = 100
+    K = 5
+
+    if False:
+        for path in two_paths:
+            splitted = path.split('/')
+            print(f"Processing {splitted[3]}, code size {splitted[4]}.")
+            compute_dataset_reconstruction_metrics_from_checkpoint_and_keep_examples(
+                checkpoint_path=path,
+                data_dir=None, #assigns default
+                split_name="both",  # "train", "test", or "both"
+                num_examples_train=TRAIN_SAMPLES, #all
+                num_examples_test=TEST_SAMPLES, #all
+                batch_size=BATCH_SIZE_2,
+                k=K,  # Number of examples to keep for each category
+                device= "cuda:0",
+                use_vq=True,
+                seed=42
+            )
+            gc.collect()
+    else:
+        for path in four_paths:
+            splitted = path.split('/')
+            print(f"Processing {splitted[3]}, code size {splitted[4]}.")
+            compute_dataset_reconstruction_metrics_from_checkpoint_and_keep_examples(
+                checkpoint_path=path,
+                data_dir=None, #assigns default
+                split_name="both",  # "train", "test", or "both"
+                num_examples_train=TRAIN_SAMPLES, #all
+                num_examples_test=TEST_SAMPLES, #all
+                batch_size=BATCH_SIZE_4,
+                k=K,  # Number of examples to keep for each category
+                device= "cuda:1",
+                use_vq=True,
+                seed=42
+            )
+            gc.collect()
