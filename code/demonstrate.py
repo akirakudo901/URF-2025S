@@ -210,7 +210,6 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                 vq_loss_tf = None
                 perplexity_tf = None
                 indices_tf = None
-                raise # TODO REMOVE
             # Auto-regressive
             try:
                 model_inputs = {
@@ -634,7 +633,7 @@ def compute_word_latent_mapping_on_dataset(
 
 def compute_dataset_reconstruction_metrics_with_examples(
     model, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
-    batch_size=256, use_vq=True, k=None, tokenizer=None
+    batch_size=256, use_vq=True, ar_gen=True, k=None, tokenizer=None
 ):
     """
     Compute dataset-level reconstruction metrics by processing the dataset in batches and keep track of specific examples.
@@ -647,6 +646,7 @@ def compute_dataset_reconstruction_metrics_with_examples(
         cot_mask: Mask for CoT sequences
         batch_size: Batch size for processing (default: 256)
         use_vq: Whether to use vector quantization (default: True)
+        ar_gen: Whether to generate auto-regressively or using teacher-forcing (default: True)
         k: If provided, the number of examples to keep for each category (default: None, none is kept)
         tokenizer: Tokenizer for decoding text (optional)
     
@@ -807,7 +807,7 @@ def compute_dataset_reconstruction_metrics_with_examples(
                 'cot_sequences': batch_cots,
                 'cot_mask': batch_cot_mask,
                 'prompt_mask': batch_prompt_mask,
-                'inference': False,  # Teacher forcing
+                'inference': not ar_gen,
                 'quantize_cot_only': True
             }
             if hasattr(model, 'use_vq'):
@@ -947,7 +947,7 @@ def compute_dataset_reconstruction_metrics_with_examples(
                 'cot_sequences': batch_cots,
                 'cot_mask': batch_cot_mask,
                 'prompt_mask': batch_prompt_mask,
-                'inference': False,  # Teacher forcing
+                'inference': not ar_gen,
                 'quantize_cot_only': True
             }
 
@@ -1032,6 +1032,7 @@ def compute_dataset_reconstruction_metrics_from_checkpoint_and_keep_examples(
     num_examples_train: int = None,
     num_examples_test: int = None,
     batch_size: int = 256,
+    ar_gen: bool=True,
     k: int = 5,  # Number of examples to keep for each category
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     use_vq: bool = True,
@@ -1047,6 +1048,7 @@ def compute_dataset_reconstruction_metrics_from_checkpoint_and_keep_examples(
         num_examples_train: Number of random samples from train split (optional)
         num_examples_test: Number of random samples from test split (optional)
         batch_size: Batch size for processing
+        ar_gen: Whether to generate auto-regressively or with teacher-forcing
         k: Number of examples to keep for each category (highest/lowest loss/perplexity, random). If None, do not track
         device: Device to run on
         use_vq: Whether to use vector quantization
@@ -1120,6 +1122,7 @@ def compute_dataset_reconstruction_metrics_from_checkpoint_and_keep_examples(
             cot_mask=train_data[3],
             batch_size=batch_size,
             use_vq=use_vq,
+            ar_gen=ar_gen,
             k=k,
             tokenizer=tokenizer
         )
@@ -1141,6 +1144,7 @@ def compute_dataset_reconstruction_metrics_from_checkpoint_and_keep_examples(
             cot_mask=test_data[3],
             batch_size=batch_size,
             use_vq=use_vq,
+            ar_gen=ar_gen,
             k=k,
             tokenizer=tokenizer
         )
@@ -1198,8 +1202,8 @@ def compute_dataset_reconstruction_metrics_from_checkpoint_and_keep_examples(
                     cot_gt_texts.append(cot_text)
                     cot_recon_texts.append(recon_cot_text)
                 
-                # Compute tf_metrics using available data
-                tf_metrics = compute_cot_reconstruction_metrics(
+                # Compute metrics using available data
+                metrics = compute_cot_reconstruction_metrics(
                     example['cots'].unsqueeze(0), example['recon_logits'].unsqueeze(0), example['cot_mask'].unsqueeze(0)
                 )
 
@@ -1208,18 +1212,18 @@ def compute_dataset_reconstruction_metrics_from_checkpoint_and_keep_examples(
                     example_num=i+1,
                     prompt_text=prompt_text,
                     cot_gt_texts=cot_gt_texts,
-                    cot_tf_texts=cot_recon_texts,  # Use reconstructed as teacher-forced
-                    cot_ar_texts=None,  # No auto-regressive in this context
-                    tf_metrics=tf_metrics,
-                    ar_metrics=None,
-                    tf_indices=None,
+                    cot_tf_texts=cot_recon_texts if not ar_gen else None,
+                    cot_ar_texts=cot_recon_texts if     ar_gen else None,  # No auto-regressive in this context
+                    tf_metrics=metrics if not ar_gen else None,
+                    ar_metrics=metrics if     ar_gen else None,
                     ar_indices=None,
+                    tf_indices=None,
                     vq_loss_tf=None,
                     perplexity_tf=None,
                     vq_loss_ar=None,
                     perplexity_ar=None,
-                    recon_loss_tf=example['avg_loss'],  # Use average loss as reconstruction loss
-                    recon_loss_ar=None,
+                    recon_loss_tf=example['avg_loss'] if not ar_gen else None,
+                    recon_loss_ar=example['avg_loss'] if     ar_gen else None,
                     num_thoughts=num_thoughts
                 )
         
