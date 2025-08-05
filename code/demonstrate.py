@@ -24,7 +24,7 @@ from vqvae_gpt2 import GPT2VQVAE
 from vqvae_gpt2_simple import SimpleGPT2VQVAE
 from vqvae_gpt2_with_enhancement import EnhancedGPT2VQVAE
 
-TRACK_BATCH_MEMORY_USE = False
+TRACK_BATCH_MEMORY_USE = True
 
 def visualize_token_latent_alignment(original_token_ids, latent_indices, reconstructed_token_ids, tokenizer, 
                                    mode_name="", max_tokens_per_line=20):
@@ -807,7 +807,7 @@ def compute_dataset_reconstruction_metrics_with_examples(
                 'cot_sequences': batch_cots,
                 'cot_mask': batch_cot_mask,
                 'prompt_mask': batch_prompt_mask,
-                'inference': not ar_gen,
+                'inference': ar_gen,
                 'quantize_cot_only': True
             }
             if hasattr(model, 'use_vq'):
@@ -933,67 +933,68 @@ def compute_dataset_reconstruction_metrics_with_examples(
         random_examples = []
         batch_size_random = min(32, batch_size)  # Use a reasonable batch size for random examples
 
-        for batch_start in range(0, len(indices), batch_size_random):
-            batch_indices = indices[batch_start:batch_start + batch_size_random]
-                
-            # Advanced indexing to get batch of random examples
-            batch_prompts = prompt_sequences[batch_indices].to(device)
-            batch_cots = cot_sequences[batch_indices].to(device)
-            batch_prompt_mask = prompt_mask[batch_indices].to(device) if prompt_mask is not None else None
-            batch_cot_mask = cot_mask[batch_indices].to(device) if cot_mask is not None else None
+        with torch.no_grad():
+            for batch_start in range(0, len(indices), batch_size_random):
+                batch_indices = indices[batch_start:batch_start + batch_size_random]
+                    
+                # Advanced indexing to get batch of random examples
+                batch_prompts = prompt_sequences[batch_indices].to(device)
+                batch_cots = cot_sequences[batch_indices].to(device)
+                batch_prompt_mask = prompt_mask[batch_indices].to(device) if prompt_mask is not None else None
+                batch_cot_mask = cot_mask[batch_indices].to(device) if cot_mask is not None else None
 
-            model_inputs = {
-                'prompt': batch_prompts,
-                'cot_sequences': batch_cots,
-                'cot_mask': batch_cot_mask,
-                'prompt_mask': batch_prompt_mask,
-                'inference': not ar_gen,
-                'quantize_cot_only': True
-            }
+                model_inputs = {
+                    'prompt': batch_prompts,
+                    'cot_sequences': batch_cots,
+                    'cot_mask': batch_cot_mask,
+                    'prompt_mask': batch_prompt_mask,
+                    'inference': ar_gen,
+                    'quantize_cot_only': True
+                }
 
-            if hasattr(model, 'use_vq'):
-                model_inputs['use_vq'] = use_vq
-            else:
-                model_inputs['no_vq'] = not use_vq
+                if hasattr(model, 'use_vq'):
+                    model_inputs['use_vq'] = use_vq
+                else:
+                    model_inputs['no_vq'] = not use_vq
 
-            _, output_logits, _, _, _, _ = model(**model_inputs)
+                _, output_logits, _, _, _, _ = model(**model_inputs)
 
-            for v in model_inputs.values(): del v
-            del model_inputs
+                for v in model_inputs.values(): del v
+                del model_inputs
 
-            # Compute metrics for this batch
-            batch_metrics = compute_cot_reconstruction_metrics(
-                batch_cots, output_logits, batch_cot_mask
-            )
+                # Compute metrics for this batch
+                batch_metrics = compute_cot_reconstruction_metrics(
+                    batch_cots, output_logits, batch_cot_mask
+                )
 
-            for i in range(batch_prompts.size(0)):
-                example_idx = batch_indices[i].item()
-                prompt = batch_prompts[i]
-                cots = batch_cots[i]
-                recon_logits = output_logits[i]
-                prompt_mask_ex = batch_prompt_mask[i] if batch_prompt_mask is not None else None
-                cot_mask_ex = batch_cot_mask[i] if batch_cot_mask is not None else None
+                for i in range(batch_prompts.size(0)):
+                    example_idx = batch_indices[i].item()
+                    prompt = batch_prompts[i]
+                    cots = batch_cots[i]
+                    recon_logits = output_logits[i]
+                    prompt_mask_ex = batch_prompt_mask[i] if batch_prompt_mask is not None else None
+                    cot_mask_ex = batch_cot_mask[i] if batch_cot_mask is not None else None
 
-                avg_loss = batch_metrics['reconstruction_losses'][i].mean().item()
-                avg_perplexity = batch_metrics['perplexities'][i].mean().item()
+                    avg_loss = batch_metrics['reconstruction_losses'][i].mean().item()
+                    avg_perplexity = batch_metrics['perplexities'][i].mean().item()
 
-                random_examples.append({
-                    'example_idx': example_idx,
-                    'avg_loss': avg_loss,
-                    'avg_perplexity': avg_perplexity,
-                    'prompt': prompt.clone(),
-                    'cots': cots.clone(),
-                    'recon_logits' : recon_logits.clone(),
-                    'prompt_mask': prompt_mask_ex.clone(),
-                    'cot_mask': cot_mask_ex.clone(),
-                    'individual_losses': batch_metrics['reconstruction_losses'][i].clone(),
-                    'individual_perplexities': batch_metrics['perplexities'][i].clone(),
-                    'individual_token_accuracies': batch_metrics['token_level_accuracies'][i].clone()
-                })
+                    random_examples.append({
+                        'example_idx': example_idx,
+                        'avg_loss': avg_loss,
+                        'avg_perplexity': avg_perplexity,
+                        'prompt': prompt.clone(),
+                        'cots': cots.clone(),
+                        'recon_logits' : recon_logits.clone(),
+                        'prompt_mask': prompt_mask_ex.clone(),
+                        'cot_mask': cot_mask_ex.clone(),
+                        'individual_losses': batch_metrics['reconstruction_losses'][i].clone(),
+                        'individual_perplexities': batch_metrics['perplexities'][i].clone(),
+                        'individual_token_accuracies': batch_metrics['token_level_accuracies'][i].clone()
+                    })
 
-                del prompt, cots, recon_logits, prompt_mask_ex, cot_mask_ex
-            
-            del batch_metrics, batch_prompts, batch_cots, batch_prompt_mask, batch_cot_mask
+                    del prompt, cots, recon_logits, prompt_mask_ex, cot_mask_ex
+
+                del batch_metrics, batch_prompts, batch_cots, batch_prompt_mask, batch_cot_mask
                 
         tracked_examples['random'] = random_examples
         
@@ -1525,30 +1526,37 @@ if __name__ == "__main__":
     two_paths = [
         # r"checkpoints/asw_embsum/big/two_thoughts/512/best_model_normal_recon_epoch_22.pt",
         r"checkpoints/asw_embsum/big/two_thoughts/512/checkpoint_epoch_40.pt",
+        
         # r"checkpoints/asw_embsum/big/two_thoughts/1024/best_model_normal_recon_epoch_30.pt",
         r"checkpoints/asw_embsum/big/two_thoughts/1024/checkpoint_epoch_40.pt",
+        
         # r"checkpoints/asw_embsum/big/two_thoughts/2048/best_model_normal_recon_epoch_30.pt",
-        r"checkpoints/asw_embsum/big/two_thoughts/2048/best_model_normal_recon_epoch_37.pt",
+        r"checkpoints/asw_embsum/big/two_thoughts/2048/checkpoint_epoch_40.pt",
+        
         # r"checkpoints/asw_embsum/big/two_thoughts/4096/best_model_normal_recon_epoch_24.pt"
-        r"checkpoints/asw_embsum/big/two_thoughts/4096/best_model_normal_total_epoch_31.pt"
+        r"checkpoints/asw_embsum/big/two_thoughts/4096/checkpoint_epoch_40.pt"
     ]
 
     four_paths = [
         # r"checkpoints/asw_embsum/big/four_thoughts/512/best_model_normal_recon_epoch_39.pt",
-        r"checkpoints/asw_embsum/big/four_thoughts/512/checkpoint_epoch_40.pt",
-        # r"checkpoints/asw_embsum/big/four_thoughts/1024/best_model_normal_recon_epoch_25.pt",
-        r"checkpoints/asw_embsum/big/four_thoughts/1024/checkpoint_epoch_35.pt",
-        # r"checkpoints/asw_embsum/big/four_thoughts/2048/best_model_normal_recon_epoch_23.pt",
-        r"checkpoints/asw_embsum/big/four_thoughts/2048/best_model_normal_recon_epoch_31.pt",
+        # r"checkpoints/asw_embsum/big/four_thoughts/512/checkpoint_epoch_40.pt",
+        
+        # # r"checkpoints/asw_embsum/big/four_thoughts/1024/best_model_normal_recon_epoch_25.pt",
+        # r"checkpoints/asw_embsum/big/four_thoughts/1024/checkpoint_epoch_40.pt",
+        
+        # # r"checkpoints/asw_embsum/big/four_thoughts/2048/best_model_normal_recon_epoch_23.pt",
+        # r"checkpoints/asw_embsum/big/four_thoughts/2048/checkpoint_epoch_40.pt",
+        
         # r"checkpoints/asw_embsum/big/four_thoughts/4096/best_model_reinitialization_recon_epoch_19.pt"
-        r"checkpoints/asw_embsum/big/four_thoughts/4096/best_model_normal_recon_epoch_26.pt"
+        r"checkpoints/asw_embsum/big/four_thoughts/4096/checkpoint_epoch_40.pt"
     ]
     
-    TRAIN_SAMPLES = None
-    TEST_SAMPLES = None
+    TRAIN_SAMPLES = 75
+    TEST_SAMPLES = 75
     BATCH_SIZE_2 = 200
-    BATCH_SIZE_4 = 100
-    K = 5
+    BATCH_SIZE_4 = 25  # Reduced from 25 to 10
+    K = 3
+    AR_GEN = True
 
     if False:
         for path in two_paths:
@@ -1561,12 +1569,12 @@ if __name__ == "__main__":
                 num_examples_train=TRAIN_SAMPLES, #all
                 num_examples_test=TEST_SAMPLES, #all
                 batch_size=BATCH_SIZE_2,
+                ar_gen=AR_GEN,
                 k=K,  # Number of examples to keep for each category
                 device= "cuda:0",
                 use_vq=True,
                 seed=42
             )
-            gc.collect()
     else:
         for path in four_paths:
             splitted = path.split('/')
@@ -1578,9 +1586,9 @@ if __name__ == "__main__":
                 num_examples_train=TRAIN_SAMPLES, #all
                 num_examples_test=TEST_SAMPLES, #all
                 batch_size=BATCH_SIZE_4,
+                ar_gen=AR_GEN,
                 k=K,  # Number of examples to keep for each category
                 device= "cuda:1",
                 use_vq=True,
                 seed=42
             )
-            gc.collect()
