@@ -35,7 +35,7 @@ model_config:
   # ============================================================================
   # VQ-VAE Specific Parameters
   # ============================================================================
-  num_embeddings: 2048       # VQ codebook size
+  num_embeddings: 8192       # VQ codebook size
   commitment_cost: 0.25     # VQ commitment cost
   aggregation_hidden_dim: 3072 #1536  # Aggregation MLP hidden dimension
   num_thoughts: 4          # Number of parallel sequences
@@ -49,7 +49,7 @@ model_config:
   use_ema: true             # Whether to use EMA updates
   reset_stop_fraction: 0.2  # Fraction of training during which resets are allowed
   max_reset_steps: null
-  reservoir_size: 16384 #65536
+  reservoir_size: 65536 # 131072
   use_batch_norm: true
   
   # ============================================================================
@@ -132,7 +132,7 @@ training_config:
   # Checkpoint and Saving Settings
   # ============================================================================
   save_every: 5                       # Save checkpoint every N epochs
-  checkpoint_dir: checkpoints/asw_embsum/big/four_thoughts/2048  # Directory for saving checkpoints
+  checkpoint_dir: checkpoints/asw_embsum/big/four_thoughts/4096  # Directory for saving checkpoints
   minimum_batches_for_checkpoint: 200 # Minimum number of batches trained before saving aborted checkpoint
   
   # ============================================================================

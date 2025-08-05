@@ -49,7 +49,7 @@ model_config:
   use_ema: true             # Whether to use EMA updates
   reset_stop_fraction: 0.2  # Fraction of training during which resets are allowed
   max_reset_steps: null
-  reservoir_size: 131072 #32768
+  reservoir_size: 16384 #131072 #32768
   use_batch_norm: true
   
   # ============================================================================
