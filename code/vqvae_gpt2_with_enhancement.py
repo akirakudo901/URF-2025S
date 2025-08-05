@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import logging
 import numpy as np
 from typing import Optional
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, MiniBatchKMeans
 
 from transformers.cache_utils import DynamicCache
 
@@ -208,6 +208,8 @@ class ReservoirSampler:
         }
 
 class EnhancedVectorQuantizer(nn.Module):
+    MAX_KMEANS_SIZE = 16384
+
     def __init__(self, num_embeddings: int, embedding_dim: int, 
                  commitment_cost: float = 0.25, ema_decay: float = 0.99,
                  reset_threshold: float = 0.1,
@@ -276,6 +278,12 @@ class EnhancedVectorQuantizer(nn.Module):
         else:
             self.batch_norm = None
         
+        self.use_minibatch_kmeans = reservoir_size > EnhancedVectorQuantizer.MAX_KMEANS_SIZE
+        print("="*60)
+        print(f"The reservoir size exceeds EnhancedVectorQuantizer.MAX_KMEANS_SIZE={EnhancedVectorQuantizer.MAX_KMEANS_SIZE}, so we perform MiniBatchKMeans!")
+        print("="*60)
+            
+        
     def _perform_kmeans_clustering(self, samples, num_clusters, device):
         """
         Perform K-means++ clustering on samples and return centroids.
@@ -292,8 +300,13 @@ class EnhancedVectorQuantizer(nn.Module):
         flat_samples = samples.view(-1, self.embedding_dim)
         
         # Use K-means++ for clustering
-        kmeans = KMeans(n_clusters=num_clusters, init='k-means++', 
-                       n_init="auto", random_state=42)
+        if self.use_minibatch_kmeans:
+            kmeans = MiniBatchKMeans(n_clusters=num_clusters, init='k-means++', 
+                                     batch_size=EnhancedVectorQuantizer.MAX_KMEANS_SIZE, 
+                                     n_init='auto')
+        else:
+            kmeans = KMeans(n_clusters=num_clusters, init='k-means++', 
+                            n_init="auto")
         
         # Fit K-means and get centroids
         kmeans.fit(flat_samples.numpy())
