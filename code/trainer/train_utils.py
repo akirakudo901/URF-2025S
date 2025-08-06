@@ -396,6 +396,8 @@ def create_default_config(output_path: str, enhanced_vq: bool = False, phased_tr
 def compute_reconstruction_loss(output_logits: torch.Tensor, 
                               target_sequences: torch.Tensor, 
                               target_mask: torch.Tensor,
+                              backpointer_logits: torch.Tensor=None,
+                              target_pointers: torch.Tensor=None,
                               pad_token_id: int = 50256,
                               reduction="mean") -> torch.Tensor:
     """
@@ -405,6 +407,8 @@ def compute_reconstruction_loss(output_logits: torch.Tensor,
         output_logits: Predicted logits [batch_size, M, L, vocab_size]
         target_sequences: Target sequences [batch_size, M, L]
         target_mask: Target mask [batch_size, M, L]
+        backpointer_logits (Optional): Backpointer logits for 'beam search compression' mode [batch_size, M, L, M]
+        target_pointers (Optional): Target backpointers [batch_size, M, L, M]
         pad_token_id: Token ID for padding (to ignore in loss computation)
         reduction: optionally specifies if the criterion reduces, in case we wanna compute per-item loss
         
@@ -424,7 +428,14 @@ def compute_reconstruction_loss(output_logits: torch.Tensor,
     if mask_flat.sum() > 0:
         recon_loss = criterion(logits_flat[mask_flat], targets_flat[mask_flat])
     
-    return recon_loss
+    bp_recon_loss = torch.tensor(0.0, device=output_logits.device)
+    if backpointer_logits and target_pointers and mask_flat.sum() > 0:
+        bp_logits_flat = backpointer_logits.reshape(-1, backpointer_logits.size(-1))
+        targets_flat = target_pointers.view(-1)
+    
+        bp_recon_loss = criterion(bp_logits_flat[mask_flat], targets_flat[mask_flat])
+    
+    return recon_loss, bp_recon_loss
 
 def create_codebook_usage_heatmap(counts_np: np.ndarray, 
                                  num_embeddings: int,
