@@ -653,13 +653,18 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
     
     with torch.no_grad():
         for idx in sample_indices:
-            prompts, cots, prompt_masks, cot_masks = dataset[idx]
-            
+            if not model.compress_beam_search:
+                prompts, cots, prompt_masks, cot_masks = dataset[idx]
+                backpointers = None
+            else:
+                prompts, cots, prompt_masks, cot_masks, backpointers = dataset[idx]
+                        
             # Move to device
             prompts = prompts.unsqueeze(0).to(device)  # Add batch dimension
             cots = cots.unsqueeze(0).to(device)
             prompt_masks = prompt_masks.unsqueeze(0).to(device) if prompt_masks is not None else None
             cot_masks = cot_masks.unsqueeze(0).to(device) if cot_masks is not None else None
+            backpointers = backpointers.unsqueeze(0).to(device) if backpointers else None
             
             # Forward pass to get indices
             try:
@@ -676,14 +681,17 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
                     )
                 else:
                     # Fallback for other model types (GPT2VQVAE, etc.)
-                    _, _, _, _, indices, _ = model(
+                    out = model(
                         prompt=prompts,
                         cot_sequences=cots,
                         cot_mask=cot_masks,
                         prompt_mask=prompt_masks,
                         inference=False,
-                        quantize_cot_only=True
+                        quantize_cot_only=True,
+                        no_vq=False,
+                        backpointers=backpointers
                     )
+                    indices = out[4]
                 
                 if indices is not None:
                     # Move indices to CPU immediately to prevent GPU memory accumulation

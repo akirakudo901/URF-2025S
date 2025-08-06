@@ -244,7 +244,7 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         # This will perform K-means++ clustering on reservoir samples and reset the entire codebook
         self.model.vector_quantizer._reset_codebook(device, reset_strategy='full')
     
-    def _forward_pass(self, prompts, cots, prompt_masks, cot_masks):
+    def _forward_pass(self, prompts, cots, prompt_masks, cot_masks, backpointers=None, no_vq=False):
         """
         Enhanced forward pass that handles different training phases.
         
@@ -265,7 +265,7 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
             self._reinitialize_codebook(self.current_step)
         
         # Determine whether to use VQ based on current phase
-        use_vq = current_phase != "initialization"
+        no_vq = current_phase == "initialization" or no_vq
         
         # Update phase tracking for logging
         last_step_phase = self._determine_training_phase(self.current_step-1)
@@ -273,33 +273,7 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
             print(f"\n=== Phase transition: {last_step_phase} -> {current_phase} at step {self.current_step-1} ===")
         
         # Perform forward pass with appropriate VQ setting and handle mixed precision
-        if self.use_mixed_precision:
-            with autocast('cuda'):
-                _, output_logits, vq_loss, perplexity, indices, debug_stats = self.model(
-                    prompt=prompts,
-                    cot_sequences=cots,
-                    cot_mask=cot_masks,
-                    prompt_mask=prompt_masks,
-                    inference=False,
-                    quantize_cot_only=self.training_config.get('quantize_cot_only', True),
-                    no_vq=not use_vq
-                )
-                recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
-                total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
-        else:
-            _, output_logits, vq_loss, perplexity, indices, debug_stats = self.model(
-                prompt=prompts,
-                cot_sequences=cots,
-                cot_mask=cot_masks,
-                prompt_mask=prompt_masks,
-                inference=False,
-                quantize_cot_only=self.training_config.get('quantize_cot_only', True),
-                no_vq=not use_vq
-            )
-            recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
-            total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
-        
-        return total_loss_batch, recon_loss, vq_loss, perplexity, indices, debug_stats
+        return super()._forward_pass(prompts, cots, prompt_masks, cot_masks, backpointers, no_vq=no_vq)
     
     def train_epoch(self, train_loader, num_measurements_per_epoch, current_epoch=0, detailed_metrics_callback=None):
         """

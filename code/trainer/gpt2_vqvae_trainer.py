@@ -608,7 +608,13 @@ class GPT2VQVAETrainer:
         
         progress_bar = tqdm(train_loader, desc="Training")
         
-        for batch_idx, (prompts, cots, prompt_masks, cot_masks) in enumerate(progress_bar):
+        for batch_idx, batch in enumerate(progress_bar):
+            if not self.model.compress_beam_search:
+                prompts, cots, prompt_masks, cot_masks = batch
+                backpointers = None
+            else:
+                prompts, cots, prompt_masks, cot_masks, backpointers = batch
+
             # TODO DEBUG PURPOSE
             if TRACK_IN_EPOCH_MEMORY and (batch_idx + 1) % TRACK_IN_EPOCH_MEMORY_EVERY_N == 0:
                 self.log_memory_usage(f"before batch {batch_idx}")
@@ -621,6 +627,7 @@ class GPT2VQVAETrainer:
             cots = cots.to(self.device, non_blocking=True)
             prompt_masks = prompt_masks.to(self.device, non_blocking=True)
             cot_masks = cot_masks.to(self.device, non_blocking=True)
+            backpointers = backpointers.to(self.device, non_blocking=True) if backpointers else None
 
             # TODO DEBUG PURPOSE
             if TRACK_IN_EPOCH_MEMORY and (batch_idx + 1) % TRACK_IN_EPOCH_MEMORY_EVERY_N == 0:
@@ -629,12 +636,12 @@ class GPT2VQVAETrainer:
             # Forward pass and loss calculation
             if TRACK_MEMORY:
                 with record_function("## forward_pass ##"):
-                    total_loss_batch, recon_loss, vq_loss, perplexity, _, debug_stats = self._forward_pass(
-                        prompts, cots, prompt_masks, cot_masks
+                    total_loss_batch, recon_loss, vq_loss, perplexity, _, debug_stats, bp_loss = self._forward_pass(
+                        prompts, cots, prompt_masks, cot_masks, backpointers
                     )
             else:
-                total_loss_batch, recon_loss, vq_loss, perplexity, _, debug_stats = self._forward_pass(
-                    prompts, cots, prompt_masks, cot_masks
+                total_loss_batch, recon_loss, vq_loss, perplexity, _, debug_stats, bp_loss = self._forward_pass(
+                    prompts, cots, prompt_masks, cot_masks, backpointers
                 )
             
             # TODO DEBUG PURPOSE
@@ -839,22 +846,29 @@ class GPT2VQVAETrainer:
         num_batches = 0
         
         with torch.no_grad():
-            for batch_idx, (prompts, cots, prompt_masks, cot_masks) in enumerate(tqdm(val_loader, desc="Validation")):
+            for batch_idx, batch in enumerate(tqdm(val_loader, desc="Validation")):
+                if not self.model.compress_beam_search:
+                    prompts, cots, prompt_masks, cot_masks = batch
+                    backpointers = None
+                else:
+                    prompts, cots, prompt_masks, cot_masks, backpointers = batch
+
                 # Move to device
                 prompts = prompts.to(self.device, non_blocking=True)
                 cots = cots.to(self.device, non_blocking=True)
                 prompt_masks = prompt_masks.to(self.device, non_blocking=True)
                 cot_masks = cot_masks.to(self.device, non_blocking=True)
+                backpointers = backpointers.to(self.device, non_blocking=True) if backpointers else None
                 
                 # Forward pass and loss calculation
                 if TRACK_MEMORY:
                     with record_function("## validation_forward ##"):
-                        total_loss_batch, recon_loss, vq_loss, perplexity, _, _ = self._forward_pass(
-                            prompts, cots, prompt_masks, cot_masks
+                        total_loss_batch, recon_loss, vq_loss, perplexity, _, _, bp_loss = self._forward_pass(
+                            prompts, cots, prompt_masks, cot_masks, backpointers
                         )
                 else:
-                    total_loss_batch, recon_loss, vq_loss, perplexity, _, _ = self._forward_pass(
-                        prompts, cots, prompt_masks, cot_masks
+                    total_loss_batch, recon_loss, vq_loss, perplexity, _, _, bp_loss = self._forward_pass(
+                        prompts, cots, prompt_masks, cot_masks, backpointers
                     )
                 
                 # Update metrics
@@ -881,33 +895,36 @@ class GPT2VQVAETrainer:
             'perplexity': avg_metrics['perplexity']
         }
     
-    def _forward_pass(self, prompts, cots, prompt_masks, cot_masks):
+    def _forward_pass(self, prompts, cots, prompt_masks, cot_masks, backpointers=None, no_vq=False):
         """Helper function for forward pass and loss calculation"""
-        if self.use_mixed_precision:
-            with autocast('cuda'):
-                _, output_logits, vq_loss, perplexity, indices, debug_stats = self.model(
-                    prompt=prompts,
-                    cot_sequences=cots,
-                    cot_mask=cot_masks,
-                    prompt_mask=prompt_masks,
-                    inference=False,
-                    quantize_cot_only=self.training_config.get('quantize_cot_only', True)
-                )
-                recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
-                total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
-        else:
-            _, output_logits, vq_loss, perplexity, indices, debug_stats = self.model(
+        def helper():
+            out = self.model(
                 prompt=prompts,
                 cot_sequences=cots,
                 cot_mask=cot_masks,
                 prompt_mask=prompt_masks,
                 inference=False,
-                quantize_cot_only=self.training_config.get('quantize_cot_only', True)
+                quantize_cot_only=self.training_config.get('quantize_cot_only', True),
+                no_vq=no_vq,
+                backpointers=backpointers
             )
-            recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
-            total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
+            if len(out) == 6:
+                _, output_logits, vq_loss, perplexity, indices, debug_stats =  out
+            elif len(out) == 7:
+                _, output_logits, vq_loss, perplexity, indices, debug_stats, backpointer_logits =  out
             
-        return total_loss_batch, recon_loss, vq_loss, perplexity, indices, debug_stats
+            recon_loss, bp_recon_loss = compute_reconstruction_loss(
+                output_logits, cots, cot_masks, backpointer_logits=backpointer_logits, target_pointers=backpointers
+                )
+            total_loss_batch = recon_loss + bp_recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
+            
+            return total_loss_batch, recon_loss, vq_loss, perplexity, indices, debug_stats, bp_recon_loss
+
+        if self.use_mixed_precision:
+            with autocast('cuda'):
+                return helper()
+        else:
+            return helper()
     
     def _update_weights(self):
         """Helper function for updating weights"""
@@ -1605,6 +1622,8 @@ class GPT2VQVAETrainer:
               test_cot_sequences: torch.Tensor,
               test_prompt_mask: torch.Tensor,
               test_cot_mask: torch.Tensor,
+              train_backpointers: Optional[torch.Tensor] = None,
+              test_backpointers: Optional[torch.Tensor] = None,
               resume_from: Optional[str] = None,
               num_measurements_per_epoch: Optional[int] = None,
               seed: int = 42):
@@ -1620,13 +1639,23 @@ class GPT2VQVAETrainer:
             test_cot_sequences: Test CoT sequences
             test_prompt_mask: Test prompt masks
             test_cot_mask: Test CoT masks
+            train_backpointers: Train backpointer for 'beam search compression' mode
+            test_backpointers: Test backpointer
             resume_from: Path to checkpoint to resume from
             num_measurements_per_epoch: Number of metrics saved per epoch
             seed: Random seed for reproducibility
         """
         # Create train and test datasets directly from provided tensors
-        train_dataset = TensorDataset(train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask)
-        test_dataset = TensorDataset(test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask)
+        train_elems = [train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask]
+        test_elems = [test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask]
+        if self.model.compress_beam_search:
+            if train_backpointers and test_backpointers:
+                train_elems += [train_backpointers]
+                test_elems += [test_backpointers]
+            else:
+                raise Exception("If model is set to compress_beam_search mode, both train_backpointers and test_backpointers must be passed.")
+        train_dataset = TensorDataset(*train_elems)
+        test_dataset = TensorDataset(*test_elems)
         
         # Create data loaders with memory optimizations
         train_loader = self.create_data_loader(

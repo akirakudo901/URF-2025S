@@ -35,6 +35,8 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
               test_cot_sequences: torch.Tensor,
               test_prompt_mask: torch.Tensor,
               test_cot_mask: torch.Tensor,
+              train_backpointers: Optional[torch.Tensor] = None,
+              test_backpointers: Optional[torch.Tensor] = None,
               resume_from: Optional[str] = None,
               num_measurements_per_epoch: Optional[int] = None,
               seed: int = 42):
@@ -42,8 +44,16 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
         Override train method to set up auto-switching validation before calling the helper function.
         """
         # Create train and test datasets
-        train_dataset = torch.utils.data.TensorDataset(train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask)
-        test_dataset = torch.utils.data.TensorDataset(test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask)
+        train_elems = [train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask]
+        test_elems = [test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask]
+        if self.model.compress_beam_search:
+            if train_backpointers and test_backpointers:
+                train_elems += [train_backpointers]
+                test_elems += [test_backpointers]
+            else:
+                raise Exception("If model is set to compress_beam_search mode, both train_backpointers and test_backpointers must be passed.")
+        train_dataset = torch.utils.data.TensorDataset(*train_elems)
+        test_dataset = torch.utils.data.TensorDataset(*test_elems)
         
         # Create data loaders
         train_loader = self.create_data_loader(train_dataset, batch_size=self.training_config['batch_size'], shuffle=True)
