@@ -910,6 +910,7 @@ class GPT2VQVAETrainer:
             )
             if len(out) == 6:
                 _, output_logits, vq_loss, perplexity, indices, debug_stats =  out
+                backpointer_logits = None
             elif len(out) == 7:
                 _, output_logits, vq_loss, perplexity, indices, debug_stats, backpointer_logits =  out
             
