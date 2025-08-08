@@ -1057,8 +1057,8 @@ class GPT2VQVAE(nn.Module):
         if self.compress_beam_search:
             if backpointers is None:
                 raise ValueError("backpointers must be provided for compress_beam_search mode")
-            if quantize_cot_only:
-                raise ValueError("compress_beam_search mode is incompatible with quantize_cot_only.")
+            if not quantize_cot_only:
+                raise ValueError("compress_beam_search mode is incompatible with quantize_cot_only=False.")
             return self._encode_beam_search(prompt_sequences, cot_sequences, backpointers, 
                                           prompt_mask, cot_mask, aggregate_mode, quantize_cot_only, no_vq)
         
