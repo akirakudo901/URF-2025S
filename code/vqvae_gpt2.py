@@ -1333,12 +1333,15 @@ class GPT2VQVAE(nn.Module):
         Returns:
             torch.Tensor: Decoded output logits [batch_size, M, L, vocab_size] (only COT positions)
         """
+        # Check if gradient checkpointing is enabled to determine caching strategy
+        use_caching = not self.is_gradient_checkpointing_enabled()
+        
         # compress_beam_search mode, takes the memory (NOT [B,L,M,D] but a different shape!)
         if self.compress_beam_search:
             if backpointers is None:
                 raise ValueError("backpointers must be provided for compress_beam_search mode")
             return self._decode_compress_beam_search(memory, prompt_sequences, cot_sequences, backpointers, 
-                                                   prompt_mask, cot_mask, inference, pad_token_id)
+                                                   prompt_mask, cot_mask, inference, pad_token_id, use_caching)
         
 
         B, K = prompt_sequences.shape
@@ -1349,10 +1352,7 @@ class GPT2VQVAE(nn.Module):
         chain_indices = torch.arange(M, device=memory.device).repeat(B)
         chain_emb = self.chain_embeddings(chain_indices).unsqueeze(1)  # [batch_size*M, 1, d_model]
         chain_memory = memory + chain_emb  # Add to all positions in the sequence
-
-        # Check if gradient checkpointing is enabled to determine caching strategy
-        use_caching = not self.is_gradient_checkpointing_enabled()
-
+        
         # embed_sum_decode mode
         if self.embed_sum_decode:
             return self._decode_embed_sum(chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
@@ -1466,16 +1466,6 @@ class GPT2VQVAE(nn.Module):
             return all_logits.view(B, M, L, -1)
         
         else:
-            # AUTO-REGRESSION MODE (INEFFICIENT IMPLEMENTATION)
-            # TODO: IMPLEMENT EFFICIENT AUTO-REGRESSION FOR EMBED_SUM_DECODE
-            # High-level proposition for efficient auto-regression in embed_sum_decode:
-            # 1. Pre-compute prompt cache once
-            # 2. For each position t, use the cached prompt + generated tokens up to t-1
-            # 3. Add the latent embedding for position t
-            # 4. Generate one token at position t
-            # 5. Update the cache with the new token
-            # 6. Repeat for all positions
-            
             # For now, implement inefficient version
             output_logits = torch.empty((B, M, L, self.decoder_config.vocab_size), device=chain_memory.device)
             
@@ -1799,7 +1789,7 @@ class GPT2VQVAE(nn.Module):
     
     # REVIEW FROM HERE!
     def _decode_compress_beam_search(self, memory, prompt_sequences, cot_sequences, backpointers, 
-                                    prompt_mask=None, cot_mask=None, inference=False, pad_token_id=0):
+                                     prompt_mask, cot_mask, inference, pad_token_id, use_caching):
         """
         Decode method specifically for compress_beam_search mode.
         
@@ -1869,7 +1859,7 @@ class GPT2VQVAE(nn.Module):
                 return_dict=True
             )
             
-            all_logits = decoder_outputs.logits  # [B, K + M*L, vocab_size] or [B, M*L, vocab_size]
+            all_logits = decoder_outputs.logits  # [B, K + M*L, vocab_size]
             all_backpointer_logits = decoder_outputs.backpointer_logits  # [B, K + M*L, num_thoughts]
             # Only COT positions
             cot_logits = all_logits[:, K:, :].reshape(B, L, M, -1).transpose(1, 2) # [B, M, L, vocab_size]
@@ -1879,41 +1869,34 @@ class GPT2VQVAE(nn.Module):
             return cot_logits, cot_backpointer_logits
         
         else:
-            # AUTO-REGRESSION MODE (INEFFICIENT IMPLEMENTATION)
-            # TODO: IMPLEMENT EFFICIENT AUTO-REGRESSION FOR COMPRESS_BEAM_SEARCH
-            raise NotImplementedError("Auto-regressive generation for compress_beam_search mode not yet implemented")
-        
-            # AUTO-REGRESSION MODE (INEFFICIENT IMPLEMENTATION)
-            # TODO: IMPLEMENT EFFICIENT AUTO-REGRESSION FOR EMBED_SUM_DECODE
-            # High-level proposition for efficient auto-regression in embed_sum_decode:
-            # 1. Pre-compute prompt cache once
-            # 2. For each position t, use the cached prompt + generated tokens up to t-1
-            # 3. Add the latent embedding for position t
-            # 4. Generate one token at position t
-            # 5. Update the cache with the new token
-            # 6. Repeat for all positions
+            # AUTO-REGRESSION MODE (EFFICIENT IMPLEMENTATION WITH CACHING)
+            # The two arrays are to be reshaped later
+            output_logits = torch.empty((B, M*L, self.decoder_config.vocab_size), device=memory.device)  # [batch_size, num_thoughts * seq_len, vocab_size]
+            output_backpointer_logits = torch.empty((B, M*L, self.num_thoughts), device=memory.device)  # [batch_size, num_thoughts * seq_len, num_thoughts]
             
-            # For now, implement inefficient version
-            output_logits = torch.empty((B, M, L, self.decoder_config.vocab_size), device=chain_memory.device)
+            # First position: concatenate prompt embeddings with (filler embed + backpointer embed + latent embed)
+            filler = torch.full((B, 1), pad_token_id, dtype=torch.long, device=memory.device)  # [batch_size, 1]
+            bp_filler = torch.zeros((B, 1), dtype=torch.long, device=memory.device)  # [batch_size, 1]
             
-            # First position: use only prompt + (filler embed + latent embed)
-            filler = torch.full((B * M, 1), pad_token_id, dtype=torch.long, device=chain_memory.device)
-            input_embeds = self.decoder.transformer.wte(filler).add_(chain_memory[:, 0:1, :])  # [B*M, 1, d_model]
-                
+            # Combine all embeddings for the first position
+            token_embeds = self.decoder.transformer.wte(filler)  # token embeddings for filler: [B, 1, d_model]
+            bp_embeds = self.backpointer_embeddings(bp_filler)  # backpointer embeddings:       [B, 1, d_model]
+            latent_embeds = memory[:, 0:1, :]  # latent embeddings (furst position):            [B, 1, d_model]
+            first_token_embeds = token_embeds + bp_embeds + latent_embeds                      #[B, 1, d_model]
+
+            # Concatenate prompt embeddings and first token embedding, or just use first token embedding if no prompt
             if K > 0:
-                attn_mask = torch.cat((prompt_mask_flat, torch.ones(B * M, L, device=chain_memory.device)), dim=1) # [B*M, K+L]
+                prompt_embeds = self.decoder.transformer.wte(prompt_sequences)  # [B, K, d_model]
+                prompt_mask_val = prompt_mask if prompt_mask else torch.ones_like(prompt_sequences, device=memory.device)  # [B, K]
+                
+                input_embeds = torch.cat([prompt_embeds, first_token_embeds], dim=1)  # [B, K+1, d_model]
+                attn_mask = torch.cat([prompt_mask_val, torch.ones(B, L, device=memory.device, dtype=prompt_mask_val.dtype)], dim=1)  # [B, K+L]
             else:
-                attn_mask = torch.ones(B * M, L, device=chain_memory.device)
-            
+                input_embeds = first_token_embeds  # [B, 1, d_model]
+                attn_mask = torch.ones(B, L, device=memory.device)  # [B, L]
+
             if use_caching:
-                # Use cache for prompt
-                if K > 0:
-                    prompt_cache = self._get_prompt_cache(self.decoder, prompt_sequences, prompt_mask)
-                    padded_cache = self._pad_kv_cache(prompt_cache, B, M)
-                    del prompt_cache
-                else:
-                    padded_cache = None
-                # Only pass COT+latent embeddings to decoder, but with cache & full attention mask
+                # No cache is used for the prompt, just pass the concatenated embeddings
                 decoder_outputs = self.decoder(
                     input_ids=None,
                     inputs_embeds=input_embeds,
@@ -1922,22 +1905,33 @@ class GPT2VQVAE(nn.Module):
                     encoder_attention_mask=None,
                     use_cache=True,
                     return_dict=True,
-                    past_key_values=padded_cache
+                    past_key_values=None
                 )
                 
+                # Store first position outputs
+                output_logits[:, 0, :] = decoder_outputs.logits[:, -1, :]
+                output_backpointer_logits[:, 0, :] = decoder_outputs.backpointer_logits[:, -1, :]
+                
+                # Get generated tokens and backpointers for next step
+                generated_tokens = torch.argmax(decoder_outputs.logits[:, -1, :], dim=-1)  # [B, 1]
+                generated_backpointers = torch.argmax(decoder_outputs.backpointer_logits[:, -1, :], dim=-1)  # [B, 1]
+                
+                # Update cache for next step
+                prev_cache = decoder_outputs.past_key_values
+                del decoder_outputs
+                
+                # Subsequent positions: use prompt + generated tokens + current latent
                 for t in range(1, L):
-                    latest_logits = decoder_outputs.logits
-                    output_logits[..., t-1, :] = latest_logits.view(B, M, -1)
-                    prev_cache = decoder_outputs.past_key_values
-                    del decoder_outputs
+                    # Combine all embeddings
+                    generated_embed = self.decoder.transformer.wte(generated_tokens)  # token embedding:     [B, 1, d_model]
+                    generated_bp_embed = self.backpointer_embeddings(generated_backpointers)  # backpointer: [B, 1, d_model]
+                    current_latent = memory[:, t:t+1, :]  # latent embedding:                                [B, 1, d_model]
+                    input_embeds = generated_embed + generated_bp_embed + current_latent                   # [B, 1, d_model]
                     
-                    # Subsequent positions: use prompt + generated tokens + current latent
-                    generated_embed = self.decoder.transformer.wte(torch.argmax(latest_logits, dim=-1))  # [B*M, 1, d_model]
-                    generated_embed.add_(chain_memory[:, t:t+1, :])   # [B*M, 1, d_model]
-                    
+                    # Decode with updated cache
                     decoder_outputs = self.decoder(
                         input_ids=None,
-                        inputs_embeds=generated_embed,
+                        inputs_embeds=input_embeds,
                         attention_mask=attn_mask[:, :K+t+2],
                         encoder_hidden_states=None,
                         encoder_attention_mask=None,
@@ -1945,13 +1939,21 @@ class GPT2VQVAE(nn.Module):
                         return_dict=True,
                         past_key_values=prev_cache
                     )
-                    del prev_cache
-                
-                output_logits[..., L-1, :] = decoder_outputs.logits.view(B, M, -1)
-                del decoder_outputs
+                    
+                    # Store outputs for current position
+                    output_logits[:, t, :] = decoder_outputs.logits
+                    output_backpointer_logits[:, t, :] = decoder_outputs.backpointer_logits
+                    
+                    # Get generated tokens and backpointers for next step
+                    generated_tokens = torch.argmax(decoder_outputs.logits, dim=-1)  # [B, 1]
+                    generated_backpointers = torch.argmax(decoder_outputs.backpointer_logits, dim=-1)  # [B, 1]
+                    
+                    # Update cache for next step
+                    prev_cache = decoder_outputs.past_key_values
+                    del decoder_outputs
             else:
                 # TODO FINISH IMPLEMENTING! FOR NOW, I WILL SKIP
-                raise Exception("Auto-regressive generation for embed sum mode isn't implemented efficiently yet.")
+                raise Exception("Auto-regressive generation for compress search sum mode isn't implemented efficiently yet.")
                 
                 input_embeds = torch.cat([prompt_embeds, input_embeds], dim=1)  # [B*M, K+1, d_model]
                 for t in range(1, L):
@@ -1973,7 +1975,7 @@ class GPT2VQVAE(nn.Module):
             if hasattr(torch.cuda, 'empty_cache'):
                 torch.cuda.empty_cache()
             
-            return output_logits
+            return output_logits, output_backpointer_logits
     
     def _decode_normal(self, chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
                        inference, pad_token_id, use_caching):
