@@ -5,7 +5,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import GPT2Model, GPT2LMHeadModel, GPT2Config
+from transformers import GPT2Model, GPT2LMHeadModel, GPT2Config, AutoModelForCausalLM
 from transformers.cache_utils import DynamicCache, EncoderDecoderCache, Cache
 from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions, CausalLMOutputWithCrossAttentions
 from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask_for_sdpa
@@ -16,6 +16,10 @@ from typing import Optional, Union, Tuple
 import warnings
 
 logger = logging.getLogger(__name__)
+
+# Model name for loading text embeddings when compress_beam_search is True
+MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+
 
 def compute_perplexity(encodings: torch.Tensor, input_type: str, eps: float = 1e-10) -> torch.Tensor:
     """
@@ -569,6 +573,9 @@ class GPT2VQVAE(nn.Module):
         
         if only_latent_decode and simple_decoder:
             raise ValueError("Cannot set both only_latent_decode and simple_decoder to True.")
+        if compress_beam_search and (use_pretrained_encoder or use_pretrained_decoder):
+            raise ValueError("compress_beam_search mode is incompatible with loading any pre-trained GPT2 models as it " + \
+                             f"uses the embedding layer of {MODEL_NAME}.")
         if compress_beam_search and (only_latent_decode or simple_decoder or embed_sum_decode):
             raise ValueError("compress_beam_search mode is incompatible with other decode modes.")
         
@@ -707,13 +714,109 @@ class GPT2VQVAE(nn.Module):
             else:
                 self.decoder = model_class(self.decoder_config)
         
+        # Replace text embedding layer with DeepSeek embeddings when compress_beam_search is True
+        if self.compress_beam_search:
+            print(f"Replacing text embedding layer with embeddings from {MODEL_NAME}...")
+            # Load the DeepSeek model to get its embedding layer
+            deepseek_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype=torch.float32)
+            
+            # Get the embedding layer from the DeepSeek model
+            if hasattr(deepseek_model, 'model') and hasattr(deepseek_model.model, 'embed_tokens'):
+                # For models like Llama, Qwen, etc.
+                deepseek_embeddings = deepseek_model.model.embed_tokens
+            elif hasattr(deepseek_model, 'transformer') and hasattr(deepseek_model.transformer, 'wte'):
+                # For GPT-style models
+                deepseek_embeddings = deepseek_model.transformer.wte
+            elif hasattr(deepseek_model, 'embed_tokens'):
+                # Direct access
+                deepseek_embeddings = deepseek_model.embed_tokens
+            else:
+                raise ValueError(f"Could not find embedding layer in {MODEL_NAME}")
+            
+            # Get embedding dimensions
+            deepseek_embed_dim = deepseek_embeddings.embedding_dim
+            deepseek_vocab_size = deepseek_embeddings.num_embeddings
+            
+            print(f"DeepSeek model embedding dimensions: vocab_size={deepseek_vocab_size}, embed_dim={deepseek_embed_dim}")
+            print(f"GPT2VQVAE embedding dimensions: vocab_size={vocab_size}, d_model={d_model}")
+            
+            # Check if dimensions are compatible and create projection if needed
+            if deepseek_embed_dim != d_model:
+                print(f"DeepSeek embedding dimension ({deepseek_embed_dim}) differs from GPT2VQVAE d_model ({d_model}), creating shared linear projection.")
+                # Create a shared learnable projection layer
+                self.embedding_projection = nn.Linear(deepseek_embed_dim, d_model)  # [deepseek_embed_dim, d_model]
+                # Initialize the projection layer with small weights for stable training
+                nn.init.xavier_uniform_(self.embedding_projection.weight)  # [d_model, deepseek_embed_dim]
+                nn.init.zeros_(self.embedding_projection.bias)  # [d_model]
+                print(f"Created shared embedding projection: {deepseek_embed_dim} -> {d_model}")
+            else:
+                self.embedding_projection = None
+                print("No projection needed - dimensions match")
+            
+            # Replace encoder embeddings
+            if hasattr(self.encoder, 'wte'):
+                new_encoder_embeddings = nn.Embedding(deepseek_vocab_size, deepseek_embed_dim)  # [deepseek_vocab_size, deepseek_embed_dim]
+                # Load pre-trained weights & freeze as needed
+                if load_text_embeddings_encoder:
+                    new_encoder_embeddings.weight.data.copy_(deepseek_embeddings.weight.data)  # [deepseek_vocab_size, deepseek_embed_dim]
+                    if freeze_text_embeddings_encoder:
+                        self.new_encoder_embeddings.weight.requires_grad = False
+                        print("Frozen text embeddings in encoder")
+                    else:
+                        print("Loaded text embeddings in encoder (trainable)")
+
+                if self.embedding_projection is not None:
+                    # Create sequential module: embeddings -> projection
+                    self.encoder.wte = nn.Sequential( # Output: [batch_size, seq_len, d_model]
+                        new_encoder_embeddings,  # [deepseek_vocab_size, deepseek_embed_dim]
+                        self.embedding_projection  # [deepseek_embed_dim, d_model]
+                    )
+                    print(f"Replaced encoder text embeddings with {MODEL_NAME} embeddings + projection")
+
+                else:
+                    # No projection needed, just replace embeddings
+                    self.encoder.wte = new_encoder_embeddings
+                    print(f"Replaced encoder text embeddings with {MODEL_NAME} embeddings")
+            
+            # Replace decoder embeddings
+            if hasattr(self.decoder, 'transformer') and hasattr(self.decoder.transformer, 'wte'):
+                new_decoder_embeddings = nn.Embedding(deepseek_vocab_size, deepseek_embed_dim)  # [deepseek_vocab_size, deepseek_embed_dim]
+                # Load pre-trained weights & freeze as needed
+                if load_text_embeddings_decoder:
+                    new_decoder_embeddings.weight.data.copy_(deepseek_embeddings.weight.data)  # [deepseek_vocab_size, deepseek_embed_dim]
+                    if freeze_text_embeddings_decoder:
+                        self.new_decoder_embeddings.weight.requires_grad = False
+                        print("Frozen text embeddings in decoder")
+                    else:
+                        print("Loaded text embeddings in decoder (trainable)")
+
+                if self.embedding_projection is not None:
+                    # Create sequential module: embeddings -> projection
+                    self.decoder.transformer.wte = nn.Sequential( # Output: [batch_size, seq_len, d_model]
+                        new_decoder_embeddings,  # [deepseek_vocab_size, deepseek_embed_dim]
+                        self.embedding_projection  # [deepseek_embed_dim, d_model]
+                    )
+                    print(f"Replaced decoder text embeddings with {MODEL_NAME} embeddings + projection")
+                else:
+                    # No projection needed, just replace embeddings
+                    self.decoder.transformer.wte = new_decoder_embeddings
+                    print(f"Replaced decoder text embeddings with {MODEL_NAME} embeddings")
+            
+            # Update configs to reflect new vocabulary size
+            self.encoder_config.vocab_size = deepseek_vocab_size
+            self.decoder_config.vocab_size = deepseek_vocab_size
+            
+            # Clean up the loaded model to free memory
+            del deepseek_model
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        
         # Vector Quantizer
         self.vector_quantizer = VectorQuantizer(num_embeddings, d_model, commitment_cost)
         
         # Aggregation MLP - configurable with one or two hidden layers
         # TODO: Consider different options - might cause posterior collapse if too strong
         mlp_layers = [
-            nn.Linear(num_thoughts * d_model, aggregation_hidden_dim),
+            nn.Linear(num_thoughts * d_model, aggregation_hidden_dim),  # [num_thoughts * d_model, aggregation_hidden_dim]
             nn.ReLU(),
             nn.Dropout(0.1),  # GPT2's default dropout
         ]
@@ -721,24 +824,24 @@ class GPT2VQVAE(nn.Module):
         # Add second hidden layer if specified
         if aggregation_hidden_dim2 is not None:
             mlp_layers.extend([
-                nn.Linear(aggregation_hidden_dim, aggregation_hidden_dim2),
+                nn.Linear(aggregation_hidden_dim, aggregation_hidden_dim2),  # [aggregation_hidden_dim, aggregation_hidden_dim2]
                 nn.ReLU(),
                 nn.Dropout(0.1),  # GPT2's default dropout
             ])
             # Final layer maps from second hidden layer to output
-            mlp_layers.append(nn.Linear(aggregation_hidden_dim2, d_model))
+            mlp_layers.append(nn.Linear(aggregation_hidden_dim2, d_model))  # [aggregation_hidden_dim2, d_model]
         else:
             # Final layer maps from first hidden layer to output
-            mlp_layers.append(nn.Linear(aggregation_hidden_dim, d_model))
+            mlp_layers.append(nn.Linear(aggregation_hidden_dim, d_model))  # [aggregation_hidden_dim, d_model]
         
         self.aggregation_mlp = nn.Sequential(*mlp_layers)
         
         # Chain-positional embeddings to differentiate M sequences
-        self.chain_embeddings = nn.Embedding(num_thoughts, d_model)
+        self.chain_embeddings = nn.Embedding(num_thoughts, d_model)  # [num_thoughts, d_model]
         # Initialize with values that match typical encoder output norms
         # Typical encoder outputs have norms around 5-15, so we initialize chain embeddings 
         # to have similar magnitude to be effective
-        nn.init.normal_(self.chain_embeddings.weight, mean=0.0, std=0.1)
+        nn.init.normal_(self.chain_embeddings.weight, mean=0.0, std=0.1)  # [num_thoughts, d_model]
         # found some info here: https://stats.stackexchange.com/questions/167133/expected-magnitude-of-a-vector-from-a-multivariate-normal
         # for p = 768, this evaluates to ~27.7 when sigma=1: https://www.wolframalpha.com/input?i=sqrt%282%29+*+gamma%28%28768+%2B+1%29%2F2%29+%2F+gamma%28768%2F2%29
         # assuming the general encoder input norms are ~15 and we wanna keep the chains smaller, 
@@ -746,8 +849,8 @@ class GPT2VQVAE(nn.Module):
         
         # Backpointer embeddings for compress_beam_search mode
         if self.compress_beam_search:
-            self.backpointer_embeddings = nn.Embedding(num_thoughts, d_model)
-            nn.init.normal_(self.backpointer_embeddings.weight, mean=0.0, std=0.02)
+            self.backpointer_embeddings = nn.Embedding(num_thoughts, d_model)  # [num_thoughts, d_model]
+            nn.init.normal_(self.backpointer_embeddings.weight, mean=0.0, std=0.02)  # [num_thoughts, d_model]
         
         self.d_model = d_model
         self.num_thoughts = num_thoughts
