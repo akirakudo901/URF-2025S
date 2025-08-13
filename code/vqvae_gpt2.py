@@ -11,6 +11,7 @@ from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask_for
 from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions, CausalLMOutputWithCrossAttentions
 from transformers.modeling_utils import SpecificPreTrainedModelType, restore_default_torch_dtype
 
+from dataclasses import dataclass
 import gc
 import logging
 from typing import Optional, Union, Tuple
@@ -1123,7 +1124,7 @@ class GPT2VQVAE(nn.Module):
         if no_vq:
             # For no_vq mode, tile the aggregated embeddings back to match the expected shape
             quantized = aggregated.unsqueeze(1).expand(-1, M, -1)  # [batch_size * L, M, d_model]
-            quantized = quantized.view(batch_size, M*L, quantized.size(-1)) # [batch_size, L * M, d_model]
+            quantized = quantized.reshape(batch_size, M*L, quantized.size(-1)) # [batch_size, L * M, d_model]
             vq_loss = torch.tensor(0.0, device=quantized.device)
             perplexity = torch.tensor(0.0, device=quantized.device)
             indices = torch.zeros(batch_size, M*L, device=quantized.device, dtype=torch.long)
@@ -2511,6 +2512,16 @@ def add_backpointer_embeddings(sequence, backpointers, num_thoughts, d_model, de
     # In practice, this would be combined with the actual token embeddings
     return bp_embeds
 
+@dataclass
+class CausalLMOutputWithCrossAttentionsWithBackpointerLogits(CausalLMOutputWithCrossAttentions):
+    """
+    Causal language model (or autoregressive) outputs with backpointer logits.
+
+    Args:
+        backpointer_logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, num_thoughts)`):
+            Prediction scores of the backpointer reconstruction head (scores for each backpointer before SoftMax).
+    """
+    backpointer_logits: Optional[torch.FloatTensor] = None
 
 class CompressBeamSearchGPT2LMHeadModel(GPT2LMHeadModel):
     """
@@ -2546,7 +2557,7 @@ class CompressBeamSearchGPT2LMHeadModel(GPT2LMHeadModel):
         return_dict: Optional[bool] = None,
         extra_cross_attention_mask: Optional[torch.FloatTensor] = None,
         **kwargs,
-    ) -> Union[Tuple, CausalLMOutputWithCrossAttentions]:
+    ) -> Union[Tuple, CausalLMOutputWithCrossAttentionsWithBackpointerLogits]:
         r"""
         input_ids (`torch.LongTensor` of shape `(batch_size, input_ids_length)`):
             `input_ids_length` = `sequence_length` if `past_key_values` is `None` else
@@ -2625,7 +2636,7 @@ class CompressBeamSearchGPT2LMHeadModel(GPT2LMHeadModel):
             output = (lm_logits, backpointer_logits) + transformer_outputs[1:]
             return ((loss,) + output) if loss is not None else output
 
-        return CausalLMOutputWithCrossAttentions(
+        return CausalLMOutputWithCrossAttentionsWithBackpointerLogits(
             loss=loss,
             logits=lm_logits,
             backpointer_logits=backpointer_logits,
