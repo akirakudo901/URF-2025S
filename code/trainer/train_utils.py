@@ -443,7 +443,7 @@ def compute_reconstruction_loss(output_logits: torch.Tensor,
         recon_loss = criterion(logits_flat[mask_flat], targets_flat[mask_flat])
     
     bp_recon_loss = torch.tensor(0.0, device=output_logits.device)
-    if backpointer_logits and target_pointers and mask_flat.sum() > 0:
+    if (backpointer_logits is not None) and (target_pointers is not None) and mask_flat.sum() > 0:
         bp_logits_flat = backpointer_logits.reshape(-1, backpointer_logits.size(-1))
         targets_flat = target_pointers.view(-1)
     

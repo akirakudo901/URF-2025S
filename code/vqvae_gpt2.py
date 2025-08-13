@@ -641,12 +641,13 @@ class GPT2VQVAE(nn.Module):
         if self.only_latent_decode or self.simple_decoder or self.embed_sum_decode:
             self.decoder_config.add_cross_attention = False
         
-        # Initialize encoder with or without pretrained weights
-        if use_pretrained_encoder:
-            if self.compress_beam_search:
+        if self.compress_beam_search and (use_pretrained_encoder or use_pretrained_decoder):
                 warnings.Warning(
-                    "compress_beam_search isn't yet de facto compatible with loading pretrained encoders. The results might be unexpected.")
+                    "compress_beam_search isn't compatible with loading pretrained GPT2 encoders & decoders."
+                    )
 
+        # Initialize encoder with or without pretrained weights
+        if use_pretrained_encoder and not self.compress_beam_search:
             print(f"\nLoading pretrained {pretrained_model_name} weights for encoder...")
             self.encoder = GPT2Model.from_pretrained(pretrained_model_name, config=self.encoder_config)
             # Ensure the encoder uses our config (in case vocab_size differs)
@@ -660,7 +661,7 @@ class GPT2VQVAE(nn.Module):
                 print("Frozen text embeddings in encoder")
             else:
                 print("Loaded text embeddings in encoder (trainable)")
-        elif load_text_embeddings_encoder:
+        elif load_text_embeddings_encoder and not self.compress_beam_search:
             print(f"\nLoading only text embeddings from {pretrained_model_name} for encoder...")
             self.encoder = GPT2Model(self.encoder_config)
             # Load only the text embeddings from pretrained model
@@ -683,10 +684,7 @@ class GPT2VQVAE(nn.Module):
         else:
             model_class = CustomGPT2LMHeadModel
         
-        if use_pretrained_decoder:
-            warnings.Warning(
-                    "compress_beam_search isn't yet de facto compatible with loading pretrained decoders. The results might be unexpected."
-                    )
+        if use_pretrained_decoder and not self.compress_beam_search:
             print(f"Loading pretrained {pretrained_model_name} weights for decoder...")
             if self.compress_beam_search:
                 self.decoder = model_class.from_pretrained(num_thoughts, pretrained_model_name, config=self.decoder_config)
@@ -703,7 +701,7 @@ class GPT2VQVAE(nn.Module):
                 print("Frozen text embeddings in decoder")
             else:
                 print("Loaded text embeddings in decoder (trainable)")
-        elif load_text_embeddings_decoder:
+        elif load_text_embeddings_decoder and not self.compress_beam_search:
             print(f"Loading only text embeddings from {pretrained_model_name} for decoder...")
             if self.compress_beam_search:
                 self.decoder = model_class(self.decoder_config, num_thoughts=num_thoughts)
@@ -1816,8 +1814,7 @@ class GPT2VQVAE(nn.Module):
             pad_token_id (int): Token ID to use for padding
             
         Returns:
-            tuple: (output_sequences, output_logits, backpointer_logits)
-                - output_sequences: [batch_size, M, L]
+            tuple: (output_logits, backpointer_logits)
                 - output_logits: [batch_size, M, L, vocab_size]
                 - backpointer_logits: [batch_size, M, L, num_thoughts]
         """
