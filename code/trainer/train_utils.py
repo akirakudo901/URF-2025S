@@ -67,7 +67,8 @@ def validate_model_data_compatibility(model_config: Dict[str, Any],
                                     prompt_sequences: torch.Tensor,
                                     cot_sequences: torch.Tensor,
                                     prompt_mask: torch.Tensor,
-                                    cot_mask: torch.Tensor) -> None:
+                                    cot_mask: torch.Tensor,
+                                    backpointers: Optional[torch.Tensor] = None) -> None:
     """
     Validate that model configuration is compatible with the loaded data.
     
@@ -77,6 +78,7 @@ def validate_model_data_compatibility(model_config: Dict[str, Any],
         cot_sequences: Chain-of-thought sequences tensor
         prompt_mask: Prompt mask tensor
         cot_mask: Chain-of-thought mask tensor
+        backpointers: Optional backpointers tensor (same shape as cot_sequences)
     """
     print("Validating model-data compatibility...")
     
@@ -145,6 +147,29 @@ def validate_model_data_compatibility(model_config: Dict[str, Any],
             print(f"   {name}: {actual_shape}")
         else:
             print(f"   ⚠️  {name}: expected {expected_shape}, got {actual_shape}")
+    
+    # Add backpointers validation if provided
+    if backpointers is not None:
+        expected_backpointer_shape = (batch_size, cot_sequences.shape[1], cot_sequences.shape[2])
+        actual_backpointer_shape = backpointers.shape
+        
+        if actual_backpointer_shape == expected_backpointer_shape:
+            print(f"   backpointers: {actual_backpointer_shape}")
+        else:
+            print(f"   ⚠️  backpointers: expected {expected_backpointer_shape}, got {actual_backpointer_shape}")
+        
+        # Validate backpointer values are within valid range
+        if cot_sequences.shape[1] > 0:  # Check if we have any sequences
+            max_backpointer = backpointers.max().item()
+            min_backpointer = backpointers.min().item()
+            num_thoughts = cot_sequences.shape[1]
+            
+            if max_backpointer >= num_thoughts or min_backpointer < 0:
+                print(f"⚠️  Warning: Backpointers contain invalid values!")
+                print(f"   → Backpointers range: [{min_backpointer}, {max_backpointer}]")
+                print(f"   → Expected range: [0, {num_thoughts-1}]")
+            else:
+                print(f"✅ Backpointer values valid: range [{min_backpointer}, {max_backpointer}] within [0, {num_thoughts-1}]")
     
     print("✅ Model-data compatibility validation complete!")
 
