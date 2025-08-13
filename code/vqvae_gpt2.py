@@ -7,8 +7,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import GPT2Model, GPT2LMHeadModel, GPT2Config, AutoModelForCausalLM
 from transformers.cache_utils import DynamicCache, EncoderDecoderCache, Cache
-from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions, CausalLMOutputWithCrossAttentions
 from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask_for_sdpa
+from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions, CausalLMOutputWithCrossAttentions
+from transformers.modeling_utils import SpecificPreTrainedModelType, restore_default_torch_dtype
 
 import gc
 import logging
@@ -641,6 +642,10 @@ class GPT2VQVAE(nn.Module):
         
         # Initialize encoder with or without pretrained weights
         if use_pretrained_encoder:
+            if self.compress_beam_search:
+                warnings.Warning(
+                    "compress_beam_search isn't yet de facto compatible with loading pretrained encoders. The results might be unexpected.")
+
             print(f"\nLoading pretrained {pretrained_model_name} weights for encoder...")
             self.encoder = GPT2Model.from_pretrained(pretrained_model_name, config=self.encoder_config)
             # Ensure the encoder uses our config (in case vocab_size differs)
@@ -676,10 +681,14 @@ class GPT2VQVAE(nn.Module):
             model_class = GPT2LMHeadModel
         else:
             model_class = CustomGPT2LMHeadModel
+        
         if use_pretrained_decoder:
+            warnings.Warning(
+                    "compress_beam_search isn't yet de facto compatible with loading pretrained decoders. The results might be unexpected."
+                    )
             print(f"Loading pretrained {pretrained_model_name} weights for decoder...")
             if self.compress_beam_search:
-                self.decoder = model_class.from_pretrained(pretrained_model_name, config=self.decoder_config, num_thoughts=num_thoughts)
+                self.decoder = model_class.from_pretrained(num_thoughts, pretrained_model_name, config=self.decoder_config)
             else:
                 self.decoder = model_class.from_pretrained(pretrained_model_name, config=self.decoder_config)
             # Ensure the decoder uses our config
@@ -700,7 +709,7 @@ class GPT2VQVAE(nn.Module):
             else:
                 self.decoder = model_class(self.decoder_config)
             # Load only the text embeddings from pretrained model
-            pretrained_decoder = model_class.from_pretrained(pretrained_model_name)
+            pretrained_decoder = GPT2LMHeadModel.from_pretrained(pretrained_model_name)
             self.decoder.transformer.wte.weight.data.copy_(pretrained_decoder.transformer.wte.weight.data)
             if freeze_text_embeddings_decoder:
                 self.decoder.transformer.wte.weight.requires_grad = False
@@ -760,7 +769,7 @@ class GPT2VQVAE(nn.Module):
                 if load_text_embeddings_encoder:
                     new_encoder_embeddings.weight.data.copy_(deepseek_embeddings.weight.data)  # [deepseek_vocab_size, deepseek_embed_dim]
                     if freeze_text_embeddings_encoder:
-                        self.new_encoder_embeddings.weight.requires_grad = False
+                        new_encoder_embeddings.weight.requires_grad = False
                         print("Frozen text embeddings in encoder")
                     else:
                         print("Loaded text embeddings in encoder (trainable)")
@@ -785,7 +794,7 @@ class GPT2VQVAE(nn.Module):
                 if load_text_embeddings_decoder:
                     new_decoder_embeddings.weight.data.copy_(deepseek_embeddings.weight.data)  # [deepseek_vocab_size, deepseek_embed_dim]
                     if freeze_text_embeddings_decoder:
-                        self.new_decoder_embeddings.weight.requires_grad = False
+                        new_decoder_embeddings.weight.requires_grad = False
                         print("Frozen text embeddings in decoder")
                     else:
                         print("Loaded text embeddings in decoder (trainable)")
@@ -2621,3 +2630,36 @@ class CompressBeamSearchGPT2LMHeadModel(GPT2LMHeadModel):
             attentions=transformer_outputs.attentions,
             cross_attentions=transformer_outputs.cross_attentions,
         )
+    
+    # Override from_pretrained such that it can load pretained weights (num_thoughts and the backpointer head is left random)
+    @classmethod
+    @restore_default_torch_dtype
+    def from_pretrained(cls: type[SpecificPreTrainedModelType], num_thoughts: int, *args, **kwargs):
+        # Load the pretrained model weights
+        pretrained_model = GPT2LMHeadModel.from_pretrained(*args, **kwargs)
+        if 'config' not in kwargs:
+            raise Exception("Please pass config as a keywoard argument to CompressBeamSearchGPT2LMHeadModel.from_pretrained")
+        config = kwargs['config']
+        
+        # Generate a new model of our type according to our __init__()
+        model = cls(config, num_thoughts)
+        
+        # Copy over all pretrained weights except backpointer_head
+        # The backpointer_head is already initialized in __init__ with random weights
+        with torch.no_grad():
+            # Copy transformer weights
+            for name, param in pretrained_model.transformer.named_parameters():
+                if name in model.transformer.state_dict():
+                    model.transformer.state_dict()[name].copy_(param)
+            
+            # Copy lm_head weights
+            model.lm_head.weight.copy_(pretrained_model.lm_head.weight)
+            if hasattr(pretrained_model.lm_head, 'bias') and pretrained_model.lm_head.bias is not None:
+                model.lm_head.bias.copy_(pretrained_model.lm_head.bias)
+            
+            # Copy other attributes that might exist
+            for name, param in pretrained_model.named_parameters():
+                if name not in ['backpointer_head.weight', 'backpointer_head.bias'] and name in model.state_dict():
+                    model.state_dict()[name].copy_(param)
+
+        return model
