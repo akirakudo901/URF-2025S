@@ -1060,8 +1060,10 @@ class GPT2VQVAE(nn.Module):
         beam_sequence = positionwise_flatten(cot_sequences)  # [batch_size, M*L] each
         beam_backpointers = positionwise_flatten(backpointers)
 
-        beam_mask = positionwise_flatten(cot_mask) if cot_mask else torch.ones_like(beam_sequence)
-        prompt_mask = prompt_mask if prompt_mask else torch.ones_like(prompt_sequences)
+        beam_mask = positionwise_flatten(cot_mask) if cot_mask is not None \
+                    else torch.ones_like(beam_sequence)
+        prompt_mask = prompt_mask if prompt_mask is not None \
+                      else torch.ones_like(prompt_sequences)
         
         # Add backpointer embeddings to the sequence
         bp_embeds = self.backpointer_embeddings(beam_backpointers)  # [batch_size, M*L, d_model]
@@ -1840,8 +1842,9 @@ class GPT2VQVAE(nn.Module):
             cot_input_embeds = token_embeds + bp_embeds + memory  # [B, M*L, d_model]
 
             # Deal with masks
-            prompt_mask = prompt_mask if prompt_mask else torch.ones_like(prompt_sequences)
-            beam_mask = positionwise_flatten(cot_mask) if cot_mask else torch.ones_like(beam_sequence, device=beam_sequence.device)
+            prompt_mask = prompt_mask if prompt_mask is not None else torch.ones_like(prompt_sequences)
+            beam_mask = positionwise_flatten(cot_mask) if cot_mask is not None \
+                        else torch.ones_like(beam_sequence, device=beam_sequence.device)
             # The mask is shifted to match beam_with_filler
             beam_mask = torch.cat([
                 torch.ones((B, 1), dtype=beam_mask.dtype, device=beam_mask.device),
@@ -1896,7 +1899,8 @@ class GPT2VQVAE(nn.Module):
             # Concatenate prompt embeddings and first token embedding, or just use first token embedding if no prompt
             if K > 0:
                 prompt_embeds = self.decoder.transformer.wte(prompt_sequences)  # [B, K, d_model]
-                prompt_mask_val = prompt_mask if prompt_mask else torch.ones_like(prompt_sequences, device=memory.device)  # [B, K]
+                prompt_mask_val = prompt_mask if prompt_mask is not None \
+                                  else torch.ones_like(prompt_sequences, device=memory.device)  # [B, K]
                 
                 input_embeds = torch.cat([prompt_embeds, first_token_embeds], dim=1)  # [B, K+1, d_model]
                 attn_mask = torch.cat([prompt_mask_val, torch.ones(B, L, device=memory.device, dtype=prompt_mask_val.dtype)], dim=1)  # [B, K+L]
@@ -2476,7 +2480,7 @@ def positionwise_flatten(sequence):
                                  [C1T1, C2T1, ..., CMT1, C1T2, C2T2, ..., CMT2, ...]
     """
     batch_size, M, L = sequence.shape
-    return sequence.transpose(1, 2).view(batch_size, L * M)  # [batch_size, L, M] -> [batch_size, L * M]
+    return sequence.transpose(1, 2).reshape(batch_size, L * M)  # [batch_size, L, M] -> [batch_size, L * M]
 
 
 def add_backpointer_embeddings(sequence, backpointers, num_thoughts, d_model, device):
