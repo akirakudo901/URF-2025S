@@ -678,7 +678,7 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
             cots = cots.unsqueeze(0).to(device)
             prompt_masks = prompt_masks.unsqueeze(0).to(device) if prompt_masks is not None else None
             cot_masks = cot_masks.unsqueeze(0).to(device) if cot_masks is not None else None
-            backpointers = backpointers.unsqueeze(0).to(device) if backpointers else None
+            backpointers = backpointers.unsqueeze(0).to(device) if backpointers is not None else None
             
             # Forward pass to get indices
             try:

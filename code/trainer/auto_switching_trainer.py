@@ -47,7 +47,7 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
         train_elems = [train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask]
         test_elems = [test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask]
         if self.model.compress_beam_search:
-            if train_backpointers and test_backpointers:
+            if (train_backpointers is not None) and (test_backpointers is not None):
                 train_elems += [train_backpointers]
                 test_elems += [test_backpointers]
             else:

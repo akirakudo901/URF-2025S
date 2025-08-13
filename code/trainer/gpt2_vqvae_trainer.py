@@ -627,7 +627,7 @@ class GPT2VQVAETrainer:
             cots = cots.to(self.device, non_blocking=True)
             prompt_masks = prompt_masks.to(self.device, non_blocking=True)
             cot_masks = cot_masks.to(self.device, non_blocking=True)
-            backpointers = backpointers.to(self.device, non_blocking=True) if backpointers else None
+            backpointers = backpointers.to(self.device, non_blocking=True) if (backpointers is not None) else None
 
             # TODO DEBUG PURPOSE
             if TRACK_IN_EPOCH_MEMORY and (batch_idx + 1) % TRACK_IN_EPOCH_MEMORY_EVERY_N == 0:
@@ -858,7 +858,7 @@ class GPT2VQVAETrainer:
                 cots = cots.to(self.device, non_blocking=True)
                 prompt_masks = prompt_masks.to(self.device, non_blocking=True)
                 cot_masks = cot_masks.to(self.device, non_blocking=True)
-                backpointers = backpointers.to(self.device, non_blocking=True) if backpointers else None
+                backpointers = backpointers.to(self.device, non_blocking=True) if (backpointers is not None) else None
                 
                 # Forward pass and loss calculation
                 if TRACK_MEMORY:
@@ -909,10 +909,10 @@ class GPT2VQVAETrainer:
                 backpointers=backpointers
             )
             if len(out) == 6:
-                _, output_logits, vq_loss, perplexity, indices, debug_stats =  out
+                _, output_logits, vq_loss, perplexity, indices, debug_stats = out
                 backpointer_logits = None
             elif len(out) == 7:
-                _, output_logits, vq_loss, perplexity, indices, debug_stats, backpointer_logits =  out
+                _, output_logits, vq_loss, perplexity, indices, debug_stats, backpointer_logits = out
             
             recon_loss, bp_recon_loss = compute_reconstruction_loss(
                 output_logits, cots, cot_masks, backpointer_logits=backpointer_logits, target_pointers=backpointers
@@ -1650,7 +1650,7 @@ class GPT2VQVAETrainer:
         train_elems = [train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask]
         test_elems = [test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask]
         if self.model.compress_beam_search:
-            if train_backpointers and test_backpointers:
+            if (train_backpointers is not None) and (test_backpointers is not None):
                 train_elems += [train_backpointers]
                 test_elems += [test_backpointers]
             else:
