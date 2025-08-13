@@ -463,16 +463,26 @@ def main():
                 trainer = GPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
 
         # Load training and test data using memory-efficient method with num_thoughts truncation
-        train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, \
-        test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask = load_training_data(
+        out = load_training_data(
             data_dir, max_samples=max_samples, num_thoughts=num_thoughts
         )
+
+        # without backpointers
+        if len(out) == 8:
+            train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, \
+                test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask = out
+            train_backpointers, test_backpointers = None, None
+        # with backpointers (required for compress_beam_search mode)
+        else: # len(out) == 10:
+            train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, train_backpointers, \
+                test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask, test_backpointers = out
         
         # Validate model-data compatibility for both train and test sets
+        # Note: backpointers are required when model.compress_beam_search=True
         print("Validating train data compatibility...")
-        validate_model_data_compatibility(model_config, train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask)
+        validate_model_data_compatibility(model_config, train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, train_backpointers)
         print("Validating test data compatibility...")
-        validate_model_data_compatibility(model_config, test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask)
+        validate_model_data_compatibility(model_config, test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask, test_backpointers)
         
         # Start training
         print("Starting training...")
@@ -487,6 +497,8 @@ def main():
             test_cot_sequences=test_cot_sequences,
             test_prompt_mask=test_prompt_mask,
             test_cot_mask=test_cot_mask,
+            train_backpointers=train_backpointers,
+            test_backpointers=test_backpointers,
             resume_from=args.resume_from,
             num_measurements_per_epoch=training_config.get('num_measurements_per_epoch', 20)
         )
