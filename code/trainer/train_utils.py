@@ -17,7 +17,8 @@ from torch.utils.data import TensorDataset
 
 from vqvae_gpt2 import compute_perplexity
 
-def _reorganize_sequences(prompt_sequences, cot_sequences, prompt_mask, cot_mask, num_thoughts, split_name):
+def _reorganize_sequences(prompt_sequences, cot_sequences, prompt_mask, cot_mask, num_thoughts, split_name,
+                          optional_tensors : dict=None):
     """
     Helper method to reorganize sequences when num_thoughts is specified.
     
@@ -28,6 +29,7 @@ def _reorganize_sequences(prompt_sequences, cot_sequences, prompt_mask, cot_mask
         cot_mask: CoT mask tensor
         num_thoughts: Number of parallel sequences to use
         split_name: Name of the split (train/test) for logging
+        optional_tensors: Optional dictionary of tensors (e.g. backpointers)
         
     Returns:
         Tuple of reorganized tensors
@@ -47,32 +49,19 @@ def _reorganize_sequences(prompt_sequences, cot_sequences, prompt_mask, cot_mask
     # Calculate new dataset size (each original sample becomes num_batches samples)
     original_batch_size = prompt_sequences.shape[0]
     new_batch_size = original_batch_size * num_batches
-    usable_sequences = num_batches * num_thoughts
-    
-    def reorganize_sequence_pair(sequence_1d, sequence_2d):
-        """Helper to reorganize a pair of prompt/cot sequences or masks"""
-        # Repeat 1D sequence to [batch_size * num_batches, seq_len] 
-        sequence_1d = sequence_1d.unsqueeze(1).repeat(1, num_batches, 1).reshape(-1, sequence_1d.size(-1))
-        
-        # Reshape 2D sequence to [batch_size * num_batches, num_thoughts, seq_len]
-        sequence_2d = sequence_2d[:, :usable_sequences, :]  # Remove remainder
-        sequence_2d = sequence_2d.view(original_batch_size, num_batches, num_thoughts, -1)
-        sequence_2d = sequence_2d.transpose(1, 2).contiguous().view(new_batch_size, num_thoughts, -1)
-        
-        return sequence_1d, sequence_2d
     
     # Reorganize sequences and masks
-    prompt_sequences, cot_sequences = reorganize_sequence_pair(prompt_sequences, cot_sequences)
-    prompt_mask, cot_mask = reorganize_sequence_pair(prompt_mask, cot_mask)
+    prompt_sequences = _reorganize_single_tensor(prompt_sequences, num_thoughts, num_batches, split_name, "prompt_sequences")
+    cot_sequences    = _reorganize_single_tensor(cot_sequences,    num_thoughts, num_batches, split_name,    "cot_sequences")
+    prompt_mask      = _reorganize_single_tensor(prompt_mask,      num_thoughts, num_batches, split_name,      "prompt_mask")
+    cot_mask         = _reorganize_single_tensor(cot_mask,         num_thoughts, num_batches, split_name,         "cot_mask")
+
+    for name, opt_ten in optional_tensors.items():
+        optional_tensors[name] = _reorganize_single_tensor(opt_ten, num_thoughts, num_batches, split_name, name)
     
-    print(f"Reorganized {split_name} data shapes:")
-    print(f"  prompt_sequences: {prompt_sequences.shape}")
-    print(f"  cot_sequences: {cot_sequences.shape}")
-    print(f"  prompt_mask: {prompt_mask.shape}")
-    print(f"  cot_mask: {cot_mask.shape}")
     print(f"  {split_name} dataset size increased from {original_batch_size} to {new_batch_size} samples")
     
-    return prompt_sequences, cot_sequences, prompt_mask, cot_mask
+    return prompt_sequences, cot_sequences, prompt_mask, cot_mask, optional_tensors
 
 def validate_model_data_compatibility(model_config: Dict[str, Any], 
                                     prompt_sequences: torch.Tensor,
@@ -755,6 +744,8 @@ def load_training_data(data_dir: str,
     Returns:
         Tuple of (train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask,
                     test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask)
+        or Tuple of (train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, train_backpointers,
+                    test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask, test_backpointers)
     """
     # Define train and test directories
     train_dir = os.path.join(data_dir, "train")
@@ -765,6 +756,12 @@ def load_training_data(data_dir: str,
         "cot_sequences_tensor.pt", 
         "prompt_mask.pt",
         "cot_mask.pt"
+    ]
+
+    # IMPORTANT: We expect tensors of either shape [num_batch, seq_len] or [num_batch, num_thoughts, seq_len]
+    #            Anything else might not be reorganized correctly using _reorganize_single_tensor
+    optional_files = [
+        "backpointers.pt" # same shape as cot_mask.pt and others
     ]
     
     # Check if train and test directories exist
@@ -784,6 +781,19 @@ def load_training_data(data_dir: str,
     if missing_files:
         raise FileNotFoundError(f"Missing data files: {missing_files}")
     
+    # Check if the optional files exist in both directories
+    existing_optional_files = []
+    for file_name in optional_files:
+        existing_optional_files.append(file_name)
+        for split_dir, split_name in [(train_dir, "train"), (test_dir, "test")]:
+            file_path = os.path.join(split_dir, file_name)
+            if not os.path.exists(file_path):
+                existing_optional_files.pop()
+                break
+    
+    if len(existing_optional_files) > 0:
+        print(f"The following optional files were found in both train/test directories: {','.join(existing_optional_files)}.")
+    
     # Load train tensors with memory mapping if available
     try:
         print(f"Loading train data from {train_dir}...")
@@ -791,6 +801,11 @@ def load_training_data(data_dir: str,
         train_cot_sequences = torch.load(os.path.join(train_dir, "cot_sequences_tensor.pt"), map_location='cpu')
         train_prompt_mask = torch.load(os.path.join(train_dir, "prompt_mask.pt"), map_location='cpu')
         train_cot_mask = torch.load(os.path.join(train_dir, "cot_mask.pt"), map_location='cpu')
+        
+        train_optional_tensors = dict(
+            ( (optional_file, torch.load(os.path.join(train_dir, optional_file), map_location='cpu') ) 
+              for optional_file in existing_optional_files)
+        )
     except Exception as e:
         print(f"Warning: Could not use memory mapping for train data: {e}")
         # Fallback to regular loading
@@ -798,6 +813,11 @@ def load_training_data(data_dir: str,
         train_cot_sequences = torch.load(os.path.join(train_dir, "cot_sequences_tensor.pt"))
         train_prompt_mask = torch.load(os.path.join(train_dir, "prompt_mask.pt"))
         train_cot_mask = torch.load(os.path.join(train_dir, "cot_mask.pt"))
+        
+        train_optional_tensors = dict(
+            (( optional_file, torch.load(os.path.join(train_dir, optional_file)) ) 
+              for optional_file in existing_optional_files)
+        )
     
     # Load test tensors with memory mapping if available
     try:
@@ -806,6 +826,11 @@ def load_training_data(data_dir: str,
         test_cot_sequences = torch.load(os.path.join(test_dir, "cot_sequences_tensor.pt"), map_location='cpu')
         test_prompt_mask = torch.load(os.path.join(test_dir, "prompt_mask.pt"), map_location='cpu')
         test_cot_mask = torch.load(os.path.join(test_dir, "cot_mask.pt"), map_location='cpu')
+
+        test_optional_tensors = dict(
+            (( optional_file, torch.load(os.path.join(test_dir, optional_file), map_location='cpu') ) 
+              for optional_file in existing_optional_files)
+        )
     except Exception as e:
         print(f"Warning: Could not use memory mapping for test data: {e}")
         # Fallback to regular loading
@@ -813,18 +838,27 @@ def load_training_data(data_dir: str,
         test_cot_sequences = torch.load(os.path.join(test_dir, "cot_sequences_tensor.pt"))
         test_prompt_mask = torch.load(os.path.join(test_dir, "prompt_mask.pt"))
         test_cot_mask = torch.load(os.path.join(test_dir, "cot_mask.pt"))
+
+        test_optional_tensors = dict(
+            (( optional_file, torch.load(os.path.join(test_dir, optional_file)) ) 
+              for optional_file in existing_optional_files)
+        )
     
     print(f"Train data shapes:")
     print(f"  prompt_sequences: {train_prompt_sequences.shape}")
     print(f"  cot_sequences: {train_cot_sequences.shape}")
     print(f"  prompt_mask: {train_prompt_mask.shape}")
     print(f"  cot_mask: {train_cot_mask.shape}")
+    for key, val in train_optional_tensors.items():
+        print(f"  {key}: {val.shape}")
     
     print(f"Test data shapes:")
     print(f"  prompt_sequences: {test_prompt_sequences.shape}")
     print(f"  cot_sequences: {test_cot_sequences.shape}")
     print(f"  prompt_mask: {test_prompt_mask.shape}")
     print(f"  cot_mask: {test_cot_mask.shape}")
+    for key, val in test_optional_tensors.items():
+        print(f"  {key}: {val.shape}")
     
     # Validate and reorganize based on num_thoughts for both train and test
     if num_thoughts is not None:
@@ -842,13 +876,13 @@ def load_training_data(data_dir: str,
         
         # Process train data if needed
         if train_current_num_thoughts > num_thoughts:
-            train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask = _reorganize_sequences(
+            train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, train_optional_tensors = _reorganize_sequences(
                 train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, num_thoughts, "train"
             )
         
         # Process test data if needed
         if test_current_num_thoughts > num_thoughts:
-            test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask = _reorganize_sequences(
+            test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask, test_optional_tensors = _reorganize_sequences(
                 test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask, num_thoughts, "test"
             )
     
@@ -857,7 +891,7 @@ def load_training_data(data_dir: str,
         # Generate random indices for sampling
         torch.manual_seed(seed)  # For reproducible sampling
             
-        def pick_N_random_samples(prompt_sequences, cot_sequences, prompt_mask, cot_mask, N, type):
+        def pick_N_random_samples(prompt_sequences, cot_sequences, prompt_mask, cot_mask, optional_tensors, N, type):
             # Limit samples if specified
             total_examples = len(prompt_sequences)
         
@@ -872,14 +906,20 @@ def load_training_data(data_dir: str,
             cot_sequences = cot_sequences[sample_indices]
             prompt_mask = prompt_mask[sample_indices]
             cot_mask = cot_mask[sample_indices]
-            return prompt_sequences, cot_sequences, prompt_mask, cot_mask
+            
+            # Sample optional tensors if they exist
+            sampled_optional_tensors = {}
+            for key, tensor in optional_tensors.items():
+                sampled_optional_tensors[key] = tensor[sample_indices]
+            
+            return prompt_sequences, cot_sequences, prompt_mask, cot_mask, sampled_optional_tensors
         
-        train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask = pick_N_random_samples(
-            train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, max_samples, "training"
+        train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, train_optional_tensors = pick_N_random_samples(
+            train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, train_optional_tensors, max_samples, "training"
             )
         
-        test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask = pick_N_random_samples(
-            test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask, max_samples, "testing"
+        test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask, test_optional_tensors = pick_N_random_samples(
+            test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask, test_optional_tensors, max_samples, "testing"
             )
 
         print(f"Randomly sampled {len(train_prompt_sequences)} training examples and {len(test_prompt_sequences)} testing examples using seed {seed}")
@@ -889,26 +929,32 @@ def load_training_data(data_dir: str,
     print(f"  cot_sequences: {train_cot_sequences.shape}")
     print(f"  prompt_mask: {train_prompt_mask.shape}")
     print(f"  cot_mask: {train_cot_mask.shape}")
+    for key, val in train_optional_tensors.items():
+        print(f"  {key}: {val.shape}")
     
     print(f"Final test data shapes:")
     print(f"  prompt_sequences: {test_prompt_sequences.shape}")
     print(f"  cot_sequences: {test_cot_sequences.shape}")
     print(f"  prompt_mask: {test_prompt_mask.shape}")
     print(f"  cot_mask: {test_cot_mask.shape}")
+    for key, val in test_optional_tensors.items():
+        print(f"  {key}: {val.shape}")
     
     # Calculate memory usage
     train_memory_gb = (
         train_prompt_sequences.element_size() * train_prompt_sequences.numel() +
         train_cot_sequences.element_size() * train_cot_sequences.numel() +
         train_prompt_mask.element_size() * train_prompt_mask.numel() +
-        train_cot_mask.element_size() * train_cot_mask.numel()
+        train_cot_mask.element_size() * train_cot_mask.numel() +
+        sum(tensor.element_size() * tensor.numel() for tensor in train_optional_tensors.values())
     ) / 1e9
     
     test_memory_gb = (
         test_prompt_sequences.element_size() * test_prompt_sequences.numel() +
         test_cot_sequences.element_size() * test_cot_sequences.numel() +
         test_prompt_mask.element_size() * test_prompt_mask.numel() +
-        test_cot_mask.element_size() * test_cot_mask.numel()
+        test_cot_mask.element_size() * test_cot_mask.numel() +
+        sum(tensor.element_size() * tensor.numel() for tensor in test_optional_tensors.values())
     ) / 1e9
     
     total_memory_gb = train_memory_gb + test_memory_gb
@@ -917,5 +963,56 @@ def load_training_data(data_dir: str,
     print(f"Test data memory usage: {test_memory_gb:.2f} GB")
     print(f"Total data memory usage: {total_memory_gb:.2f} GB")
     
-    return train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, \
-            test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask
+    # Return appropriate tuple based on whether optional files exist
+    if existing_optional_files:
+        # Extract backpointers from optional tensors if they exist
+        train_backpointers = train_optional_tensors.get("backpointers.pt", None)
+        test_backpointers = test_optional_tensors.get("backpointers.pt", None)
+        
+        return train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, train_backpointers, \
+                test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask, test_backpointers
+    else:
+        return train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, \
+                test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask
+
+
+def _reorganize_single_tensor(tensor, num_thoughts, num_batches, split_name, tensor_name):
+    """
+    Reorganize a single tensor to match the specified number of thoughts.
+    Uses the same logic as _reorganize_sequences but for a single tensor.
+    
+    Args:
+        tensor: The tensor to reorganize
+        num_thoughts: Number of parallel sequences to use
+        num_batches: How many multiples of num_thoughts can fit within the original number of thoughts
+        split_name: Name of the split (train/test) for logging
+        tensor_name: Name of tensor for logging
+        
+    Returns:
+        Reorganized tensor with shape [num_samples, num_thoughts, ...]
+    """
+    if tensor is None:
+        return None
+        
+    current_shape = tensor.shape
+    if len(current_shape) < 2:
+        print(f"Warning: {split_name} tensor has unexpected shape {current_shape}, skipping reorganization")
+        return tensor
+
+    # Calculate new dataset size (each original sample becomes num_batches samples)
+    original_batch_size = current_shape[0]
+    new_batch_size = original_batch_size * num_batches
+    usable_sequences = num_batches * num_thoughts
+
+    if tensor.dim() == 2:  # 1D sequence (e.g., prompt_sequences, prompt_mask)
+        # Repeat 1D sequence to [batch_size * num_batches, seq_len]
+        tensor = tensor.unsqueeze(1).repeat(1, num_batches, 1).reshape(-1, tensor.size(-1))
+    
+    elif tensor.dim() == 3:  # 2D sequence (e.g., cot_sequences, cot_mask)
+        # Reshape 2D sequence to [batch_size * num_batches, num_thoughts, seq_len]
+        tensor = tensor[:, :usable_sequences, :]  # Remove remainder
+        tensor = tensor.view(original_batch_size, num_batches, num_thoughts, -1)
+        tensor = tensor.transpose(1, 2).contiguous().view(new_batch_size, num_thoughts, -1)
+    
+    print(f"Reorganized {split_name} {tensor_name}: {current_shape} -> {tensor.shape}")
+    return tensor
