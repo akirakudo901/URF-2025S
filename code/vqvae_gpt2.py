@@ -137,7 +137,7 @@ class CustomGPT2Model(GPT2Model):
         elif input_ids is not None:
             self.warn_if_padding_and_no_attention_mask(input_ids, attention_mask)
             input_shape = input_ids.size()
-            input_ids = input_ids.view(-1, input_shape[-1])
+            input_ids = input_ids.reshape(-1, input_shape[-1])
             batch_size = input_ids.shape[0]
         elif inputs_embeds is not None:
             input_shape = inputs_embeds.size()[:-1]
@@ -148,7 +148,7 @@ class CustomGPT2Model(GPT2Model):
         device = input_ids.device if input_ids is not None else inputs_embeds.device
 
         if token_type_ids is not None:
-            token_type_ids = token_type_ids.view(-1, input_shape[-1])
+            token_type_ids = token_type_ids.reshape(-1, input_shape[-1])
 
         if self.gradient_checkpointing and self.training:
             if use_cache:
@@ -192,7 +192,7 @@ class CustomGPT2Model(GPT2Model):
         # Attention mask.
         # ._update_causal_mask() and ._prepare_4d_causal_attention_mask_with_cache_position() copied from LlamaModel
         if attention_mask is not None and attention_mask.ndim < 4:
-            attention_mask = attention_mask.view(batch_size, -1)
+            attention_mask = attention_mask.reshape(batch_size, -1)
         causal_mask = self._update_causal_mask(
             attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
         )
@@ -306,7 +306,7 @@ class CustomGPT2Model(GPT2Model):
 
         hidden_states = self.ln_f(hidden_states)
 
-        hidden_states = hidden_states.view(output_shape)
+        hidden_states = hidden_states.reshape(output_shape)
         # Add last hidden state
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
@@ -467,7 +467,7 @@ class VectorQuantizer(nn.Module):
     def forward(self, inputs):
         # Convert inputs [(batch_size, sequence_length) OR (batch_size x sequence_length), embedding_dim]
         input_shape = inputs.shape
-        flat_input = inputs.view(-1, self.embedding_dim) # [ (batch x seq_len), emb_dim ]
+        flat_input = inputs.reshape(-1, self.embedding_dim) # [ (batch x seq_len), emb_dim ]
 
         # Calculate distances
         distances = (torch.sum(flat_input**2, dim=1, keepdim=True)           # [ (batch x seq_len), emb_num ]    
@@ -482,7 +482,7 @@ class VectorQuantizer(nn.Module):
         
         # Quantize
         quantized = torch.matmul(encodings, self.embedding.weight)
-        quantized = quantized.view(input_shape)
+        quantized = quantized.reshape(input_shape)
         
         # Loss
         e_latent_loss = F.mse_loss(quantized.detach(), inputs)
@@ -493,7 +493,7 @@ class VectorQuantizer(nn.Module):
         # Perplexity: diversity of latent code usage, keep it mid (high=uniform, no learning, low=not used fully)
         perplexity = compute_perplexity(encoding_indices, "indices")
         
-        return quantized, loss, perplexity, encoding_indices.view(input_shape[:-1])
+        return quantized, loss, perplexity, encoding_indices.reshape(input_shape[:-1])
 
 
 
@@ -517,7 +517,8 @@ class GPT2VQVAE(nn.Module):
                  only_latent_decode=False,
                  simple_decoder=False,
                  embed_sum_decode=False,
-                 compress_beam_search=False):
+                 compress_beam_search=False,
+                 interchain=False):
         """
         GPT2-based VQ-VAE model that uses GPT2 as both encoder and decoder.
         
@@ -570,6 +571,7 @@ class GPT2VQVAE(nn.Module):
             simple_decoder (bool): CURRENTLY DEPRECATED! If True, use a decoder-only GPT2LMHeadModel for the decoder and a simplified decode logic. 
             embed_sum_decode (bool): If True, use the embed_sum_decode mode for decoding.
             compress_beam_search (bool): If True, use beam search compression mode with backpointer classification for efficient sequence reconstruction.
+            interchain (bool): If True, use interchain mode where chain embeddings are used instead of backpointers for encoding, and normal GPT2LMHeadModel is used for decoding.
         """
         super(GPT2VQVAE, self).__init__()
         
@@ -580,11 +582,14 @@ class GPT2VQVAE(nn.Module):
                              f"uses the embedding layer of {MODEL_NAME}.")
         if compress_beam_search and (only_latent_decode or simple_decoder or embed_sum_decode):
             raise ValueError("compress_beam_search mode is incompatible with other decode modes.")
+        if interchain and (only_latent_decode or simple_decoder or embed_sum_decode or compress_beam_search):
+            raise ValueError("interchain mode is incompatible with other decode modes.")
         
         self.only_latent_decode = only_latent_decode
         self.simple_decoder = simple_decoder
         self.embed_sum_decode = embed_sum_decode
         self.compress_beam_search = compress_beam_search
+        self.interchain = interchain
         
         if self.simple_decoder:
             warnings.warn("simple_decoder mode for the GPT2VQVAE is now deprecated...", DeprecationWarning)
@@ -1100,11 +1105,11 @@ class GPT2VQVAE(nn.Module):
         else:
             raise Exception("Not supposed to be here...")
             cot_memory = full_memory  # [batch_size, K + M*L, d_model]
-            cot_memory = cot_memory.view(batch_size, M*L, K + M*L, -1)  # [batch_size, M*L, K + M*L, d_model]
+            cot_memory = cot_memory.reshape(batch_size, M*L, K + M*L, -1)  # [batch_size, M*L, K + M*L, d_model]
             memory = cot_memory.transpose(1, 2)  # [batch_size, K + M*L, M*L, d_model]
         
         # Reshape for aggregation
-        memory = cot_memory.view(batch_size, L, M, -1)  # [batch_size, L, M, d_model]
+        memory = cot_memory.reshape(batch_size, L, M, -1)  # [batch_size, L, M, d_model]
         memory = memory.reshape(-1, M, memory.size(-1))  # [batch_size * L, M, d_model]
         
         # Aggregate the memory content per-prompt into single chains 
@@ -1141,8 +1146,124 @@ class GPT2VQVAE(nn.Module):
         quantized = aggregated.unsqueeze(1).expand(-1, M, -1)  # [batch_size * L, M, d_model]
         
         # Reshape back using the appropriate length
-        quantized = quantized.view(batch_size, M*L, quantized.size(-1)) # [batch_size, M*L, d_model]
-        indices = indices.view(batch_size, -1) # [batch_size, M*L]
+        quantized = quantized.reshape(batch_size, M*L, quantized.size(-1)) # [batch_size, M*L, d_model]
+        indices = indices.reshape(batch_size, -1) # [batch_size, M*L]
+        
+        return quantized, vq_loss, perplexity, indices, debug_stats
+        
+    def _encode_interchain(self, prompt_sequences, cot_sequences, prompt_mask=None, cot_mask=None, 
+                           aggregate_mode="linear", quantize_cot_only=True, no_vq=False):
+        """
+        Encode method specifically for interchain mode.
+        
+        Args:
+            prompt_sequences (torch.Tensor): Prompt sequences [batch_size, K]
+            cot_sequences (torch.Tensor): Chain-of-thought sequences [batch_size, M, L]
+            prompt_mask (torch.Tensor, optional): Prompt attention mask for padding
+            cot_mask (torch.Tensor, optional): COT attention mask for padding
+            aggregate_mode (str): Mode of aggregation
+            quantize_cot_only (bool): FIXED TO BE TRUE! If True, only quantize COT positions
+            no_vq (bool): If True, bypass vector quantization
+            
+        Returns:
+            tuple: (quantized, vq_loss, perplexity, indices, debug_stats)
+        """
+        batch_size, K = prompt_sequences.shape
+        _, M, L = cot_sequences.shape
+        
+        # Create artificial chain indices: [0, 1, 2, ..., M-1] repeated for each position
+        # This creates a [B, M, L] tensor where [i, j] = i for all j
+        chain_indices = torch.arange(M, device=cot_sequences.device).unsqueeze(
+            0).unsqueeze(-1).expand(batch_size, -1, L)  # [B, M, L]
+        
+        # Create beam search sequence: [C1T1, C2T1, ..., CMT1, C1T2, C2T2, ..., CMT2, ...]
+        beam_sequence = positionwise_flatten(cot_sequences)  # [B, M*L] each
+        beam_chain_indices = positionwise_flatten(chain_indices)  # [B, M*L] each
+
+        beam_mask = positionwise_flatten(cot_mask) if cot_mask is not None \
+                    else torch.ones_like(beam_sequence)  # [B, M*L]
+        prompt_mask = prompt_mask if prompt_mask is not None \
+                      else torch.ones_like(prompt_sequences)  # [B, K]
+        
+        # Add chain embeddings to the sequence
+        chain_embeds = self.chain_embeddings(beam_chain_indices)  # [B, M*L, d_model]
+        
+        # Get token embeddings for the beam sequence
+        token_embeds = self.encoder.wte(beam_sequence)  # [B, M*L, d_model]
+        
+        # Combine token and chain embeddings
+        combined_embeds = token_embeds + chain_embeds  # [B, M*L, d_model]
+        
+        # Concatenate with prompt embeds
+        if K > 0:
+            prompt_embeds = self.encoder.wte(prompt_sequences)   # [B, K, d_model]
+            full_sequences = torch.cat([prompt_embeds, combined_embeds], dim=1)  # [B, K + M*L, d_model]
+            combined_mask = torch.cat([prompt_mask, beam_mask], dim=1) # [B, K + M*L, d_model]
+        else:
+            full_sequences = combined_embeds  # [B, M*L, d_model]
+            combined_mask = beam_mask  # [B, M*L]
+        
+        # Encode full sequence
+        full_outputs = self.encoder(
+            input_ids=None,
+            inputs_embeds=full_sequences,
+            attention_mask=combined_mask,
+            use_cache=False,
+            return_dict=True
+        )
+        
+        # Extract hidden states
+        full_memory = full_outputs.last_hidden_state  # [B, K + M*L, d_model]
+        
+        if quantize_cot_only:
+            # Only use COT activations (positions K to K+M*L-1)
+            cot_memory = full_memory[:, K:, :]  # [B, M*L, d_model]
+        else:
+            raise Exception("Not supposed to be here...")
+            cot_memory = full_memory  # [B, K + M*L, d_model]
+            cot_memory = cot_memory.reshape(batch_size, M*L, K + M*L, -1)  # [B, M*L, K + M*L, d_model]
+            memory = cot_memory.transpose(1, 2)  # [B, K + M*L, M*L, d_model]
+        
+        # Reshape for aggregation
+        memory = cot_memory.reshape(batch_size, L, M, -1)  # [B, L, M, d_model]
+        memory = memory.reshape(-1, M, memory.size(-1))  # [B * L, M, d_model]
+        
+        # Aggregate the memory content per-prompt into single chains 
+        aggregated = self.aggregate(memory, mode=aggregate_mode) # [B * L, d_model]
+        
+        # Calculate norm statistics for debugging
+        aggregated_norms = torch.norm(aggregated.detach(), dim=-1)  # [B * L]
+        vq_input_norm_mean = aggregated_norms.mean().item()
+        vq_input_norm_std = aggregated_norms.std().item()
+        debug_stats = {
+            'vq_input_norm_mean': vq_input_norm_mean,
+            'vq_input_norm_std': vq_input_norm_std
+        }
+        
+        if no_vq:
+            # For no_vq mode, tile the aggregated embeddings back to match the expected shape
+            quantized = aggregated.unsqueeze(1).expand(-1, M, -1)  # [B * L, M, d_model]
+            quantized = quantized.reshape(batch_size, M*L, quantized.size(-1)) # [B, L * M, d_model]
+            vq_loss = torch.tensor(0.0, device=quantized.device)
+            perplexity = torch.tensor(0.0, device=quantized.device)
+            indices = torch.zeros(batch_size, M*L, device=quantized.device, dtype=torch.long)
+            return quantized, vq_loss, perplexity, indices, debug_stats
+        
+        # Apply VQ
+        vq_out = self.vector_quantizer(aggregated) # [B * L, d_model]
+        if isinstance(vq_out, tuple) and len(vq_out) == 5:
+            quantized, vq_loss, perplexity, indices, vq_debug_stats = vq_out
+            if isinstance(vq_debug_stats, dict):
+                debug_stats.update(vq_debug_stats)
+        else:
+            quantized, vq_loss, perplexity, indices = vq_out
+        
+        # Tile back to obtain the same shape and amount of info
+        quantized = aggregated.unsqueeze(1).expand(-1, M, -1)  # [B * L, M, d_model]
+        
+        # Reshape back using the appropriate length
+        quantized = quantized.reshape(batch_size, M*L, quantized.size(-1)) # [B, M*L, d_model]
+        indices = indices.reshape(batch_size, -1) # [B, M*L]
         
         return quantized, vq_loss, perplexity, indices, debug_stats
         
@@ -1175,6 +1296,13 @@ class GPT2VQVAE(nn.Module):
             return self._encode_beam_search(prompt_sequences, cot_sequences, backpointers, 
                                           prompt_mask, cot_mask, aggregate_mode, quantize_cot_only, no_vq)
         
+        # Handle interchain mode
+        if self.interchain:
+            if not quantize_cot_only:
+                raise ValueError("interchain mode is incompatible with quantize_cot_only=False.")
+            return self._encode_interchain(prompt_sequences, cot_sequences, 
+                                         prompt_mask, cot_mask, aggregate_mode, quantize_cot_only, no_vq)
+        
         batch_size, K = prompt_sequences.shape
         _, M, L = cot_sequences.shape
         
@@ -1198,9 +1326,9 @@ class GPT2VQVAE(nn.Module):
             prompt_cache = prompt_outputs.past_key_values
             
             # Step 2: Process COT sequences with padded prompt cache
-            cot_flat = cot_sequences.view(batch_size * M, L)  # [batch_size * M, L]
+            cot_flat = cot_sequences.reshape(batch_size * M, L)  # [batch_size * M, L]
             if cot_mask is not None:
-                cot_mask_flat = cot_mask.view(batch_size * M, L)  # [batch_size * M, L]
+                cot_mask_flat = cot_mask.reshape(batch_size * M, L)  # [batch_size * M, L]
             else:
                 cot_mask_flat = None
             
@@ -1224,7 +1352,7 @@ class GPT2VQVAE(nn.Module):
             
             if quantize_cot_only:
                 # Only use COT activations, no need to concatenate with prompt
-                cot_memory = cot_memory.view(batch_size, M, L, -1)
+                cot_memory = cot_memory.reshape(batch_size, M, L, -1)
                 memory = cot_memory.transpose(1, 2)  # [batch_size, L, M, d_model]
             else:
                 # Pad prompt activations M times to match COT batch size
@@ -1235,13 +1363,13 @@ class GPT2VQVAE(nn.Module):
                 full_memory = torch.cat([padded_prompt_activations, cot_memory], dim=1)  # [batch_size * M, K + L, d_model]
                 
                 # Reshape to group tokens at same positions across sequences
-                full_memory = full_memory.view(batch_size, M, K + L, -1)
+                full_memory = full_memory.reshape(batch_size, M, K + L, -1)
                 memory = full_memory.transpose(1, 2)  # [batch_size, K + L, M, d_model]
         
         else:
             # NON-CACHING APPROACH: Process full sequence in one pass
             # Reshape COT sequences to [batch_size * M, L]
-            cot_flat = cot_sequences.view(batch_size * M, L)  # [batch_size * M, L]
+            cot_flat = cot_sequences.reshape(batch_size * M, L)  # [batch_size * M, L]
             
             # Pad prompt sequences M times to match COT batch size
             padded_prompt = prompt_sequences.unsqueeze(1).expand(-1, M, -1)
@@ -1252,7 +1380,7 @@ class GPT2VQVAE(nn.Module):
             
             # Create combined attention mask using helper method
             if cot_mask is not None:
-                cot_mask_flat = cot_mask.view(batch_size * M, L)  # [batch_size * M, L]
+                cot_mask_flat = cot_mask.reshape(batch_size * M, L)  # [batch_size * M, L]
             else:
                 cot_mask_flat = None
             
@@ -1273,12 +1401,12 @@ class GPT2VQVAE(nn.Module):
                 # Only use COT activations (positions K to K+L-1)
                 cot_memory = full_memory[:, K:, :]  # [batch_size * M, L, d_model]
                 # Reshape to group tokens at same positions across sequences
-                cot_memory = cot_memory.view(batch_size, M, L, -1)
+                cot_memory = cot_memory.reshape(batch_size, M, L, -1)
                 memory = cot_memory.transpose(1, 2)  # [batch_size, L, M, d_model]
             else:
                 # Use all activations
                 # Reshape to group tokens at same positions across sequences
-                full_memory = full_memory.view(batch_size, M, K + L, -1)
+                full_memory = full_memory.reshape(batch_size, M, K + L, -1)
                 memory = full_memory.transpose(1, 2)  # [batch_size, K + L, M, d_model]
 
         # COMMON PROCESSING: Reshape for aggregation
@@ -1299,7 +1427,7 @@ class GPT2VQVAE(nn.Module):
         if no_vq:
             # For no_vq mode, tile the aggregated embeddings back to match the expected shape
             quantized = aggregated.unsqueeze(1).expand(-1, M, -1)  # [batch_size*(L or K+L), M, d_model]
-            quantized = quantized.view(batch_size, -1, M, quantized.size(-1))
+            quantized = quantized.reshape(batch_size, -1, M, quantized.size(-1))
             vq_loss = torch.tensor(0.0, device=quantized.device)
             perplexity = torch.tensor(0.0, device=quantized.device)
             indices = torch.zeros(batch_size, L, device=quantized.device, dtype=torch.long)
@@ -1318,8 +1446,8 @@ class GPT2VQVAE(nn.Module):
         quantized = quantized.unsqueeze(1).expand(-1, M, -1)  # [batch_size*(L or K+L), M, d_model]
         
         # Reshape back using the appropriate length
-        quantized = quantized.view(batch_size, -1, M, quantized.size(-1)) # [batch_size, (L or K+L), M, d_model]
-        indices = indices.view(batch_size, -1) # [batch_size, (L or K+L)]
+        quantized = quantized.reshape(batch_size, -1, M, quantized.size(-1)) # [batch_size, (L or K+L), M, d_model]
+        indices = indices.reshape(batch_size, -1) # [batch_size, (L or K+L)]
         
         return quantized, vq_loss, perplexity, indices, debug_stats
 
@@ -1352,6 +1480,11 @@ class GPT2VQVAE(nn.Module):
                 raise ValueError("backpointers must be provided for compress_beam_search mode")
             return self._decode_compress_beam_search(memory, prompt_sequences, cot_sequences, backpointers, 
                                                    prompt_mask, cot_mask, inference, pad_token_id, use_caching)
+        
+        # interchain mode, takes the memory (NOT [B,L,M,D] but a different shape!)
+        if self.interchain:
+            return self._decode_interchain(memory, prompt_sequences, cot_sequences, 
+                                         prompt_mask, cot_mask, inference, pad_token_id, use_caching)
         
 
         B, K = prompt_sequences.shape
@@ -1420,7 +1553,7 @@ class GPT2VQVAE(nn.Module):
 
             # Attention masks
             if cot_mask is not None:
-                cot_mask_flat = cot_mask.view(B * M, L)
+                cot_mask_flat = cot_mask.reshape(B * M, L)
                 # The mask is shifted to match cot_with_filler
                 cot_mask_flat = torch.cat([
                     torch.ones((B * M, 1), dtype=cot_mask_flat.dtype, device=cot_mask_flat.device),
@@ -1473,7 +1606,7 @@ class GPT2VQVAE(nn.Module):
                 if prompt_embeds is not None:
                     all_logits = all_logits[:, K:, :]  # Only COT positions
             
-            return all_logits.view(B, M, L, -1)
+            return all_logits.reshape(B, M, L, -1)
         
         else:
             # For now, implement inefficient version
@@ -1510,7 +1643,7 @@ class GPT2VQVAE(nn.Module):
                 
                 for t in range(1, L):
                     latest_logits = decoder_outputs.logits
-                    output_logits[..., t-1, :] = latest_logits.view(B, M, -1)
+                    output_logits[..., t-1, :] = latest_logits.reshape(B, M, -1)
                     prev_cache = decoder_outputs.past_key_values
                     del decoder_outputs
                     
@@ -1530,7 +1663,7 @@ class GPT2VQVAE(nn.Module):
                     )
                     del prev_cache
                 
-                output_logits[..., L-1, :] = decoder_outputs.logits.view(B, M, -1)
+                output_logits[..., L-1, :] = decoder_outputs.logits.reshape(B, M, -1)
                 del decoder_outputs
             else:
                 # TODO FINISH IMPLEMENTING! FOR NOW, I WILL SKIP
@@ -1629,7 +1762,7 @@ class GPT2VQVAE(nn.Module):
                     return_dict=True
                 )
                 logits = outputs.logits[:, -1, :]  # [B*M, vocab_size]
-                output_logits[:, :, i, :] = logits.view(B, M, -1)
+                output_logits[:, :, i, :] = logits.reshape(B, M, -1)
             return output_logits
         
         else:
@@ -1686,11 +1819,11 @@ class GPT2VQVAE(nn.Module):
                 
                 # Get logits for the last position (the current latent position)
                 current_logits = decoder_outputs.logits[:, -1, :]  # [B*M, vocab_size]
-                output_logits[:, :, t, :] = current_logits.view(B, M, -1)
+                output_logits[:, :, t, :] = current_logits.reshape(B, M, -1)
                 
                 # Get the predicted token
                 predicted_tokens = torch.argmax(current_logits, dim=-1)  # [B*M]
-                output_sequences[:, :, t] = predicted_tokens.view(B, M)
+                output_sequences[:, :, t] = predicted_tokens.reshape(B, M)
             
             return output_logits
     
@@ -1716,7 +1849,7 @@ class GPT2VQVAE(nn.Module):
             else:
                 prompt_mask_expanded = torch.ones(B * M, K, device=chain_memory.device)
             if cot_mask is not None:
-                cot_mask_flat = cot_mask.view(B * M, L)
+                cot_mask_flat = cot_mask.reshape(B * M, L)
             else:
                 cot_mask_flat = torch.ones(B * M, L, device=chain_memory.device)
             attention_mask = torch.cat([prompt_mask_expanded, cot_mask_flat], dim=1)  # [batch_size * M, K + L]
@@ -1733,7 +1866,7 @@ class GPT2VQVAE(nn.Module):
             all_logits = decoder_outputs.logits  # [batch_size * M, K + L, vocab_size]
             # Return only logits for the latent (COT) positions (after prompt)
             cot_logits = all_logits[:, K:, :]  # [batch_size * M, L, vocab_size]
-            return cot_logits.view(B, M, L, -1)
+            return cot_logits.reshape(B, M, L, -1)
         
         else:
             # AUTO-REGRESSION MODE (INEFFICIENT IMPLEMENTATION)
@@ -1789,11 +1922,11 @@ class GPT2VQVAE(nn.Module):
                 
                 # Get logits for the last position (the current latent position)
                 current_logits = decoder_outputs.logits[:, -1, :]  # [B*M, vocab_size]
-                output_logits[:, :, t, :] = current_logits.view(B, M, -1)
+                output_logits[:, :, t, :] = current_logits.reshape(B, M, -1)
                 
                 # Get the predicted token
                 predicted_tokens = torch.argmax(current_logits, dim=-1)  # [B*M]
-                output_sequences[:, :, t] = predicted_tokens.view(B, M)
+                output_sequences[:, :, t] = predicted_tokens.reshape(B, M)
             
             return output_logits
     
@@ -1962,6 +2095,9 @@ class GPT2VQVAE(nn.Module):
                     # Update cache for next step
                     prev_cache = decoder_outputs.past_key_values
                     del decoder_outputs
+                
+                output_logits = output_logits.reshape(B, L, M, -1).transpose(1, 2) # [B, M, L, vocab_size]
+                output_backpointer_logits = output_backpointer_logits.reshape(B, L, M, -1).transpose(1, 2) # [B, M, L, vocab_size]
             else:
                 # TODO FINISH IMPLEMENTING! FOR NOW, I WILL SKIP
                 raise Exception("Auto-regressive generation for compress search sum mode isn't implemented efficiently yet.")
@@ -1987,6 +2123,192 @@ class GPT2VQVAE(nn.Module):
                 torch.cuda.empty_cache()
             
             return output_logits, output_backpointer_logits
+    
+    def _decode_interchain(self, memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
+                           inference, pad_token_id, use_caching):
+        """
+        Decode method specifically for interchain mode.
+        
+        Args:
+            memory (torch.Tensor): Encoded memory [batch_size, M*L, d_model]
+            prompt_sequences (torch.Tensor): Prompt sequences [batch_size, K]
+            cot_sequences (torch.Tensor): Chain-of-thought sequences [batch_size, M, L]
+            prompt_mask (torch.Tensor, optional): Prompt attention mask for padding
+            cot_mask (torch.Tensor, optional): COT attention mask for padding
+            inference (bool): If True, performs auto-regressive generation
+            pad_token_id (int): Token ID to use for padding
+            
+        Returns:
+            torch.Tensor: Output logits [batch_size, M, L, vocab_size]
+        """
+        B, K = prompt_sequences.shape
+        _, M, L = cot_sequences.shape
+
+        if not inference:
+            # TEACHER-FORCING MODE
+            # Create artificial chain indices: [0, 1, 2, ..., M-1] repeated for each position
+            chain_indices = torch.arange(M, device=cot_sequences.device).unsqueeze(
+                0).unsqueeze(-1).expand(B, -1, L)  # [batch_size, M, L]
+            
+            # Create beam search sequence and chain indices
+            beam_sequence = positionwise_flatten(cot_sequences)  # [batch_size, M*L] each
+            beam_chain_indices = positionwise_flatten(chain_indices)  # [batch_size, M*L] each
+            
+            # Prepend filler token (pad_token_id) to each sequence
+            filler = torch.full((B, 1), pad_token_id, dtype=beam_sequence.dtype, device=beam_sequence.device)
+            chain_filler = torch.zeros((B, 1), dtype=beam_sequence.dtype, device=beam_sequence.device)
+            beam_with_filler = torch.cat([filler, beam_sequence[:, :-1]], dim=1)  # [B, M*L]
+            chain_with_filler = torch.cat([chain_filler, beam_chain_indices[:, :-1]], dim=1)  # [B, M*L]
+            
+            # Get token embeddings for beam_with_filler
+            token_embeds = self.decoder.transformer.wte(beam_with_filler)  # [B, M*L, d_model]
+            # Add chain embeddings
+            chain_embeds = self.chain_embeddings(chain_with_filler)  # [B, M*L, d_model]
+            # Add latent embeddings
+            cot_input_embeds = token_embeds + chain_embeds + memory  # [B, M*L, d_model]
+
+            # Deal with masks
+            prompt_mask = prompt_mask if prompt_mask is not None else torch.ones_like(prompt_sequences)
+            beam_mask = positionwise_flatten(cot_mask) if cot_mask is not None \
+                        else torch.ones_like(beam_sequence, device=beam_sequence.device)
+            # The mask is shifted to match beam_with_filler
+            beam_mask = torch.cat([
+                torch.ones((B, 1), dtype=beam_mask.dtype, device=beam_mask.device),
+                beam_mask[:, :-1]
+            ], dim=1)  # [B, M*L]
+
+            # Concatenate with prompt embeds
+            if K > 0:
+                prompt_embeds = self.decoder.transformer.wte(prompt_sequences)   # [B, K, d_model]
+                full_sequences = torch.cat([prompt_embeds, cot_input_embeds], dim=1)  # [B, K + M*L, d_model]
+                combined_mask = torch.cat([prompt_mask, beam_mask], dim=1) # [batch_size, K + M*L, d_model]
+            else:
+                full_sequences = cot_input_embeds  # [B, M*L, d_model]
+                combined_mask = beam_mask
+            
+            # Run decoder (normal GPT2LMHeadModel)
+            decoder_outputs = self.decoder(
+                input_ids=None,
+                inputs_embeds=full_sequences,
+                attention_mask=combined_mask,
+                encoder_hidden_states=None,
+                encoder_attention_mask=None,
+                use_cache=False,
+                return_dict=True
+            )
+            
+            all_logits = decoder_outputs.logits  # [B, K + M*L, vocab_size]
+            # Only COT positions
+            cot_logits = all_logits[:, K:, :].reshape(B, L, M, -1).transpose(1, 2) # [B, M, L, vocab_size]
+            
+            return cot_logits
+        
+        else:
+            # AUTO-REGRESSION MODE (EFFICIENT IMPLEMENTATION WITH CACHING)
+            output_logits = torch.empty((B, M*L, self.decoder_config.vocab_size), device=memory.device)  # [batch_size, num_thoughts * seq_len, vocab_size]
+            
+            # First position: concatenate prompt embeddings with (filler embed + chain embed + latent embed)
+            filler = torch.full((B, 1), pad_token_id, dtype=torch.long, device=memory.device)  # [batch_size, 1]
+            chain_filler = torch.zeros((B, 1), dtype=torch.long, device=memory.device)  # [batch_size, 1]
+            
+            # Combine all embeddings for the first position
+            token_embeds = self.decoder.transformer.wte(filler)  # token embeddings for filler: [B, 1, d_model]
+            chain_embeds = self.chain_embeddings(chain_filler)  # chain embeddings: [B, 1, d_model]
+            latent_embeds = memory[:, 0:1, :]  # latent embeddings (first position): [B, 1, d_model]
+            first_token_embeds = token_embeds + chain_embeds + latent_embeds  # [B, 1, d_model]
+
+            # Concatenate prompt embeddings and first token embedding, or just use first token embedding if no prompt
+            if K > 0:
+                prompt_embeds = self.decoder.transformer.wte(prompt_sequences)  # [B, K, d_model]
+                prompt_mask_val = prompt_mask if prompt_mask is not None \
+                                  else torch.ones_like(prompt_sequences, device=memory.device)  # [B, K]
+                
+                input_embeds = torch.cat([prompt_embeds, first_token_embeds], dim=1)  # [B, K+1, d_model]
+                attn_mask = torch.cat([prompt_mask_val, torch.ones(B, L, device=memory.device, dtype=prompt_mask_val.dtype)], dim=1)  # [B, K+L]
+            else:
+                input_embeds = first_token_embeds  # [B, 1, d_model]
+                attn_mask = torch.ones(B, L, device=memory.device)  # [B, L]
+
+            if use_caching:
+                # No cache is used for the prompt, just pass the concatenated embeddings
+                decoder_outputs = self.decoder(
+                    input_ids=None,
+                    inputs_embeds=input_embeds,
+                    attention_mask=attn_mask[:, :K+2],
+                    encoder_hidden_states=None,
+                    encoder_attention_mask=None,
+                    use_cache=True,
+                    return_dict=True,
+                    past_key_values=None
+                )
+                
+                # Store first position outputs
+                output_logits[:, 0, :] = decoder_outputs.logits[:, -1, :]
+                
+                # Get generated tokens for next step
+                generated_tokens = torch.argmax(decoder_outputs.logits[:, -1, :], dim=-1)  # [B, 1]
+                
+                # Update cache for next step
+                prev_cache = decoder_outputs.past_key_values
+                del decoder_outputs
+                
+                # Subsequent positions: use prompt + generated tokens + current latent
+                for t in range(1, L):
+                    # Combine all embeddings
+                    generated_embed = self.decoder.transformer.wte(generated_tokens)  # token embedding: [B, 1, d_model]
+                    current_chain_embed = self.chain_embeddings(torch.full((B, 1), t % M, dtype=torch.long, device=memory.device))  # chain embedding: [B, 1, d_model]
+                    current_latent = memory[:, t:t+1, :]  # latent embedding: [B, 1, d_model]
+                    input_embeds = generated_embed + current_chain_embed + current_latent  # [B, 1, d_model]
+                    
+                    # Decode with updated cache
+                    decoder_outputs = self.decoder(
+                        input_ids=None,
+                        inputs_embeds=input_embeds,
+                        attention_mask=attn_mask[:, :K+t+2],
+                        encoder_hidden_states=None,
+                        encoder_attention_mask=None,
+                        use_cache=True,
+                        return_dict=True,
+                        past_key_values=prev_cache
+                    )
+                    
+                    # Store outputs for current position
+                    output_logits[:, t, :] = decoder_outputs.logits[:, -1, :] # [B, M*L, vocab_size]
+                    
+                    # Get generated tokens for next step
+                    generated_tokens = torch.argmax(decoder_outputs.logits[:, -1, :], dim=-1)  # [B, 1]
+                    
+                    # Update cache for next step
+                    prev_cache = decoder_outputs.past_key_values
+                    del decoder_outputs
+
+                output_logits = output_logits.reshape(B, L, M, -1).transpose(1, 2) # [B, M, L, vocab_size]
+
+            else:
+                # TODO FINISH IMPLEMENTING! FOR NOW, I WILL SKIP
+                raise Exception("Auto-regressive generation for interchain mode isn't implemented efficiently yet.")
+                
+                input_embeds = torch.cat([prompt_embeds, input_embeds], dim=1)  # [B*M, K+1, d_model]
+                for t in range(1, L):
+                    generated_embed = self.decoder.transformer.wte(output_sequences[:, :, t-1:t].reshape(B * M, 1))  # [B*M, 1, d_model]
+                    new_embed = generated_embed + chain_memory[:, t:t+1, :]  # [B*M, 1, d_model]
+                    input_embeds = torch.cat([input_embeds, new_embed], dim=1)  # [B*M, K+t+1, d_model]
+                    
+                    decoder_outputs = self.decoder(
+                        input_ids=None,
+                        inputs_embeds=input_embeds,
+                        attention_mask=attn_mask,
+                        encoder_hidden_states=None,
+                        encoder_attention_mask=None,
+                        use_cache=False,
+                        return_dict=True
+                    )
+            # Force garbage collection every few steps to prevent memory accumulation
+            gc.collect()
+            if hasattr(torch.cuda, 'empty_cache'):
+                torch.cuda.empty_cache()
+            
+            return output_logits
     
     def _decode_normal(self, chain_memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
                        inference, pad_token_id, use_caching):
@@ -2018,11 +2340,11 @@ class GPT2VQVAE(nn.Module):
 
                 # Concatenate sequences
                 combined_sequences = torch.cat([last_prompt_token, cot_sequences], dim=2)  # [batch_size, M, L+1]
-                combined_sequences_flat = combined_sequences.view(B * M, L + 1)  # [batch_size * M, L+1]
+                combined_sequences_flat = combined_sequences.reshape(B * M, L + 1)  # [batch_size * M, L+1]
                 
                 # Step 3: Create combined mask using _create_combined_mask for full extent
                 if cot_mask is not None:
-                    cot_mask_flat = cot_mask.view(B * M, L)  # [batch_size * M, L]
+                    cot_mask_flat = cot_mask.reshape(B * M, L)  # [batch_size * M, L]
                 else:
                     cot_mask_flat = None
                 
@@ -2064,11 +2386,11 @@ class GPT2VQVAE(nn.Module):
 
                 # Concatenate prompt and COT sequences
                 combined_sequences = torch.cat([padded_prompt, cot_sequences], dim=2)  # [batch_size, M, K + L]
-                combined_sequences_flat = combined_sequences.view(B * M, K + L)  # [batch_size * M, K + L]
+                combined_sequences_flat = combined_sequences.reshape(B * M, K + L)  # [batch_size * M, K + L]
                 
                 # Create combined attention mask using helper method
                 if cot_mask is not None:
-                    cot_mask_flat = cot_mask.view(B * M, L)  # [batch_size * M, L]
+                    cot_mask_flat = cot_mask.reshape(B * M, L)  # [batch_size * M, L]
                 else:
                     cot_mask_flat = None
                 
@@ -2096,7 +2418,7 @@ class GPT2VQVAE(nn.Module):
                 cot_logits = all_logits[:, K-1:-1, :]  # [batch_size * M, L, vocab_size]
             
             # COMMON PROCESSING: Reshape back to [batch_size, M, L, vocab_size]
-            return cot_logits.view(B, M, L, -1)
+            return cot_logits.reshape(B, M, L, -1)
         
         else:
             # AUTO-REGRESSION MODE (INEFFICIENT IMPLEMENTATION)
@@ -2152,11 +2474,11 @@ class GPT2VQVAE(nn.Module):
                 
                 # Get logits for the last position (the current latent position)
                 current_logits = decoder_outputs.logits[:, -1, :]  # [B*M, vocab_size]
-                output_logits[:, :, t, :] = current_logits.view(B, M, -1)
+                output_logits[:, :, t, :] = current_logits.reshape(B, M, -1)
                 
                 # Get the predicted token
                 predicted_tokens = torch.argmax(current_logits, dim=-1)  # [B*M]
-                output_sequences[:, :, t] = predicted_tokens.view(B, M)
+                output_sequences[:, :, t] = predicted_tokens.reshape(B, M)
             
             return output_logits
 
@@ -2270,6 +2592,7 @@ class GPT2VQVAE(nn.Module):
             'simple_decoder': self.simple_decoder,
             'embed_sum_decode': self.embed_sum_decode,
             'compress_beam_search': self.compress_beam_search,
+            'interchain': self.interchain,
             # Encoder-specific configuration
             'encoder_config': self._encoder_config_params,
             # Decoder-specific configuration
@@ -2366,7 +2689,7 @@ class GPT2VQVAE(nn.Module):
                            'encoder_dropout', 'encoder_activation_function',
                            'decoder_n_layer', 'decoder_n_head', 'decoder_n_inner',
                            'decoder_dropout', 'decoder_activation_function',
-                           'only_latent_decode', 'simple_decoder', 'embed_sum_decode', 'compress_beam_search']
+                           'only_latent_decode', 'simple_decoder', 'embed_sum_decode', 'compress_beam_search', 'interchain']
         
         # Add optional fields with defaults if missing
         optional_fields_with_defaults = {
@@ -2379,6 +2702,7 @@ class GPT2VQVAE(nn.Module):
             'simple_decoder': False,
             'embed_sum_decode': False,
             'compress_beam_search': False,
+            'interchain': False,
         }
         
         for field, default_value in optional_fields_with_defaults.items():
@@ -2623,8 +2947,8 @@ class CompressBeamSearchGPT2LMHeadModel(GPT2LMHeadModel):
             
             # Add backpointer loss if labels are provided
             backpointer_loss = F.cross_entropy(
-                backpointer_logits.view(-1, backpointer_logits.size(-1)),
-                backpointer_labels.view(-1),
+                backpointer_logits.reshape(-1, backpointer_logits.size(-1)),
+                backpointer_labels.reshape(-1),
                 ignore_index=-100
             )
             loss = lm_loss + backpointer_loss
