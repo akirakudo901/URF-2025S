@@ -1655,7 +1655,7 @@ class GPT2VQVAE(nn.Module):
                     del decoder_outputs
                     
                     # Subsequent positions: use prompt + generated tokens + current latent
-                    generated_embed = self.decoder.transformer.wte(torch.argmax(latest_logits, dim=-1))  # [B*M, 1, d_model]
+                    generated_embed = self.decoder.transformer.wte(torch.argmax(latest_logits, dim=-1, keepdim=True))  # [B*M, 1, d_model]
                     generated_embed.add_(chain_memory[:, t:t+1, :])   # [B*M, 1, d_model]
                     
                     decoder_outputs = self.decoder(
@@ -2188,9 +2188,9 @@ class GPT2VQVAE(nn.Module):
                     output_backpointer_logits[:, 0, :] = decoder_outputs.backpointer_logits[:, -1, :]
                 
                 # Get generated tokens and mode-specific outputs for next step
-                generated_tokens = torch.argmax(decoder_outputs.logits[:, -1, :], dim=-1)  # [B, 1]
+                generated_tokens = torch.argmax(decoder_outputs.logits[:, -1, :], dim=-1, keepdim=True)  # [B, 1]
                 if mode == "beam_search":
-                    generated_indices = torch.argmax(decoder_outputs.backpointer_logits[:, -1, :], dim=-1)  # [B, 1]
+                    generated_indices = torch.argmax(decoder_outputs.backpointer_logits[:, -1, :], dim=-1, keepdim=True)  # [B, 1]
                 
                 # Update cache for next step
                 prev_cache = decoder_outputs.past_key_values
