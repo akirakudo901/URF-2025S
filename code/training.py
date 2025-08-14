@@ -581,9 +581,12 @@ class SimpleGPT2VQVAETrainer(GPT2VQVAETrainer):
             )
         else:
             self.scheduler = None
+        self.pad_token_id = training_config.get('pad_token_id', 50256)
+        print(f"Setting pad_token_id to {self.pad_token_id}.")
         if self.use_gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
             print("Gradient checkpointing enabled for SimpleGPT2VQVAE")
+        
         print("SimpleGPT2VQVAE trainer initialized successfully.")
     
     def _forward_pass(self, prompts, cots, prompt_masks, cot_masks):
@@ -598,7 +601,8 @@ class SimpleGPT2VQVAETrainer(GPT2VQVAETrainer):
                     prompt_mask=prompt_masks,
                     inference=False,
                     quantize_cot_only=self.training_config.get('quantize_cot_only', True),
-                    use_vq=use_vq
+                    use_vq=use_vq,
+                    pad_token_id=self.pad_token_id
                 )
                 recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
                 total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss
@@ -610,7 +614,8 @@ class SimpleGPT2VQVAETrainer(GPT2VQVAETrainer):
                 prompt_mask=prompt_masks,
                 inference=False,
                 quantize_cot_only=self.training_config.get('quantize_cot_only', True),
-                use_vq=use_vq
+                use_vq=use_vq,
+                pad_token_id=self.pad_token_id
             )
             recon_loss = compute_reconstruction_loss(output_logits, cots, cot_masks)
             total_loss_batch = recon_loss + self.training_config.get('vq_loss_weight', 1.0) * vq_loss

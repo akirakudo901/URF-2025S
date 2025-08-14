@@ -637,7 +637,8 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
                                     dataset: TensorDataset,  # More specific type
                                     sample_size: int = 100,
                                     device: str = "cuda",
-                                    use_vq: bool = True) -> Tuple[torch.Tensor, float]:
+                                    use_vq: bool = True,
+                                    pad_token_id: int = 50256) -> Tuple[torch.Tensor, float]:
     """
     Randomly sample examples from dataset and compute codebook usage statistics.
     
@@ -647,6 +648,7 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
         sample_size: Number of examples to sample
         device: Device to run computation on
         use_vq: Whether to use vector quantization (for SimpleGPT2VQVAE)
+        pad_token_id: ID used for padding, defaults to 50256 (EOS for GPT2)
         
     Returns:
         Tuple of (indices_tensor, perplexity)
@@ -691,7 +693,8 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
                         prompt_mask=prompt_masks,
                         inference=False,
                         quantize_cot_only=True,
-                        use_vq=use_vq
+                        use_vq=use_vq,
+                        pad_token_id=pad_token_id
                     )
                 else:
                     # Fallback for other model types (GPT2VQVAE, etc.)
@@ -703,7 +706,8 @@ def sample_and_compute_codebook_usage(model: Any,  # Changed from GPT2VQVAE to A
                         inference=False,
                         quantize_cot_only=True,
                         no_vq=False,
-                        backpointers=backpointers
+                        backpointers=backpointers,
+                        pad_token_id=pad_token_id
                     )
                     indices = out[4]
                 

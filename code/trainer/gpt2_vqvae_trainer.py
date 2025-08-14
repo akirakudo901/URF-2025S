@@ -343,6 +343,9 @@ class GPT2VQVAETrainer:
         
         # Loss function
         self.criterion = nn.CrossEntropyLoss(ignore_index=training_config.get('pad_token_id', 50256))
+
+        self.pad_token_id = training_config.get('pad_token_id', 50256)
+        print(f"Setting pad_token_id to {self.pad_token_id}.")
         
         # Training history - epoch-level metrics
         self.train_losses = []
@@ -413,7 +416,8 @@ class GPT2VQVAETrainer:
                 dataset, 
                 self.codebook_sample_size, 
                 self.device,
-                use_vq=self.training_config.get('use_vq', True)
+                use_vq=self.training_config.get('use_vq', True),
+                pad_token_id=self.pad_token_id
             )
             
             # Store results - convert to numpy array to prevent GPU memory accumulation
@@ -906,7 +910,8 @@ class GPT2VQVAETrainer:
                 inference=False,
                 quantize_cot_only=self.training_config.get('quantize_cot_only', True),
                 no_vq=no_vq,
-                backpointers=backpointers
+                backpointers=backpointers, 
+                pad_token_id=self.pad_token_id
             )
             if len(out) == 6:
                 _, output_logits, vq_loss, perplexity, indices, debug_stats = out
