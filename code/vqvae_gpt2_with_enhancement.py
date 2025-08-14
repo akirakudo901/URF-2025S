@@ -32,6 +32,8 @@ class ReservoirSampler:
         self.reservoir = None
         self.reservoir_count = 0
         self.count = 0
+        # Flag to control whether reservoir is actively collecting samples
+        self.reservoir_open = True
     
     def _validate_and_flatten_sample(self, sample):
         """
@@ -67,6 +69,10 @@ class ReservoirSampler:
         Args:
             sample (torch.Tensor): Sample to add to reservoir
         """
+        # Check if reservoir is open for collecting samples
+        if not self.reservoir_open:
+            return  # Fail silently if reservoir is closed
+        
         sample = self._validate_and_flatten_sample(sample)
         
         # Convert to numpy and ensure it's the right shape
@@ -95,6 +101,10 @@ class ReservoirSampler:
         Args:
             samples (torch.Tensor): Batch of samples to add [batch_size, ...]
         """
+        # Check if reservoir is open for collecting samples
+        if not self.reservoir_open:
+            return  # Fail silently if reservoir is closed
+        
         if samples.dim() == 0:
             # Single sample case
             self.add_sample(samples)
@@ -206,6 +216,30 @@ class ReservoirSampler:
             'memory_bytes': memory_bytes,
             'memory_mb': memory_mb
         }
+    
+    def disable_reservoir(self):
+        """
+        Disable the reservoir from collecting new samples.
+        Existing samples remain available for retrieval.
+        """
+        self.reservoir_open = False
+        print("Reservoir disabled - no new samples will be collected")
+    
+    def enable_reservoir(self):
+        """
+        Enable the reservoir to collect new samples.
+        """
+        self.reservoir_open = True
+        print("Reservoir enabled - samples will be collected again")
+    
+    def is_reservoir_open(self):
+        """
+        Check if the reservoir is open for collecting samples.
+        
+        Returns:
+            bool: True if reservoir is open, False otherwise
+        """
+        return self.reservoir_open
 
 class EnhancedVectorQuantizer(nn.Module):
     MAX_KMEANS_SIZE = 16384
@@ -797,6 +831,103 @@ class EnhancedVectorQuantizer(nn.Module):
             ]
         }
 
+    def get_reservoir_state(self):
+        """
+        Get the current state of the reservoir sampler for checkpointing.
+        
+        Returns:
+            dict: Dictionary containing reservoir state information
+        """
+        if not hasattr(self, 'reservoir_sampler') or self.reservoir_sampler is None:
+            return {
+                'reservoir_size': 0,
+                'embedding_size': None,
+                'reservoir': None,
+                'reservoir_count': 0,
+                'count': 0
+            }
+        
+        sampler = self.reservoir_sampler
+        return {
+            'reservoir_size': sampler.reservoir_size,
+            'embedding_size': sampler.embedding_size,
+            'reservoir': sampler.reservoir.copy() if sampler.reservoir is not None else None,
+            'reservoir_count': sampler.reservoir_count,
+            'count': sampler.count,
+            'reservoir_open': sampler.reservoir_open
+        }
+    
+    def set_reservoir_state(self, reservoir_state):
+        """
+        Restore the reservoir sampler state from checkpoint.
+        
+        Args:
+            reservoir_state (dict): Dictionary containing reservoir state information
+        """
+        if not hasattr(self, 'reservoir_sampler') or self.reservoir_sampler is None:
+            print("Warning: No reservoir sampler found, cannot restore state")
+            return
+        
+        sampler = self.reservoir_sampler
+        
+        # Validate the state
+        if not isinstance(reservoir_state, dict):
+            raise ValueError("reservoir_state must be a dictionary")
+        
+        required_keys = ['reservoir_size', 'embedding_size', 'reservoir', 'reservoir_count', 'count', 'reservoir_open']
+        for key in required_keys:
+            if key not in reservoir_state:
+                raise ValueError(f"reservoir_state missing required key: {key}")
+        
+        # Restore the state
+        sampler.reservoir_size = reservoir_state['reservoir_size']
+        sampler.embedding_size = reservoir_state['embedding_size']
+        sampler.reservoir_count = reservoir_state['reservoir_count']
+        sampler.count = reservoir_state['count']
+        sampler.reservoir_open = reservoir_state.get('reservoir_open', True)  # Default to True for backward compatibility
+        
+        # Handle the reservoir numpy array
+        if reservoir_state['reservoir'] is not None:
+            # Convert back to numpy array if it was stored as a list
+            if isinstance(reservoir_state['reservoir'], list):
+                sampler.reservoir = np.array(reservoir_state['reservoir'], dtype=np.float32)
+            else:
+                sampler.reservoir = reservoir_state['reservoir'].copy()
+        else:
+            sampler.reservoir = None
+        
+        print(f"Reservoir state restored: size={sampler.reservoir_size}, count={sampler.reservoir_count}, total_samples={sampler.count}")
+    
+    def disable_reservoir(self):
+        """
+        Disable the reservoir from collecting new samples.
+        Existing samples remain available for retrieval.
+        """
+        if hasattr(self, 'reservoir_sampler') and self.reservoir_sampler is not None:
+            self.reservoir_sampler.disable_reservoir()
+        else:
+            print("Warning: No reservoir sampler found")
+    
+    def enable_reservoir(self):
+        """
+        Enable the reservoir to collect new samples.
+        """
+        if hasattr(self, 'reservoir_sampler') and self.reservoir_sampler is not None:
+            self.reservoir_sampler.enable_reservoir()
+        else:
+            print("Warning: No reservoir sampler found")
+    
+    def is_reservoir_open(self):
+        """
+        Check if the reservoir is open for collecting samples.
+        
+        Returns:
+            bool: True if reservoir is open, False otherwise
+        """
+        if hasattr(self, 'reservoir_sampler') and self.reservoir_sampler is not None:
+            return self.reservoir_sampler.is_reservoir_open()
+        return False
+    
     def set_current_step(self, current_step):
         """Set the current training step for reset timing control."""
         self._current_step[0] = current_step
@@ -1057,6 +1188,46 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             dict: Dictionary containing memory usage information
         """
         return self.vector_quantizer.get_reservoir_memory_usage()
+    
+    def get_reservoir_state(self):
+        """
+        Get the current state of the reservoir sampler for checkpointing.
+        
+        Returns:
+            dict: Dictionary containing reservoir state information
+        """
+        return self.vector_quantizer.get_reservoir_state()
+    
+    def set_reservoir_state(self, reservoir_state):
+        """
+        Restore the reservoir sampler state from checkpoint.
+        
+        Args:
+            reservoir_state (dict): Dictionary containing reservoir state information
+        """
+        self.vector_quantizer.set_reservoir_state(reservoir_state)
+    
+    def disable_reservoir(self):
+        """
+        Disable the reservoir from collecting new samples.
+        Existing samples remain available for retrieval.
+        """
+        self.vector_quantizer.disable_reservoir()
+    
+    def enable_reservoir(self):
+        """
+        Enable the reservoir to collect new samples.
+        """
+        self.vector_quantizer.enable_reservoir()
+    
+    def is_reservoir_open(self):
+        """
+        Check if the reservoir is open for collecting samples.
+        
+        Returns:
+            bool: True if reservoir is open, False otherwise
+        """
+        return self.vector_quantizer.is_reservoir_open()
     
     @classmethod
     def from_checkpoint(cls, checkpoint_path: str, device: Optional[str] = None, **kwargs):

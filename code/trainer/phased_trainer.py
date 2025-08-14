@@ -271,6 +271,12 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         last_step_phase = self._determine_training_phase(self.current_step-1)
         if current_phase != last_step_phase:
             print(f"\n=== Phase transition: {last_step_phase} -> {current_phase} at step {self.current_step-1} ===")
+            
+            # Clear reservoir when transitioning to normal phase
+            if current_phase == "normal" and last_step_phase == "reinitialization":
+                print("Clearing and disabling reservoir as we transition to normal training phase")
+                self.model.clear_reservoir()
+                self.model.disable_reservoir()
         
         # Perform forward pass with appropriate VQ setting and handle mixed precision
         return super()._forward_pass(prompts, cots, prompt_masks, cot_masks, backpointers, no_vq=no_vq)

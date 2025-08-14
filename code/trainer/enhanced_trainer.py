@@ -254,7 +254,8 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             "weighted_regularization_losses": self.weighted_regularization_losses,
             "detailed_weighted_regularization_losses": self.detailed_weighted_regularization_losses,
             "detailed_bn_param_history": self.detailed_bn_param_history,
-            "detailed_post_bn_norm_history": self.detailed_post_bn_norm_history
+            "detailed_post_bn_norm_history": self.detailed_post_bn_norm_history,
+            "reservoir_state": self.model.get_reservoir_state()
         })
         # Call parent save_checkpoint with enhanced data as kwargs
         super().save_checkpoint(epoch, metrics, is_best, checkpoint_path, remove_other_best_models, loss_type, **kwargs)
@@ -302,6 +303,13 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
             print(f"Restored detailed post-batch-norm norm history: {len(self.detailed_post_bn_norm_history)} epochs")
         else:
             print("No detailed post-batch-norm norm history found in checkpoint")
+        
+        # Restore reservoir state if available
+        if 'reservoir_state' in checkpoint:
+            self.model.set_reservoir_state(checkpoint['reservoir_state'])
+            print("Reservoir state restored from checkpoint")
+        else:
+            print("No reservoir state found in checkpoint")
         
         return checkpoint
     
