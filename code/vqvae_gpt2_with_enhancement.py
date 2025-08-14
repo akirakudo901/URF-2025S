@@ -1010,7 +1010,8 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
                  simple_decoder=False,
                  embed_sum_decode=False,
                  compress_beam_search=False,
-                 interchain=False):
+                 interchain=False,
+                 interchain_positional=False):
         """
         Enhanced GPT2VQVAE with improved vector quantization.
         
@@ -1089,7 +1090,8 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             simple_decoder=simple_decoder,
             embed_sum_decode=embed_sum_decode,
             compress_beam_search=compress_beam_search,
-            interchain=interchain
+            interchain=interchain,
+            interchain_positional=interchain_positional
         )
         
         # Replace the vector quantizer with enhanced version
