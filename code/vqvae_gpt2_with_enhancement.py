@@ -878,7 +878,8 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
                  # Simple decoder mode
                  simple_decoder=False,
                  embed_sum_decode=False,
-                 compress_beam_search=False):
+                 compress_beam_search=False,
+                 interchain=False):
         """
         Enhanced GPT2VQVAE with improved vector quantization.
         
@@ -956,7 +957,8 @@ class EnhancedGPT2VQVAE(GPT2VQVAE):
             only_latent_decode=only_latent_decode,
             simple_decoder=simple_decoder,
             embed_sum_decode=embed_sum_decode,
-            compress_beam_search=compress_beam_search
+            compress_beam_search=compress_beam_search,
+            interchain=interchain
         )
         
         # Replace the vector quantizer with enhanced version
