@@ -1057,99 +1057,11 @@ class GPT2VQVAE(nn.Module):
         Returns:
             tuple: (quantized, vq_loss, perplexity, indices, debug_stats)
         """
-        batch_size, K = prompt_sequences.shape
-        _, M, L = cot_sequences.shape
-        
-        # Create beam search sequence: [C1T1, C2T1, ..., CMT1, C1T2, C2T2, ..., CMT2, ...]
-        beam_sequence = positionwise_flatten(cot_sequences)  # [batch_size, M*L] each
-        beam_backpointers = positionwise_flatten(backpointers)
-
-        beam_mask = positionwise_flatten(cot_mask) if cot_mask is not None \
-                    else torch.ones_like(beam_sequence)
-        prompt_mask = prompt_mask if prompt_mask is not None \
-                      else torch.ones_like(prompt_sequences)
-        
-        # Add backpointer embeddings to the sequence
-        bp_embeds = self.backpointer_embeddings(beam_backpointers)  # [batch_size, M*L, d_model]
-        
-        # Get token embeddings for the beam sequence
-        token_embeds = self.encoder.wte(beam_sequence)  # [batch_size, M*L, d_model]
-        
-        # Combine token and backpointer embeddings
-        combined_embeds = token_embeds + bp_embeds  # [batch_size, M*L, d_model]
-        
-        # Concatenate with prompt embeds
-        if K > 0:
-            prompt_embeds = self.encoder.wte(prompt_sequences)   # [batch_size, K, d_model]
-            full_sequences = torch.cat([prompt_embeds, combined_embeds], dim=1)  # [batch_size, K + M*L, d_model]
-            combined_mask = torch.cat([prompt_mask, beam_mask], dim=1) # [batch_size, K + M*L, d_model]
-        else:
-            full_sequences = combined_embeds  # [batch_size, M*L, d_model]
-            combined_mask = beam_mask
-        
-        # Encode full sequence
-        full_outputs = self.encoder(
-            input_ids=None,
-            inputs_embeds=full_sequences,
-            attention_mask=combined_mask,
-            use_cache=False,
-            return_dict=True
+        return self._encode_shared_helper(
+            prompt_sequences, cot_sequences, prompt_mask, cot_mask,
+            aggregate_mode, quantize_cot_only, no_vq,
+            mode="beam_search", backpointers=backpointers
         )
-        
-        # Extract hidden states
-        full_memory = full_outputs.last_hidden_state  # [batch_size, K + M*L, d_model]
-        
-        if quantize_cot_only:
-            # Only use COT activations (positions K to K+M*L-1)
-            cot_memory = full_memory[:, K:, :]  # [batch_size, M*L, d_model]
-        else:
-            raise Exception("Not supposed to be here...")
-            cot_memory = full_memory  # [batch_size, K + M*L, d_model]
-            cot_memory = cot_memory.reshape(batch_size, M*L, K + M*L, -1)  # [batch_size, M*L, K + M*L, d_model]
-            memory = cot_memory.transpose(1, 2)  # [batch_size, K + M*L, M*L, d_model]
-        
-        # Reshape for aggregation
-        memory = cot_memory.reshape(batch_size, L, M, -1)  # [batch_size, L, M, d_model]
-        memory = memory.reshape(-1, M, memory.size(-1))  # [batch_size * L, M, d_model]
-        
-        # Aggregate the memory content per-prompt into single chains 
-        aggregated = self.aggregate(memory, mode=aggregate_mode) # [batch_size * L, d_model]
-        
-        # Calculate norm statistics for debugging
-        aggregated_norms = torch.norm(aggregated.detach(), dim=-1)
-        vq_input_norm_mean = aggregated_norms.mean().item()
-        vq_input_norm_std = aggregated_norms.std().item()
-        debug_stats = {
-            'vq_input_norm_mean': vq_input_norm_mean,
-            'vq_input_norm_std': vq_input_norm_std
-        }
-        
-        if no_vq:
-            # For no_vq mode, tile the aggregated embeddings back to match the expected shape
-            quantized = aggregated.unsqueeze(1).expand(-1, M, -1)  # [batch_size * L, M, d_model]
-            quantized = quantized.reshape(batch_size, M*L, quantized.size(-1)) # [batch_size, L * M, d_model]
-            vq_loss = torch.tensor(0.0, device=quantized.device)
-            perplexity = torch.tensor(0.0, device=quantized.device)
-            indices = torch.zeros(batch_size, M*L, device=quantized.device, dtype=torch.long)
-            return quantized, vq_loss, perplexity, indices, debug_stats
-        
-        # Apply VQ
-        vq_out = self.vector_quantizer(aggregated) # [batch_size * L, d_model]
-        if isinstance(vq_out, tuple) and len(vq_out) == 5:
-            quantized, vq_loss, perplexity, indices, vq_debug_stats = vq_out
-            if isinstance(vq_debug_stats, dict):
-                debug_stats.update(vq_debug_stats)
-        else:
-            quantized, vq_loss, perplexity, indices = vq_out
-        
-        # Tile back to obtain the same shape and amount of info
-        quantized = aggregated.unsqueeze(1).expand(-1, M, -1)  # [batch_size * L, M, d_model]
-        
-        # Reshape back using the appropriate length
-        quantized = quantized.reshape(batch_size, M*L, quantized.size(-1)) # [batch_size, M*L, d_model]
-        indices = indices.reshape(batch_size, -1) # [batch_size, M*L]
-        
-        return quantized, vq_loss, perplexity, indices, debug_stats
         
     def _encode_interchain(self, prompt_sequences, cot_sequences, prompt_mask=None, cot_mask=None, 
                            aggregate_mode="linear", quantize_cot_only=True, no_vq=False):
@@ -1168,31 +1080,65 @@ class GPT2VQVAE(nn.Module):
         Returns:
             tuple: (quantized, vq_loss, perplexity, indices, debug_stats)
         """
+        return self._encode_shared_helper(
+            prompt_sequences, cot_sequences, prompt_mask, cot_mask,
+            aggregate_mode, quantize_cot_only, no_vq,
+            mode="interchain"
+        )
+    
+    def _encode_shared_helper(self, prompt_sequences, cot_sequences, prompt_mask=None, cot_mask=None,
+                             aggregate_mode="linear", quantize_cot_only=True, no_vq=False,
+                             mode="beam_search", backpointers=None):
+        """
+        Shared helper function for encoding in both beam_search and interchain modes.
+        
+        Args:
+            prompt_sequences (torch.Tensor): Prompt sequences [batch_size, K]
+            cot_sequences (torch.Tensor): Chain-of-thought sequences [batch_size, M, L]
+            prompt_mask (torch.Tensor, optional): Prompt attention mask for padding
+            cot_mask (torch.Tensor, optional): COT attention mask for padding
+            aggregate_mode (str): Mode of aggregation
+            quantize_cot_only (bool): FIXED TO BE TRUE! If True, only quantize COT positions
+            no_vq (bool): If True, bypass vector quantization
+            mode (str): Either "beam_search" or "interchain"
+            backpointers (torch.Tensor, optional): Backpointer indices for beam_search mode
+            
+        Returns:
+            tuple: (quantized, vq_loss, perplexity, indices, debug_stats)
+        """
         batch_size, K = prompt_sequences.shape
         _, M, L = cot_sequences.shape
         
-        # Create artificial chain indices: [0, 1, 2, ..., M-1] repeated for each position
-        # This creates a [B, M, L] tensor where [i, j] = i for all j
-        chain_indices = torch.arange(M, device=cot_sequences.device).unsqueeze(
-            0).unsqueeze(-1).expand(batch_size, -1, L)  # [B, M, L]
-        
         # Create beam search sequence: [C1T1, C2T1, ..., CMT1, C1T2, C2T2, ..., CMT2, ...]
-        beam_sequence = positionwise_flatten(cot_sequences)  # [B, M*L] each
-        beam_chain_indices = positionwise_flatten(chain_indices)  # [B, M*L] each
+        beam_sequence = positionwise_flatten(cot_sequences)  # [batch_size, M*L] each
+        
+        # Handle mode-specific embeddings
+        if mode == "beam_search":
+            if backpointers is None:
+                raise ValueError("backpointers must be provided for beam_search mode")
+            beam_indices = positionwise_flatten(backpointers)
+            # Add backpointer embeddings to the sequence
+            bp_embeds = self.backpointer_embeddings(beam_indices)  # [batch_size, M*L, d_model]
+        elif mode == "interchain":
+            # Create artificial chain indices: [0, 1, 2, ..., M-1] repeated for each position
+            chain_indices = torch.arange(M, device=cot_sequences.device).unsqueeze(
+                0).unsqueeze(-1).expand(batch_size, -1, L)  # [B, M, L]
+            beam_indices = positionwise_flatten(chain_indices)  # [B, M*L] each
+            # Add chain embeddings to the sequence
+            bp_embeds = self.chain_embeddings(beam_indices)  # [B, M*L, d_model]
+        else:
+            raise ValueError(f"Unsupported mode: {mode}")
 
         beam_mask = positionwise_flatten(cot_mask) if cot_mask is not None \
                     else torch.ones_like(beam_sequence)  # [B, M*L]
         prompt_mask = prompt_mask if prompt_mask is not None \
-                      else torch.ones_like(prompt_sequences)  # [B, K]
-        
-        # Add chain embeddings to the sequence
-        chain_embeds = self.chain_embeddings(beam_chain_indices)  # [B, M*L, d_model]
+                      else torch.ones_like(prompt_sequences)
         
         # Get token embeddings for the beam sequence
         token_embeds = self.encoder.wte(beam_sequence)  # [B, M*L, d_model]
         
-        # Combine token and chain embeddings
-        combined_embeds = token_embeds + chain_embeds  # [B, M*L, d_model]
+        # Combine token and mode-specific embeddings
+        combined_embeds = token_embeds + bp_embeds  # [batch_size, M*L, d_model]
         
         # Concatenate with prompt embeds
         if K > 0:
@@ -1266,7 +1212,7 @@ class GPT2VQVAE(nn.Module):
         indices = indices.reshape(batch_size, -1) # [B, M*L]
         
         return quantized, vq_loss, perplexity, indices, debug_stats
-        
+    
     def encode(self, prompt_sequences, cot_sequences, prompt_mask=None, cot_mask=None, 
                aggregate_mode="linear", quantize_cot_only=True, no_vq=False, backpointers=None):
         """
