@@ -691,7 +691,8 @@ class GPT2VQVAE(nn.Module):
         # Initialize decoder with or without pretrained weights
         if self.compress_beam_search:
             model_class = CompressBeamSearchGPT2LMHeadModel
-        elif self.simple_decoder or self.only_latent_decode:
+        elif self.simple_decoder or self.only_latent_decode or \
+             self.embed_sum_decode or self.interchain or self.interchain_positional:
             model_class = GPT2LMHeadModel
         else:
             model_class = CustomGPT2LMHeadModel
