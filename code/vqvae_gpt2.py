@@ -518,7 +518,8 @@ class GPT2VQVAE(nn.Module):
                  simple_decoder=False,
                  embed_sum_decode=False,
                  compress_beam_search=False,
-                 interchain=False):
+                 interchain=False,
+                 interchain_positional=False):
         """
         GPT2-based VQ-VAE model that uses GPT2 as both encoder and decoder.
         
@@ -572,6 +573,7 @@ class GPT2VQVAE(nn.Module):
             embed_sum_decode (bool): If True, use the embed_sum_decode mode for decoding.
             compress_beam_search (bool): If True, use beam search compression mode with backpointer classification for efficient sequence reconstruction.
             interchain (bool): If True, use interchain mode where chain embeddings are used instead of backpointers for encoding, and normal GPT2LMHeadModel is used for decoding.
+            interchain_positional (bool): If True, use interchain_positional mode which is identical to interchain but with explicit positional encodings passed via position_ids.
         """
         super(GPT2VQVAE, self).__init__()
         
@@ -584,12 +586,17 @@ class GPT2VQVAE(nn.Module):
             raise ValueError("compress_beam_search mode is incompatible with other decode modes.")
         if interchain and (only_latent_decode or simple_decoder or embed_sum_decode or compress_beam_search):
             raise ValueError("interchain mode is incompatible with other decode modes.")
+        if interchain_positional and (only_latent_decode or simple_decoder or embed_sum_decode or compress_beam_search):
+            raise ValueError("interchain_positional mode is incompatible with other decode modes.")
+        if interchain and interchain_positional:
+            raise ValueError("Cannot set both interchain and interchain_positional to True.")
         
         self.only_latent_decode = only_latent_decode
         self.simple_decoder = simple_decoder
         self.embed_sum_decode = embed_sum_decode
         self.compress_beam_search = compress_beam_search
         self.interchain = interchain
+        self.interchain_positional = interchain_positional
         
         if self.simple_decoder:
             warnings.warn("simple_decoder mode for the GPT2VQVAE is now deprecated...", DeprecationWarning)
@@ -1086,6 +1093,30 @@ class GPT2VQVAE(nn.Module):
             mode="interchain"
         )
     
+    def _encode_interchain_positional(self, prompt_sequences, cot_sequences, prompt_mask=None, cot_mask=None, 
+                                     aggregate_mode="linear", quantize_cot_only=True, no_vq=False):
+        """
+        Encode method specifically for interchain_positional mode.
+        This mode is identical to interchain but with explicit positional encodings.
+        
+        Args:
+            prompt_sequences (torch.Tensor): Prompt sequences [batch_size, K]
+            cot_sequences (torch.Tensor): Chain-of-thought sequences [batch_size, M, L]
+            prompt_mask (torch.Tensor, optional): Prompt attention mask for padding
+            cot_mask (torch.Tensor, optional): COT attention mask for padding
+            aggregate_mode (str): Mode of aggregation
+            quantize_cot_only (bool): FIXED TO BE TRUE! If True, only quantize COT positions
+            no_vq (bool): If True, bypass vector quantization
+            
+        Returns:
+            tuple: (quantized, vq_loss, perplexity, indices, debug_stats)
+        """
+        return self._encode_shared_helper(
+            prompt_sequences, cot_sequences, prompt_mask, cot_mask,
+            aggregate_mode, quantize_cot_only, no_vq,
+            mode="interchain_positional"
+        )
+    
     def _encode_shared_helper(self, prompt_sequences, cot_sequences, prompt_mask=None, cot_mask=None,
                              aggregate_mode="linear", quantize_cot_only=True, no_vq=False,
                              mode="beam_search", backpointers=None):
@@ -1119,7 +1150,7 @@ class GPT2VQVAE(nn.Module):
             beam_indices = positionwise_flatten(backpointers)
             # Add backpointer embeddings to the sequence
             bp_embeds = self.backpointer_embeddings(beam_indices)  # [batch_size, M*L, d_model]
-        elif mode == "interchain":
+        elif mode in ["interchain", "interchain_positional"]:
             # Create artificial chain indices: [0, 1, 2, ..., M-1] repeated for each position
             chain_indices = torch.arange(M, device=cot_sequences.device).unsqueeze(
                 0).unsqueeze(-1).expand(batch_size, -1, L)  # [B, M, L]
@@ -1149,11 +1180,29 @@ class GPT2VQVAE(nn.Module):
             full_sequences = combined_embeds  # [B, M*L, d_model]
             combined_mask = beam_mask  # [B, M*L]
         
+        # Create explicit positional encodings for interchain_positional mode
+        if mode == "interchain_positional":
+            # For prompt positions: normal positional encoding [0, 1, 2, ..., K-1]
+            prompt_positions = torch.arange(K, device=full_sequences.device).unsqueeze(0).expand(batch_size, -1)  # [B, K]
+            
+            # For COT positions: special positional encoding where tokens at positions i to i+M-1 get position i
+            # For the jth COT position, the assigned positional embedding will be K + [(j - K) // M]
+            cot_positions = torch.arange(M * L, device=full_sequences.device)  # [M*L]
+            cot_positions = cot_positions.unsqueeze(0).expand(batch_size, -1)  # [B, M*L]
+            # Apply the special positional encoding rule: K + [(j - K) // M]
+            cot_positions = K + (cot_positions // M)  # [B, M*L]
+            
+            # Combine prompt and COT positions
+            full_positions = torch.cat([prompt_positions, cot_positions], dim=1)  # [B, K + M*L]
+        else:
+            full_positions = None
+        
         # Encode full sequence
         full_outputs = self.encoder(
             input_ids=None,
             inputs_embeds=full_sequences,
             attention_mask=combined_mask,
+            position_ids=full_positions,  # Pass explicit positional encodings for interchain_positional mode
             use_cache=False,
             return_dict=True
         )
@@ -1248,6 +1297,13 @@ class GPT2VQVAE(nn.Module):
                 raise ValueError("interchain mode is incompatible with quantize_cot_only=False.")
             return self._encode_interchain(prompt_sequences, cot_sequences, 
                                          prompt_mask, cot_mask, aggregate_mode, quantize_cot_only, no_vq)
+        
+        # Handle interchain_positional mode
+        if self.interchain_positional:
+            if not quantize_cot_only:
+                raise ValueError("interchain_positional mode is incompatible with quantize_cot_only=False.")
+            return self._encode_interchain_positional(prompt_sequences, cot_sequences, 
+                                                   prompt_mask, cot_mask, aggregate_mode, quantize_cot_only, no_vq)
         
         batch_size, K = prompt_sequences.shape
         _, M, L = cot_sequences.shape
@@ -1432,6 +1488,10 @@ class GPT2VQVAE(nn.Module):
             return self._decode_interchain(memory, prompt_sequences, cot_sequences, 
                                          prompt_mask, cot_mask, inference, pad_token_id, use_caching)
         
+        # Handle interchain_positional mode
+        if self.interchain_positional:
+            return self._decode_interchain_positional(memory, prompt_sequences, cot_sequences, 
+                                                   prompt_mask, cot_mask, inference, pad_token_id, use_caching)
 
         B, K = prompt_sequences.shape
         _, L, M, _ = memory.shape
@@ -1925,6 +1985,29 @@ class GPT2VQVAE(nn.Module):
             mode="interchain"
         )
 
+    def _decode_interchain_positional(self, memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
+                                     inference, pad_token_id, use_caching):
+        """
+        Decode method specifically for interchain_positional mode.
+        
+        Args:
+            memory (torch.Tensor): Encoded memory [batch_size, M*L, d_model]
+            prompt_sequences (torch.Tensor): Prompt sequences [batch_size, K]
+            cot_sequences (torch.Tensor): Chain-of-thought sequences [batch_size, M, L]
+            prompt_mask (torch.Tensor, optional): Prompt attention mask for padding
+            cot_mask (torch.Tensor, optional): COT attention mask for padding
+            inference (bool): If True, performs auto-regressive generation
+            pad_token_id (int): Token ID to use for padding
+            
+        Returns:
+            torch.Tensor: Output logits [batch_size, M, L, vocab_size]
+        """
+        return self._decode_shared_helper(
+            memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask,
+            inference, pad_token_id, use_caching,
+            mode="interchain_positional"
+        )
+
 
     def _decode_shared_helper(self, memory, prompt_sequences, cot_sequences, prompt_mask, cot_mask,
                              inference, pad_token_id, use_caching, mode="beam_search", backpointers=None):
@@ -1950,6 +2033,23 @@ class GPT2VQVAE(nn.Module):
         B, K = prompt_sequences.shape
         _, M, L = cot_sequences.shape
 
+        # Create explicit positional encodings for interchain_positional mode
+        if mode == "interchain_positional":
+            # For prompt positions + filler: normal positional encoding [0, 1, 2, ..., K-1] + [K]
+            prompt_positions = torch.arange(K+1, device=prompt_sequences.device).unsqueeze(0).expand(B, -1)  # [B, K+1]
+            
+            # For COT positions: special positional encoding where tokens at positions i to i+M-1 get position i
+            # For the jth COT position, the assigned positional embedding will be K + [(j - K) // M]
+            cot_positions = torch.arange(M * L, device=prompt_sequences.device)  # [M*L]
+            cot_positions = cot_positions.unsqueeze(0).expand(B, -1)  # [B, M*L]
+            # Apply the special positional encoding rule: (K + 1) + [(j - K) // M]
+            cot_positions = (K + 1) + (cot_positions // M)  # [B, M*L]
+            
+            # Combine prompt and COT positions (truncate last to match shape)
+            full_positions = torch.cat([prompt_positions, cot_positions[:, :-1]], dim=1)  # [B, K + M*L]
+        else:
+            full_positions = None
+
         if not inference:
             # TEACHER-FORCING MOD
             # Create beam search sequence
@@ -1968,7 +2068,7 @@ class GPT2VQVAE(nn.Module):
                 index_with_filler = torch.cat([index_filler, beam_indices[:, :-1]], dim=1)  # [B, M*L]
                 # Create backpointer embeddings to add
                 mode_embeds = self.backpointer_embeddings(index_with_filler)  # [batch_size, M*L, d_model]
-            elif mode == "interchain":
+            elif mode in ("interchain", "interchain_positional"):
                 # Create artificial chain indices: [0, 1, 2, ..., M-1] repeated for each position
                 chain_indices = torch.arange(M, device=cot_sequences.device).unsqueeze(
                     0).unsqueeze(-1).expand(B, -1, L)  # [batch_size, M, L]
@@ -2009,6 +2109,7 @@ class GPT2VQVAE(nn.Module):
                 input_ids=None,
                 inputs_embeds=full_sequences,
                 attention_mask=combined_mask,
+                position_ids=full_positions,  # Pass explicit positional encodings for interchain_positional mode
                 encoder_hidden_states=None,
                 encoder_attention_mask=None,
                 use_cache=False,
@@ -2048,7 +2149,7 @@ class GPT2VQVAE(nn.Module):
             # Handle mode-specific embeddings
             if mode == "beam_search":
                 mode_embeds = self.backpointer_embeddings(index_filler)  # backpointer embeddings: [B, 1, d_model]
-            else:  # interchain
+            else:  # interchain or interchain_positional
                 mode_embeds = self.chain_embeddings(index_filler)  # chain embeddings: [B, 1, d_model]
             
             latent_embeds = memory[:, 0:1, :]  # latent embeddings (first position): [B, 1, d_model]
@@ -2061,22 +2162,23 @@ class GPT2VQVAE(nn.Module):
                                   else torch.ones_like(prompt_sequences, device=memory.device)  # [B, K]
                 
                 input_embeds = torch.cat([prompt_embeds, first_token_embeds], dim=1)  # [B, K+1, d_model]
-                attn_mask = torch.cat([prompt_mask_val, torch.ones(B, L, device=memory.device, dtype=prompt_mask_val.dtype)], dim=1)  # [B, K+L]
+                attn_mask = torch.cat([prompt_mask_val, torch.ones(B, M*L, device=memory.device, dtype=prompt_mask_val.dtype)], dim=1)  # [B, K+(M*L)]
             else:
                 input_embeds = first_token_embeds  # [B, 1, d_model]
-                attn_mask = torch.ones(B, L, device=memory.device)  # [B, L]
+                attn_mask = torch.ones(B, M*L, device=memory.device)  # [B, M*L]
 
             if use_caching:
                 # No cache is used for the prompt, just pass the concatenated embeddings
                 decoder_outputs = self.decoder(
                     input_ids=None,
                     inputs_embeds=input_embeds,
-                    attention_mask=attn_mask[:, :K+2],
+                    attention_mask=attn_mask[:, :K+1],
                     encoder_hidden_states=None,
                     encoder_attention_mask=None,
                     use_cache=True,
                     return_dict=True,
-                    past_key_values=None
+                    past_key_values=None,
+                    position_ids=full_positions[:, :K+1] if mode == "interchain_positional" else None  # [B, K+1]
                 )
                 
                 # Store first position outputs
@@ -2094,14 +2196,14 @@ class GPT2VQVAE(nn.Module):
                 del decoder_outputs
                 
                 # Subsequent positions: use prompt + generated tokens + current latent
-                for t in range(1, L):
+                for t in range(1, M*L):
                     # Combine all embeddings
                     generated_embed = self.decoder.transformer.wte(generated_tokens)  # token embedding: [B, 1, d_model]
                     
                     # Handle mode-specific embeddings
                     if mode == "beam_search":
                         generated_mode_embed = self.backpointer_embeddings(generated_indices)  # backpointer: [B, 1, d_model]
-                    else:  # interchain
+                    else:  # interchain or interchain_positional
                         generated_mode_embed = self.chain_embeddings(torch.full((B, 1), (t-1) % M, dtype=torch.long, device=memory.device))  # chain embedding: [B, 1, d_model]
                     
                     current_latent = memory[:, t:t+1, :]  # latent embedding: [B, 1, d_model]
@@ -2111,20 +2213,20 @@ class GPT2VQVAE(nn.Module):
                     decoder_outputs = self.decoder(
                         input_ids=None,
                         inputs_embeds=input_embeds,
-                        attention_mask=attn_mask[:, :K+t+2],
+                        attention_mask=attn_mask[:, :K+t+1],
                         encoder_hidden_states=None,
                         encoder_attention_mask=None,
                         use_cache=True,
                         return_dict=True,
-                        past_key_values=prev_cache
+                        past_key_values=prev_cache,
+                        # position_ids is the same shape as input_embeds, [B, 1, d_model]
+                        position_ids=full_positions[:,K+t:K+t+1] if mode == "interchain_positional" else None  # [B, 1]
                     )
                     
                     # Store outputs for current position
+                    output_logits[:, t, :] = decoder_outputs.logits[:, -1, :]  # [B, vocab_size] - take last position since we generate one token at a time
                     if mode == "beam_search":
-                        output_logits[:, t, :] = decoder_outputs.logits
-                        output_backpointer_logits[:, t, :] = decoder_outputs.backpointer_logits
-                    else:
-                        output_logits[:, t, :] = decoder_outputs.logits # [B, M*L, vocab_size]
+                        output_backpointer_logits[:, t, :] = decoder_outputs.backpointer_logits[:, -1, :]  # [B, num_thoughts]
                     
                     # Get generated tokens and mode-specific outputs for next step
                     generated_tokens = torch.argmax(decoder_outputs.logits, dim=-1)  # [B, 1]
@@ -2136,11 +2238,9 @@ class GPT2VQVAE(nn.Module):
                     del decoder_outputs
                 
                 # Reshape outputs
+                output_logits = output_logits.reshape(B, L, M, -1).transpose(1, 2) # [B, M, L, vocab_size]
                 if mode == "beam_search":
-                    output_logits = output_logits.reshape(B, L, M, -1).transpose(1, 2) # [B, M, L, vocab_size]
                     output_backpointer_logits = output_backpointer_logits.reshape(B, L, M, -1).transpose(1, 2) # [B, M, L, vocab_size]
-                else:
-                    output_logits = output_logits.reshape(B, L, M, -1).transpose(1, 2) # [B, M, L, vocab_size]
             else:
                 # TODO FINISH IMPLEMENTING! FOR NOW, I WILL SKIP
                 raise Exception("Auto-regressive generation for non-caching mode isn't implemented efficiently yet.")
@@ -2454,6 +2554,7 @@ class GPT2VQVAE(nn.Module):
             'embed_sum_decode': self.embed_sum_decode,
             'compress_beam_search': self.compress_beam_search,
             'interchain': self.interchain,
+            'interchain_positional': self.interchain_positional,
             # Encoder-specific configuration
             'encoder_config': self._encoder_config_params,
             # Decoder-specific configuration
@@ -2550,7 +2651,7 @@ class GPT2VQVAE(nn.Module):
                            'encoder_dropout', 'encoder_activation_function',
                            'decoder_n_layer', 'decoder_n_head', 'decoder_n_inner',
                            'decoder_dropout', 'decoder_activation_function',
-                           'only_latent_decode', 'simple_decoder', 'embed_sum_decode', 'compress_beam_search', 'interchain']
+                           'only_latent_decode', 'simple_decoder', 'embed_sum_decode', 'compress_beam_search', 'interchain', 'interchain_positional']
         
         # Add optional fields with defaults if missing
         optional_fields_with_defaults = {
@@ -2564,6 +2665,7 @@ class GPT2VQVAE(nn.Module):
             'embed_sum_decode': False,
             'compress_beam_search': False,
             'interchain': False,
+            'interchain_positional': False,
         }
         
         for field, default_value in optional_fields_with_defaults.items():
