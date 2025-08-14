@@ -2102,7 +2102,7 @@ class GPT2VQVAE(nn.Module):
                     if mode == "beam_search":
                         generated_mode_embed = self.backpointer_embeddings(generated_indices)  # backpointer: [B, 1, d_model]
                     else:  # interchain
-                        generated_mode_embed = self.chain_embeddings(torch.full((B, 1), t % M, dtype=torch.long, device=memory.device))  # chain embedding: [B, 1, d_model]
+                        generated_mode_embed = self.chain_embeddings(torch.full((B, 1), (t-1) % M, dtype=torch.long, device=memory.device))  # chain embedding: [B, 1, d_model]
                     
                     current_latent = memory[:, t:t+1, :]  # latent embedding: [B, 1, d_model]
                     input_embeds = generated_embed + generated_mode_embed + current_latent  # [B, 1, d_model]
