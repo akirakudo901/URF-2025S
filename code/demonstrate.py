@@ -158,8 +158,8 @@ def visualize_token_latent_alignment_multi_cot(
 
 
 def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num_embeddings, use_vq,
-                              prompt_sequences, cot_sequences, prompt_mask, cot_mask, split_name, checkpoint_path, 
-                              do_figure_analyses : bool=True):
+                              prompt_sequences, cot_sequences, prompt_mask, cot_mask, split_name, 
+                              checkpoint_path, do_figure_analyses : bool=True, backpointers=None):
     print("\n" + "="*80)
     print(f"GENERATION DEMONSTRATION ON {split_name.upper()} DATA")
     print("="*80)
@@ -169,123 +169,175 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
     device = next(model.parameters()).device
 
     with torch.no_grad():
-        tf_mean_per_example_accs = []
-        ar_mean_per_example_accs = []
+        tf_mean_per_example_metric = {}
+        ar_mean_per_example_metric = {}
+
+        def decode_tokens(tokens, mask=None):
+            if tokenizer is None:
+                return f"[Tokens: {tokens.tolist()}]"
+            if mask is not None:
+                tokens = tokens[mask.bool()]
+            try:
+                return tokenizer.decode(tokens, skip_special_tokens=True)
+            except Exception as e:
+                return f"[Decode error: {e}, tokens: {tokens.tolist()}]"
+
+        def run_model_with_mode(
+            inference_mode, 
+            prompt, cot_gt, prompt_mask_ex, cot_mask_ex, backpointers_ex
+        ):
+            model_inputs = {
+                'prompt': prompt,
+                'cot_sequences': cot_gt,
+                'cot_mask': cot_mask_ex,
+                'prompt_mask': prompt_mask_ex,
+                'inference': inference_mode,
+                'quantize_cot_only': True
+            }
+            if backpointers_ex is not None:
+                model_inputs['backpointers'] = backpointers_ex
+            if hasattr(model, 'use_vq'):
+                model_inputs['use_vq'] = use_vq
+            else:
+                model_inputs['no_vq'] = not use_vq
+            out = model(**model_inputs)
+            # Unpack outputs based on length
+            if len(out) == 6:
+                output_sequences, output_logits, vq_loss, perplexity, indices, debug_stats = out
+                bp_logits = None
+            elif len(out) == 7:
+                output_sequences, output_logits, vq_loss, perplexity, indices, debug_stats, bp_logits = out
+            else:
+                output_sequences = output_logits = vq_loss = perplexity = indices = debug_stats = bp_logits = None
+            return output_sequences, output_logits, vq_loss, perplexity, indices, debug_stats, bp_logits
+
+        def process_mode(
+            inference_mode, 
+            prompt, cot_gt, prompt_mask_ex, cot_mask_ex, backpointers_ex, 
+            num_thoughts, 
+            indices_accumulator=None
+        ):  
+            try:
+                output_sequences, output_logits, vq_loss, perplexity, indices, debug_stats, bp_logits = run_model_with_mode(
+                    inference_mode, prompt, cot_gt, prompt_mask_ex, cot_mask_ex, backpointers_ex
+                )
+                if indices is not None and indices_accumulator is not None:
+                    indices_accumulator.append(indices.flatten())
+            except Exception as e:
+                mode_str = "Teacher forcing" if not inference_mode else "Auto-regressive"
+                print(f"{mode_str} generation failed: {e}")
+                output_sequences = None
+                output_logits = None
+                vq_loss = None
+                perplexity = None
+                indices = None
+                bp_logits = None
+
+            cot_texts = []
+            for j in range(num_thoughts):
+                if output_sequences is not None:
+                    cot_texts.append(
+                        decode_tokens(output_sequences[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)  
+                    )
+                else:
+                    cot_texts.append("FAILED")
+
+            metrics = None
+            recon_loss = None
+            if output_sequences is not None and output_logits is not None:
+                # Pass backpointer data if available for compress beam search mode
+                metrics = compute_cot_reconstruction_metrics(
+                    cot_gt, output_logits, cot_mask_ex, backpointers_ex, bp_logits)  
+                if output_logits is not None and cot_gt is not None and cot_mask_ex is not None:  
+                    recon_loss = compute_reconstruction_loss(output_logits, cot_gt, cot_mask_ex)  
+            return {
+                "output_sequences": output_sequences,
+                "output_logits": output_logits,
+                "vq_loss": vq_loss,
+                "perplexity": perplexity,
+                "indices": indices,
+                "debug_stats": debug_stats if 'debug_stats' in locals() else None,
+                "bp_logits": bp_logits,
+                "cot_texts": cot_texts,
+                "metrics": metrics,
+                "recon_loss": recon_loss
+            }
+
         for i in range(min(num_examples, len(prompt_sequences))):
             prompt = prompt_sequences[i:i+1].to(device)  # [1, K]
             cot_gt = cot_sequences[i:i+1].to(device)     # [1, M, L]
             prompt_mask_ex = prompt_mask[i:i+1].to(device) if prompt_mask is not None else None
             cot_mask_ex = cot_mask[i:i+1].to(device) if cot_mask is not None else None
-            def decode_tokens(tokens, mask=None):
-                if tokenizer is None:
-                    return f"[Tokens: {tokens.tolist()}]"
-                if mask is not None:
-                    tokens = tokens[mask.bool()]
-                try:
-                    return tokenizer.decode(tokens, skip_special_tokens=True)
-                except Exception as e:
-                    return f"[Decode error: {e}, tokens: {tokens.tolist()}]"
+            backpointers_ex = backpointers[i:i+1].to(device) if backpointers is not None else None
+
             prompt_text = decode_tokens(prompt[0], prompt_mask_ex[0] if prompt_mask_ex is not None else None)
-            # Teacher forcing
-            try:
-                model_inputs = {
-                    'prompt': prompt,
-                    'cot_sequences': cot_gt, 
-                    'cot_mask': cot_mask_ex,
-                    'prompt_mask': prompt_mask_ex,
-                    'inference': False,  # Teacher forcing
-                    'quantize_cot_only': True
-                }
-                if hasattr(model, 'use_vq'):
-                    model_inputs['use_vq'] = use_vq
-                else:
-                    model_inputs['no_vq'] = not use_vq
-                _, output_logits_tf, vq_loss_tf, perplexity_tf, indices_tf, debug_stats = model(**model_inputs)
-                predicted_tokens_tf = torch.argmax(output_logits_tf, dim=-1)  # [B, M, L]
-                if indices_tf is not None:
-                    all_indices_tf.append(indices_tf.flatten())
-            except Exception as e:
-                print(f"Teacher forcing generation failed: {e}")
-                predicted_tokens_tf = None
-                vq_loss_tf = None
-                perplexity_tf = None
-                indices_tf = None
-            # Auto-regressive
-            try:
-                model_inputs = {
-                    'prompt': prompt,
-                    'cot_sequences': cot_gt,
-                    'cot_mask': cot_mask_ex,
-                    'prompt_mask': prompt_mask_ex,
-                    'inference': True,  # Auto-regressive
-                    'quantize_cot_only': True
-                }
-                if hasattr(model, 'use_vq'):
-                    model_inputs['use_vq'] = use_vq
-                else:
-                    model_inputs['no_vq'] = not use_vq
-                output_sequences_ar, output_logits_ar, vq_loss_ar, perplexity_ar, indices_ar, debug_stats = model(**model_inputs)
-                if indices_ar is not None:
-                    all_indices_ar.append(indices_ar.flatten())
-            except Exception as e:
-                print(f"Auto-regressive generation failed: {e}")
-                output_sequences_ar = None
-                vq_loss_ar = None
-                perplexity_ar = None
-                indices_ar = None
-            # Prepare texts for printing
-            cot_gt_texts = []
-            cot_tf_texts = []
-            cot_ar_texts = []
-            
-            for j in range(num_thoughts):
-                cot_gt_texts.append(decode_tokens(cot_gt[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None))
-                if predicted_tokens_tf is not None:
-                    cot_tf_texts.append(decode_tokens(predicted_tokens_tf[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None))
-                else:
-                    cot_tf_texts.append("FAILED")
-                if output_sequences_ar is not None:
-                    cot_ar_texts.append(decode_tokens(output_sequences_ar[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None))
-                else:
-                    cot_ar_texts.append("FAILED")
-            
-            # Compute metrics
-            tf_metrics = None
-            ar_metrics = None
-            recon_loss_tf = None
-            recon_loss_ar = None
-            
-            if predicted_tokens_tf is not None and output_logits_tf is not None:
-                tf_metrics = compute_cot_reconstruction_metrics(cot_gt, output_logits_tf, cot_mask_ex)
-                tf_mean_per_example_accs.append(tf_metrics['token_level_accuracies'][0].mean().item())
-                if output_logits_tf is not None and cot_gt is not None and cot_mask_ex is not None:
-                    recon_loss_tf = compute_reconstruction_loss(output_logits_tf, cot_gt, cot_mask_ex)
-                
-            if output_sequences_ar is not None and output_logits_ar is not None:
-                ar_metrics = compute_cot_reconstruction_metrics(cot_gt, output_logits_ar, cot_mask_ex)
-                ar_mean_per_example_accs.append(ar_metrics['token_level_accuracies'][0].mean().item())
-                if output_logits_ar is not None and cot_gt is not None and cot_mask_ex is not None:
-                    recon_loss_ar = compute_reconstruction_loss(output_logits_ar, cot_gt, cot_mask_ex)
-            
+
+            # Prepare ground truth CoT texts
+            cot_gt_texts = [
+                decode_tokens(cot_gt[0, j], cot_mask_ex[0, j] if cot_mask_ex is not None else None)
+                for j in range(num_thoughts)
+            ]
+
+            metrics_to_store = ('token_level_accuracies', 'backpointer_accuracies')
+            # Used at the very end of this function
+            printing_names = ('token-level accuracy', 'backpointer accuracy')
+
+            # Process teacher-forced mode
+            tf_results = process_mode(
+                inference_mode=False,
+                prompt=prompt,
+                cot_gt=cot_gt,
+                prompt_mask_ex=prompt_mask_ex,
+                cot_mask_ex=cot_mask_ex,  
+                backpointers_ex=backpointers_ex,
+                num_thoughts=num_thoughts,
+                indices_accumulator=all_indices_tf
+            )
+            if tf_results["metrics"] is not None:
+                for name in metrics_to_store: 
+                    if name in tf_results["metrics"]:
+                        metric_val = tf_results["metrics"][name][0].mean().item()
+                        lst = tf_mean_per_example_metric.get(name, []).append(metric_val)
+                        tf_mean_per_example_metric[name] = lst
+
+            # Process auto-regressive mode
+            ar_results = process_mode(
+                inference_mode=True,
+                prompt=prompt,
+                cot_gt=cot_gt,
+                prompt_mask_ex=prompt_mask_ex,
+                cot_mask_ex=cot_mask_ex,  
+                backpointers_ex=backpointers_ex,
+                num_thoughts=num_thoughts,
+                indices_accumulator=all_indices_ar
+            )
+            if ar_results["metrics"] is not None:
+                for name in metrics_to_store: 
+                    if name in ar_results["metrics"]:
+                        metric_val = ar_results["metrics"][name][0].mean().item()
+                        lst = ar_mean_per_example_metric.get(name, []).append(metric_val)
+                        ar_mean_per_example_metric[name] = lst
+
             # Print results using the helper function
             print_demonstration_results(
                 example_num=i+1,
                 prompt_text=prompt_text,
                 cot_gt_texts=cot_gt_texts,
-                cot_tf_texts=cot_tf_texts,
-                cot_ar_texts=cot_ar_texts,
-                tf_metrics=tf_metrics,
-                ar_metrics=ar_metrics,
-                tf_indices=indices_tf,
-                ar_indices=indices_ar,
-                vq_loss_tf=vq_loss_tf,
-                perplexity_tf=perplexity_tf,
-                vq_loss_ar=vq_loss_ar,
-                perplexity_ar=perplexity_ar,
-                recon_loss_tf=recon_loss_tf,
-                recon_loss_ar=recon_loss_ar,
+                cot_tf_texts=tf_results["cot_texts"],
+                cot_ar_texts=ar_results["cot_texts"],
+                tf_metrics=tf_results["metrics"],
+                ar_metrics=ar_results["metrics"],
+                tf_indices=tf_results["indices"],
+                ar_indices=ar_results["indices"],
+                vq_loss_tf=tf_results["vq_loss"],
+                perplexity_tf=tf_results["perplexity"],
+                vq_loss_ar=ar_results["vq_loss"],
+                perplexity_ar=ar_results["perplexity"],
+                recon_loss_tf=tf_results["recon_loss"],
+                recon_loss_ar=ar_results["recon_loss"],
                 num_thoughts=num_thoughts
             )
+
             # Add latent visualization if available and for the first example
             if tokenizer is not None and do_figure_analyses:
                 try:
@@ -313,8 +365,7 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                             return latent_embeddings
 
                         original_tokens_raw = cot_gt[0, j]
-                        original_mask = cot_mask_ex[0, j] if cot_mask_ex is not None else None
-                        
+                        original_mask = cot_mask_ex[0, j] if cot_mask_ex is not None else None  
                         original_token_strings = get_token_strings(original_tokens_raw, original_mask, tokenizer)
 
                         def run_latent_visualization(
@@ -326,7 +377,7 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                         ):
                             if token_tensor is not None and indices_tensor is not None:
                                 reconstructed_token_strings = get_token_strings(
-                                    token_tensor[0, j], original_mask, tokenizer
+                                    token_tensor[0, j], original_mask, tokenizer  
                                 )
                                 latent_embeddings = get_latent_embeddings(indices_tensor[0], j, model)
                                 save_path = os.path.join(
@@ -347,24 +398,14 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                                     show_latent_stats=False,
                                     create_folder=True
                                 )
-                                
-                                # Add token-latent alignment visualization
-                                # visualize_token_latent_alignment(
-                                #     original_token_ids=original_tokens_raw,
-                                #     latent_indices=indices_tensor[0],
-                                #     reconstructed_token_ids=token_tensor[0, j],
-                                #     tokenizer=tokenizer,
-                                #     mode_name=f"CoT {j+1} {mode_name}",
-                                #     max_tokens_per_line=15
-                                # )
                             else:
                                 print(f"  {fail_message} for CoT {j+1}, skipping latent visualization")
 
                         # # Teacher-forced latent visualization
                         # run_latent_visualization(
                         #     mode_name="Teacher-forced",
-                        #     token_tensor=predicted_tokens_tf,
-                        #     indices_tensor=indices_tf,
+                        #     token_tensor=tf_results["output_sequences"],
+                        #     indices_tensor=tf_results["indices"],
                         #     file_suffix="_tf",
                         #     fail_message="Teacher forcing failed"
                         # )
@@ -372,8 +413,8 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                         # # Auto-regressive latent visualization
                         # run_latent_visualization(
                         #     mode_name="Auto-regressive",
-                        #     token_tensor=output_sequences_ar,
-                        #     indices_tensor=indices_ar,
+                        #     token_tensor=ar_results["output_sequences"],
+                        #     indices_tensor=ar_results["indices"],
                         #     file_suffix="_ar",
                         #     fail_message="Auto-regression failed"
                         # )
@@ -381,21 +422,21 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                     print(f"\nLatent visualization completed for {split_name} data!")
 
                     # Multi-CoT side-by-side alignment for teacher-forced
-                    if predicted_tokens_tf is not None and indices_tf is not None:
+                    if tf_results["output_sequences"] is not None and tf_results["indices"] is not None:
                         visualize_token_latent_alignment_multi_cot(
                             all_original_token_ids=[cot_gt[0, j] for j in range(num_thoughts)],
-                            all_latent_indices=[indices_tf[0] for _ in range(num_thoughts)],
-                            all_reconstructed_token_ids=[predicted_tokens_tf[0, j] for j in range(num_thoughts)],
+                            all_latent_indices=[tf_results["indices"][0] for _ in range(num_thoughts)],
+                            all_reconstructed_token_ids=[tf_results["output_sequences"][0, j] for j in range(num_thoughts)],
                             tokenizer=tokenizer,
                             mode_name="Teacher-forced",
                             max_tokens_per_line=15
                         )
                     # Multi-CoT side-by-side alignment for auto-regressive
-                    if output_sequences_ar is not None and indices_ar is not None:
+                    if ar_results["output_sequences"] is not None and ar_results["indices"] is not None:
                         visualize_token_latent_alignment_multi_cot(
                             all_original_token_ids=[cot_gt[0, j] for j in range(num_thoughts)],
-                            all_latent_indices=[indices_ar[0] for _ in range(num_thoughts)],
-                            all_reconstructed_token_ids=[output_sequences_ar[0, j] for j in range(num_thoughts)],
+                            all_latent_indices=[ar_results["indices"][0] for _ in range(num_thoughts)],
+                            all_reconstructed_token_ids=[ar_results["output_sequences"][0, j] for j in range(num_thoughts)],
                             tokenizer=tokenizer,
                             mode_name="Auto-regressive",
                             max_tokens_per_line=15
@@ -422,7 +463,6 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                         
                     if do_figure_analyses:
                         try:
-                        
                             print(f"\n{'='*80}")
                             print(f"GENERATING WORD-TO-LATENT MAPPING ANALYSIS FOR {split_name.upper()} DATA")
                             print(f"{'='*80}")
@@ -449,49 +489,50 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                     print(f"Error during latent visualization: {e}")
                     import traceback
                     traceback.print_exc()
+        
         # After all examples, report the overall mean per-example accuracy for each mode
-        if tf_mean_per_example_accs:
-            overall_tf = sum(tf_mean_per_example_accs) / len(tf_mean_per_example_accs)
-            print(f"\n[Teacher-forced] Overall mean sequence-level reconstruction accuracy over all examples: {overall_tf:.4f}")
-        if ar_mean_per_example_accs:
-            overall_ar = sum(ar_mean_per_example_accs) / len(ar_mean_per_example_accs)
-            print(f"[Auto-regressive] Overall mean sequence-level reconstruction accuracy over all examples: {overall_ar:.4f}")
+        if tf_mean_per_example_metric:
+            for print_name, vals in zip(printing_names, tf_mean_per_example_metric.values()):
+                overall_val = sum(vals) / len(vals)
+                print(f"\n[Teacher-forced] Overall mean {print_name} over all examples: {overall_val:.4f}")
+        if ar_mean_per_example_metric:
+            for print_name, vals in zip(printing_names, ar_mean_per_example_metric.values()):
+                overall_val = sum(vals) / len(vals)
+                print(f"[Auto-regressive] Overall mean {print_name} over all examples: {overall_val:.4f}")
+
         
         if use_vq and do_figure_analyses:
             print(f"\n{'='*80}")
             print(f"GENERATING COMPREHENSIVE CODEBOOK USAGE HEATMAPS FOR {split_name.upper()} DATA")
             print(f"{'='*80}")
-            if all_indices_tf:
-                combined_indices_tf = torch.cat(all_indices_tf, dim=0)
-                print(f"Teacher Forcing - Total indices: {combined_indices_tf.numel()}")
-                print(f"Teacher Forcing - Unique indices: {torch.unique(combined_indices_tf).numel()}")
-                heatmap_path_tf = os.path.join(os.path.dirname(checkpoint_path), f"codebook_usage_tf_comprehensive_{split_name}.png")
-                counts_tf = torch.bincount(combined_indices_tf[combined_indices_tf < num_embeddings], 
-                                          minlength=num_embeddings)
-                create_codebook_usage_heatmap(
-                    counts_tf.cpu().numpy(), 
-                    num_embeddings=num_embeddings,
-                    title=f"Teacher Forcing Codebook Usage - All {num_examples} Examples ({split_name})",
-                    save_path=heatmap_path_tf
-                )
-            if all_indices_ar:
-                combined_indices_ar = torch.cat(all_indices_ar, dim=0)
-                print(f"Auto-regressive - Total indices: {combined_indices_ar.numel()}")
-                print(f"Auto-regressive - Unique indices: {torch.unique(combined_indices_ar).numel()}")
-                heatmap_path_ar = os.path.join(os.path.dirname(checkpoint_path), f"codebook_usage_ar_comprehensive_{split_name}.png")
-                counts_ar = torch.bincount(combined_indices_ar[combined_indices_ar < num_embeddings], 
-                                          minlength=num_embeddings)
-                create_codebook_usage_heatmap(
-                    counts_ar.cpu().numpy(), 
-                    num_embeddings=num_embeddings,
-                    title=f"Auto-regressive Codebook Usage - All {num_examples} Examples ({split_name})",
-                    save_path=heatmap_path_ar
-                )
+            def generate_codebook_usage_heatmap(all_indices, mode_name, file_suffix):
+                if all_indices:
+                    combined_indices = torch.cat(all_indices, dim=0)
+                    print(f"{mode_name} - Total indices: {combined_indices.numel()}")
+                    print(f"{mode_name} - Unique indices: {torch.unique(combined_indices).numel()}")
+                    heatmap_path = os.path.join(
+                        os.path.dirname(checkpoint_path),
+                        f"codebook_usage_{file_suffix}_comprehensive_{split_name}.png"
+                    )
+                    counts = torch.bincount(
+                        combined_indices[combined_indices < num_embeddings],
+                        minlength=num_embeddings
+                    )
+                    create_codebook_usage_heatmap(
+                        counts.cpu().numpy(),
+                        num_embeddings=num_embeddings,
+                        title=f"{mode_name} Codebook Usage - All {num_examples} Examples ({split_name})",
+                        save_path=heatmap_path
+                    )
+
+            generate_codebook_usage_heatmap(all_indices_tf, "Teacher Forcing", "tf")
+            generate_codebook_usage_heatmap(all_indices_ar, "Auto-regressive", "ar")
         print("\nDemonstration completed for {} data!".format(split_name))
 
 
 def compute_cot_reconstruction_metrics(
-    ground_truth_cots, predicted_logits, cot_mask=None, thresholds=[1.0, 0.95, 0.9]
+    ground_truth_cots, predicted_logits, cot_mask=None, 
+    backpointer_gt=None, backpointer_logits=None, thresholds=[1.0, 0.95, 0.9]
 ):
     """
     Compute reconstruction loss, accuracy, and additional metrics for each CoT sequence using vectorized operations.
@@ -499,6 +540,8 @@ def compute_cot_reconstruction_metrics(
         ground_truth_cots: Tensor of shape [batch, num_thoughts, seq_len]
         predicted_logits: Tensor of shape [batch, num_thoughts, seq_len, vocab_size]
         cot_mask: Optional mask tensor of shape [batch, num_thoughts, seq_len]
+        backpointer_gt: Optional backpointer ground truth tensor of shape [batch, num_thoughts, seq_len]
+        backpointer_logits: Optional backpointer logits tensor of shape [batch, num_thoughts, seq_len, num_thoughts]
         thresholds: List of floats for sequence-level accuracy thresholds (e.g., [1.0, 0.95, 0.9])
     Returns:
         metrics: dict with keys:
@@ -506,64 +549,125 @@ def compute_cot_reconstruction_metrics(
             - token_level_accuracies: [batch, num_thoughts]
             - sequence_level_accuracies: {threshold: float}
             - perplexities: [batch, num_thoughts]
+            - backpointer_accuracies: [batch, num_thoughts] (if backpointer data provided)
+            - backpointer_losses: [batch, num_thoughts] (if backpointer data provided)
     """
-    batch_size, num_thoughts, seq_len = ground_truth_cots.shape
-    # [B, M, L, V]
-    predicted_tokens = torch.argmax(predicted_logits, dim=-1)  # [B, M, L]
-    device = ground_truth_cots.device
-    # Compute mask
-    if cot_mask is not None:
-        mask = cot_mask.bool()
-    else:
-        mask = torch.ones_like(ground_truth_cots, dtype=torch.bool)
-    # Compute reconstruction loss per item
-    # Flatten batch and num_thoughts for efficient computation
-    flat_logits = predicted_logits.reshape(-1, predicted_logits.size(-1))  # [B*M*L, V]
-    flat_targets = ground_truth_cots.reshape(-1)  # [B*M*L]
-    flat_mask = mask.reshape(-1)  # [B*M*L]
+    def compute_mask(ground_truth_cots, cot_mask):
+        if cot_mask is not None:
+            mask = cot_mask.bool()  # [B, M, L]
+        else:
+            mask = torch.ones_like(ground_truth_cots, dtype=torch.bool)  # [B, M, L]
+        return mask
     
-    # Per-token loss (no reduction)
-    per_token_loss = torch.zeros_like(flat_targets, dtype=predicted_logits.dtype, device=device)
-    if flat_mask.sum() > 0:
-        criterion = torch.nn.CrossEntropyLoss(ignore_index=50256, reduction='none')
-        per_token_loss[flat_mask] = criterion(flat_logits[flat_mask], flat_targets[flat_mask])
-    # Reshape to [B, M, L]
-    per_token_loss = per_token_loss.view(batch_size, num_thoughts, seq_len)
-    # Sum over tokens, mean over non-masked tokens per sequence
-    mask_f = mask.float()
-    num_valid = mask_f.sum(dim=2)  # [B, M]
-    # Avoid division by zero
-    num_valid = num_valid + (num_valid == 0)
-    reconstruction_losses = (per_token_loss * mask_f).sum(dim=2) / num_valid  # [B, M]
+    def average_over_valid_positions(metric_arr, mask):
+        """
+        Computes the average of metric_arr over valid positions indicated by mask, 
+        avoiding division by zero.
+        Args:
+            metric_arr: Tensor of shape [B, M, L]
+            mask: Bool tensor of shape [B, M, L]
+        Returns:
+            avg: Tensor of shape [B, M]
+        """
+        mask_f = mask.float()  # [B, M, L]
+        num_valid = mask_f.sum(dim=2)  # [B, M]
+        num_valid = num_valid + (num_valid == 0)  # [B, M]
+        avg = (metric_arr * mask_f).sum(dim=2) / num_valid  # [B, M]
+        return avg  # [B, M]
+
+    def compute_reconstruction_losses(ground_truth_cots, predicted_logits, mask):
+        batch_size, num_thoughts, seq_len = ground_truth_cots.shape
+        flat_logits = predicted_logits.reshape(-1, predicted_logits.size(-1))  # [B*M*L, V]  # [B*M*L, V]
+        flat_targets = ground_truth_cots.reshape(-1)  # [B*M*L]  # [B*M*L]
+        flat_mask = mask.reshape(-1)  # [B*M*L]  # [B*M*L]
+        per_token_loss = torch.zeros_like(flat_targets, dtype=predicted_logits.dtype, device=ground_truth_cots.device)  # [B*M*L]
+        if flat_mask.sum() > 0:
+            criterion = torch.nn.CrossEntropyLoss(ignore_index=50256, reduction='none')
+            per_token_loss[flat_mask] = criterion(flat_logits[flat_mask], flat_targets[flat_mask])
+        per_token_loss = per_token_loss.view(batch_size, num_thoughts, seq_len)  # [B, M, L]
+        reconstruction_losses = average_over_valid_positions(per_token_loss, mask)  # [B, M]
+        return reconstruction_losses  # [B, M]
+
+    def compute_token_level_accuracies(ground_truth_cots, predicted_logits, mask):
+        predicted_tokens = torch.argmax(predicted_logits, dim=-1)  # [B, M, L]
+        correct = ((predicted_tokens == ground_truth_cots) & mask).float()  # [B, M, L]
+        token_level_accuracies = average_over_valid_positions(correct, mask)  # [B, M]
+        return token_level_accuracies  # [B, M]
+
+    def compute_sequence_level_accuracies(token_level_accuracies, thresholds):
+        sequence_level_accuracies = {}
+        for thresh in thresholds:
+            sequence_level_accuracies[thresh] = (token_level_accuracies >= thresh).sum().item()
+        return sequence_level_accuracies
+
+    def compute_perplexities(ground_truth_cots, predicted_logits, mask):
+        log_probs = F.log_softmax(predicted_logits, dim=-1)  # [B, M, L, V]
+        gt_log_probs = log_probs.gather(-1, ground_truth_cots.unsqueeze(-1)).squeeze(-1)  # [B, M, L]
+        nll = torch.zeros_like(gt_log_probs)  # [B, M, L]
+        nll[mask] = -gt_log_probs[mask]
+        nll_mean = average_over_valid_positions(nll, mask)  # [B, M]
+        perplexities = torch.exp(nll_mean)  # [B, M]
+        return perplexities  # [B, M]
+
+    def compute_backpointer_accuracies(backpointer_gt, backpointer_logits, mask):
+        """
+        Compute backpointer prediction accuracy for compress beam search mode.
+        Args:
+            backpointer_gt: Ground truth backpointers [B, M, L]
+            backpointer_logits: Predicted backpointer logits [B, M, L, num_thoughts]
+            mask: Mask tensor [B, M, L]
+        Returns:
+            backpointer_accuracies: [B, M]
+        """
+        predicted_backpointers = torch.argmax(backpointer_logits, dim=-1)  # [B, M, L]
+        correct = ((predicted_backpointers == backpointer_gt) & mask).float()  # [B, M, L]
+        backpointer_accuracies = average_over_valid_positions(correct, mask)  # [B, M]
+        return backpointer_accuracies  # [B, M]
+
+    def compute_backpointer_losses(backpointer_gt, backpointer_logits, mask):
+        """
+        Compute backpointer prediction loss for compress beam search mode.
+        Args:
+            backpointer_gt: Ground truth backpointers [B, M, L]
+            backpointer_logits: Predicted backpointer logits [B, M, L, num_thoughts]
+            mask: Mask tensor [B, M, L]
+        Returns:
+            backpointer_losses: [B, M]
+        """
+        batch_size, num_thoughts, seq_len = backpointer_gt.shape
+        flat_logits = backpointer_logits.reshape(-1, backpointer_logits.size(-1))  # [B*M*L, num_thoughts]
+        flat_targets = backpointer_gt.reshape(-1)  # [B*M*L]
+        flat_mask = mask.reshape(-1)  # [B*M*L]
+        per_token_loss = torch.zeros_like(flat_targets, dtype=backpointer_logits.dtype, device=backpointer_gt.device)  # [B*M*L]
+        if flat_mask.sum() > 0:
+            criterion = torch.nn.CrossEntropyLoss(reduction='none')
+            per_token_loss[flat_mask] = criterion(flat_logits[flat_mask], flat_targets[flat_mask])
+        per_token_loss = per_token_loss.view(batch_size, num_thoughts, seq_len)  # [B, M, L]
+        backpointer_losses = average_over_valid_positions(per_token_loss, mask)  # [B, M]
+        return backpointer_losses  # [B, M]
     
-    # Token-level accuracy
-    correct = ((predicted_tokens == ground_truth_cots) & mask).float()  # [B, M, L]
-    token_level_accuracies = correct.sum(dim=2) / num_valid  # [B, M]
-    
-    # Sequence-level accuracy for each threshold
-    sequence_level_accuracies = {}
-    for thresh in thresholds:
-        # For each sequence, is accuracy >= threshold?
-        sequence_level_accuracies[thresh] = (token_level_accuracies >= thresh).sum().item()
-    
-    # Perplexity (masked)
-    # Compute log_probs for all tokens
-    log_probs = F.log_softmax(predicted_logits, dim=-1)  # [B, M, L, V]
-    # Gather log_probs of the ground truth tokens
-    gt_log_probs = log_probs.gather(-1, ground_truth_cots.unsqueeze(-1)).squeeze(-1)  # [B, M, L]
-    # Masked negative log likelihood
-    nll = torch.zeros_like(gt_log_probs)
-    nll[mask] = -gt_log_probs[mask]
-    # Mean NLL per sequence
-    nll_sum = nll.sum(dim=2)  # [B, M]
-    nll_mean = nll_sum / num_valid  # [B, M]
-    perplexities = torch.exp(nll_mean)  # [B, M]
-    return {
+
+    mask = compute_mask(ground_truth_cots, cot_mask)  # [B, M, L]
+    reconstruction_losses = compute_reconstruction_losses(ground_truth_cots, predicted_logits, mask)  # [B, M]
+    token_level_accuracies = compute_token_level_accuracies(ground_truth_cots, predicted_logits, mask)  # [B, M]
+    sequence_level_accuracies = compute_sequence_level_accuracies(token_level_accuracies, thresholds)
+    perplexities = compute_perplexities(ground_truth_cots, predicted_logits, mask)  # [B, M]
+
+    metrics = {
         'reconstruction_losses': reconstruction_losses,
         'token_level_accuracies': token_level_accuracies,
         'sequence_level_accuracies': sequence_level_accuracies,
         'perplexities': perplexities
     }
+
+    # Add backpointer metrics if data is provided
+    if backpointer_gt is not None and backpointer_logits is not None:
+        backpointer_accuracies = compute_backpointer_accuracies(backpointer_gt, backpointer_logits, mask)  # [B, M]
+        backpointer_losses = compute_backpointer_losses(backpointer_gt, backpointer_logits, mask)  # [B, M]
+        metrics['backpointer_accuracies'] = backpointer_accuracies
+        metrics['backpointer_losses'] = backpointer_losses
+
+    return metrics
 
 
 def compute_word_latent_mapping_on_dataset(
@@ -633,7 +737,8 @@ def compute_word_latent_mapping_on_dataset(
 
 def compute_dataset_reconstruction_metrics_with_examples(
     model, prompt_sequences, cot_sequences, prompt_mask, cot_mask, 
-    batch_size=256, use_vq=True, ar_gen=True, k=None, tokenizer=None
+    batch_size=256, use_vq=True, ar_gen=True, k=None, tokenizer=None,
+    backpointers=None
 ):
     """
     Compute dataset-level reconstruction metrics by processing the dataset in batches and keep track of specific examples.
@@ -649,6 +754,7 @@ def compute_dataset_reconstruction_metrics_with_examples(
         ar_gen: Whether to generate auto-regressively or using teacher-forcing (default: True)
         k: If provided, the number of examples to keep for each category (default: None, none is kept)
         tokenizer: Tokenizer for decoding text (optional)
+        backpointers: Optional backpointer tensor of shape [batch, num_thoughts, seq_len] for compress beam search mode
     
     Returns:
         dict: Dataset-level average metrics and tracked examples containing:
@@ -796,6 +902,7 @@ def compute_dataset_reconstruction_metrics_with_examples(
             batch_cots = cot_sequences[start_idx:end_idx].to(device)
             batch_prompt_mask = prompt_mask[start_idx:end_idx].to(device) if prompt_mask is not None else None
             batch_cot_mask = cot_mask[start_idx:end_idx].to(device) if cot_mask is not None else None
+            batch_backpointers = backpointers[start_idx:end_idx].to(device) if backpointers is not None else None
             
             # Log memory after data loading
             if TRACK_BATCH_MEMORY_USE:
@@ -810,6 +917,8 @@ def compute_dataset_reconstruction_metrics_with_examples(
                 'inference': ar_gen,
                 'quantize_cot_only': True
             }
+            if batch_backpointers is not None:
+                model_inputs['backpointers'] = batch_backpointers
             if hasattr(model, 'use_vq'):
                 model_inputs['use_vq'] = use_vq
             else:
@@ -818,7 +927,15 @@ def compute_dataset_reconstruction_metrics_with_examples(
             if TRACK_BATCH_MEMORY_USE:
                 log_memory_point(f"batch_{batch_idx}_after_input_ready", batch_idx)
             
-            _, output_logits, _, _, _, _ = model(**model_inputs)
+            out = model(**model_inputs)
+            # Unpack outputs based on length
+            if len(out) == 6:
+                _, output_logits, _, _, indices, _ = out
+                batch_bp_logits = None
+            elif len(out) == 7:
+                _, output_logits, _, _, indices, _, batch_bp_logits = out
+            else:
+                output_logits = indices = batch_bp_logits = None
 
             for v in model_inputs.values(): del v
             del model_inputs
@@ -829,7 +946,7 @@ def compute_dataset_reconstruction_metrics_with_examples(
             
             # Compute metrics for this batch
             batch_metrics = compute_cot_reconstruction_metrics(
-                batch_cots, output_logits, batch_cot_mask
+                batch_cots, output_logits, batch_cot_mask, batch_backpointers, batch_bp_logits
             )
             
             # Log memory after metrics computation
@@ -881,6 +998,13 @@ def compute_dataset_reconstruction_metrics_with_examples(
                         'individual_token_accuracies': batch_metrics['token_level_accuracies'][i]
                     }
                     
+                    # Add backpointer data if available
+                    # TODO DO SOMETHING WITH IT, CURRENTLY NOTHING DONE
+                    if batch_backpointers is not None:
+                        example_data_precopy['backpointers'] = batch_backpointers[i]
+                    if batch_bp_logits is not None:
+                        example_data_precopy['bp_logits'] = batch_bp_logits[i]
+                    
                     # Update tracked lists for best/worst examples
                     best_loss_list        = update_tracked_list(best_loss_list,        example_data_precopy, k, is_best=True,  use_loss=True)
                     worst_loss_list       = update_tracked_list(worst_loss_list,       example_data_precopy, k, is_best=False, use_loss=True)
@@ -895,6 +1019,8 @@ def compute_dataset_reconstruction_metrics_with_examples(
                 print(f"Processed {batch_idx + 1}/{num_batches} batches...")
                     
             del batch_prompts, batch_cots, batch_prompt_mask, batch_cot_mask, output_logits, batch_metrics
+            if batch_backpointers is not None:
+                del batch_backpointers, batch_bp_logits
             
             # Log memory after cleanup
             if TRACK_BATCH_MEMORY_USE:
@@ -942,6 +1068,7 @@ def compute_dataset_reconstruction_metrics_with_examples(
                 batch_cots = cot_sequences[batch_indices].to(device)
                 batch_prompt_mask = prompt_mask[batch_indices].to(device) if prompt_mask is not None else None
                 batch_cot_mask = cot_mask[batch_indices].to(device) if cot_mask is not None else None
+                batch_backpointers = backpointers[batch_indices].to(device) if backpointers is not None else None
 
                 model_inputs = {
                     'prompt': batch_prompts,
@@ -951,20 +1078,30 @@ def compute_dataset_reconstruction_metrics_with_examples(
                     'inference': ar_gen,
                     'quantize_cot_only': True
                 }
+                if batch_backpointers is not None:
+                    model_inputs['backpointers'] = batch_backpointers
 
                 if hasattr(model, 'use_vq'):
                     model_inputs['use_vq'] = use_vq
                 else:
                     model_inputs['no_vq'] = not use_vq
 
-                _, output_logits, _, _, _, _ = model(**model_inputs)
+                out = model(**model_inputs)
+                # Unpack outputs based on length
+                if len(out) == 6:
+                    _, output_logits, _, _, indices, _ = out
+                    batch_bp_logits = None
+                elif len(out) == 7:
+                    _, output_logits, _, _, indices, _, batch_bp_logits = out
+                else:
+                    output_logits = indices = batch_bp_logits = None
 
                 for v in model_inputs.values(): del v
                 del model_inputs
 
                 # Compute metrics for this batch
                 batch_metrics = compute_cot_reconstruction_metrics(
-                    batch_cots, output_logits, batch_cot_mask
+                    batch_cots, output_logits, batch_cot_mask, batch_backpointers, batch_bp_logits
                 )
 
                 for i in range(batch_prompts.size(0)):
@@ -978,7 +1115,7 @@ def compute_dataset_reconstruction_metrics_with_examples(
                     avg_loss = batch_metrics['reconstruction_losses'][i].mean().item()
                     avg_perplexity = batch_metrics['perplexities'][i].mean().item()
 
-                    random_examples.append({
+                    example_data = {
                         'example_idx': example_idx,
                         'avg_loss': avg_loss,
                         'avg_perplexity': avg_perplexity,
@@ -990,11 +1127,21 @@ def compute_dataset_reconstruction_metrics_with_examples(
                         'individual_losses': batch_metrics['reconstruction_losses'][i].clone(),
                         'individual_perplexities': batch_metrics['perplexities'][i].clone(),
                         'individual_token_accuracies': batch_metrics['token_level_accuracies'][i].clone()
-                    })
+                    }
+                    
+                    # Add backpointer data if available
+                    if batch_backpointers is not None:
+                        example_data['backpointers'] = batch_backpointers[i].clone()
+                    if batch_bp_logits is not None:
+                        example_data['bp_logits'] = batch_bp_logits[i].clone()
+                    
+                    random_examples.append(example_data)
 
                     del prompt, cots, recon_logits, prompt_mask_ex, cot_mask_ex
 
                 del batch_metrics, batch_prompts, batch_cots, batch_prompt_mask, batch_cot_mask
+                if batch_backpointers is not None:
+                    del batch_backpointers, batch_bp_logits
                 
         tracked_examples['random'] = random_examples
         
@@ -1085,25 +1232,40 @@ def compute_dataset_reconstruction_metrics_from_checkpoint_and_keep_examples(
     # Load data
     print(f"Loading data from {data_dir}...")
     try:
-        train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, \
-        test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask = load_training_data(
+        data_loaded = load_training_data(
             data_dir=data_dir, max_samples=None, num_thoughts=num_thoughts, seed=seed
         )
+        # Handle both cases: with and without backpointers
+        if len(data_loaded) == 8:
+            train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, \
+            test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask = data_loaded
+            train_backpointers = test_backpointers = None
+        elif len(data_loaded) == 10:
+            train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, train_backpointers, \
+            test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask, test_backpointers = data_loaded
+        else:
+            raise ValueError(f"Unexpected number of return values from load_training_data: {len(data_loaded)}")
     except Exception as e:
         print(f"Error loading data: {e}")
         return
     
     # Function to sample data if num_examples is specified
-    def sample_data(prompt_sequences, cot_sequences, prompt_mask, cot_mask, num_examples, sample_seed):
+    def sample_data(prompt_sequences, cot_sequences, prompt_mask, cot_mask, num_examples, sample_seed, backpointers=None):
         if num_examples is None or num_examples >= len(prompt_sequences):
-            return prompt_sequences, cot_sequences, prompt_mask, cot_mask
+            if backpointers is not None:
+                return prompt_sequences, cot_sequences, prompt_mask, cot_mask, backpointers
+            else:
+                return prompt_sequences, cot_sequences, prompt_mask, cot_mask
         
         # Use torch.randperm with seed for reproducible random sampling
         torch.manual_seed(sample_seed)
         indices = torch.randperm(len(prompt_sequences))[:num_examples]
-        return (prompt_sequences[indices], cot_sequences[indices], 
+        result = (prompt_sequences[indices], cot_sequences[indices], 
                 prompt_mask[indices] if prompt_mask is not None else None,
                 cot_mask[indices] if cot_mask is not None else None)
+        if backpointers is not None:
+            result += (backpointers[indices],)
+        return result
     
     results = {}
     
@@ -1113,19 +1275,27 @@ def compute_dataset_reconstruction_metrics_from_checkpoint_and_keep_examples(
         print(f"{'='*80}")
         
         train_data = sample_data(train_prompt_sequences, train_cot_sequences, 
-                               train_prompt_mask, train_cot_mask, num_examples_train, seed)
+                               train_prompt_mask, train_cot_mask, num_examples_train, seed, train_backpointers)
         
+        # Extract data from sample_data result
+        if len(train_data) == 5:  # With backpointers
+            train_prompts, train_cots, train_prompts_mask, train_cots_mask, train_bps = train_data
+        else:  # Without backpointers
+            train_prompts, train_cots, train_prompts_mask, train_cots_mask = train_data
+            train_bps = None
+            
         train_results = compute_dataset_reconstruction_metrics_with_examples(
             model=model,
-            prompt_sequences=train_data[0],
-            cot_sequences=train_data[1],
-            prompt_mask=train_data[2],
-            cot_mask=train_data[3],
+            prompt_sequences=train_prompts,
+            cot_sequences=train_cots,
+            prompt_mask=train_prompts_mask,
+            cot_mask=train_cots_mask,
             batch_size=batch_size,
             use_vq=use_vq,
             ar_gen=ar_gen,
             k=k,
-            tokenizer=tokenizer
+            tokenizer=tokenizer,
+            backpointers=train_bps
         )
         results['train'] = train_results
     
@@ -1135,19 +1305,27 @@ def compute_dataset_reconstruction_metrics_from_checkpoint_and_keep_examples(
         print(f"{'='*80}")
         
         test_data = sample_data(test_prompt_sequences, test_cot_sequences,
-                              test_prompt_mask, test_cot_mask, num_examples_test, seed)
+                              test_prompt_mask, test_cot_mask, num_examples_test, seed, test_backpointers)
         
+        # Extract data from sample_data result
+        if len(test_data) == 5:  # With backpointers
+            test_prompts, test_cots, test_prompts_mask, test_cots_mask, test_bps = test_data
+        else:  # Without backpointers
+            test_prompts, test_cots, test_prompts_mask, test_cots_mask = test_data
+            test_bps = None
+            
         test_results = compute_dataset_reconstruction_metrics_with_examples(
             model=model,
-            prompt_sequences=test_data[0],
-            cot_sequences=test_data[1],
-            prompt_mask=test_data[2],
-            cot_mask=test_data[3],
+            prompt_sequences=test_prompts,
+            cot_sequences=test_cots,
+            prompt_mask=test_prompts_mask,
+            cot_mask=test_cots_mask,
             batch_size=batch_size,
             use_vq=use_vq,
             ar_gen=ar_gen,
             k=k,
-            tokenizer=tokenizer
+            tokenizer=tokenizer,
+            backpointers=test_bps
         )
         results['test'] = test_results
     
@@ -1204,8 +1382,16 @@ def compute_dataset_reconstruction_metrics_from_checkpoint_and_keep_examples(
                     cot_recon_texts.append(recon_cot_text)
                 
                 # Compute metrics using available data
+                backpointer_gt = example.get('backpointers', None)
+                backpointer_logits = example.get('bp_logits', None)
+                if backpointer_gt is not None:
+                    backpointer_gt = backpointer_gt.unsqueeze(0)
+                if backpointer_logits is not None:
+                    backpointer_logits = backpointer_logits.unsqueeze(0)
+                
                 metrics = compute_cot_reconstruction_metrics(
-                    example['cots'].unsqueeze(0), example['recon_logits'].unsqueeze(0), example['cot_mask'].unsqueeze(0)
+                    example['cots'].unsqueeze(0), example['recon_logits'].unsqueeze(0), example['cot_mask'].unsqueeze(0), 
+                    backpointer_gt, backpointer_logits
                 )
 
                 # Use print_demonstration_results for side-by-side comparison
@@ -1314,6 +1500,15 @@ def print_demonstration_results(
         print(f"[Teacher-forced] Perplexity (per CoT, per example):")
         tf_ppl = tf_metrics['perplexities'][0]
         print(" | ".join([f"CoT {i}: {tf_ppl[i]:.4f}" for i in range(tf_ppl.size(0))]))
+        
+        # Print backpointer metrics if available (for compress beam search mode)
+        if 'backpointer_accuracies' in tf_metrics:
+            tf_bp_acc = tf_metrics['backpointer_accuracies'][0]
+            tf_bp_loss = tf_metrics['backpointer_losses'][0]
+            print(f"[Teacher-forced] Backpointer accuracy (per CoT, per example):")
+            print(" | ".join([f"CoT {i}: {tf_bp_acc[i]:.4f}" for i in range(tf_bp_acc.size(0))]))
+            print(f"[Teacher-forced] Backpointer loss (per CoT, per example):")
+            print(" | ".join([f"CoT {i}: {tf_bp_loss[i]:.4f}" for i in range(tf_bp_loss.size(0))]))
     
     # Print detailed metrics for auto-regressive
     if ar_metrics is not None:
@@ -1332,6 +1527,15 @@ def print_demonstration_results(
         print(f"[Auto-regressive] Perplexity (per CoT, per example):")
         ar_ppl = ar_metrics['perplexities'][0]
         print(" | ".join([f"CoT {i}: {ar_ppl[i]:.4f}" for i in range(ar_ppl.size(0))]))
+        
+        # Print backpointer metrics if available (for compress beam search mode)
+        if 'backpointer_accuracies' in ar_metrics:
+            ar_bp_acc = ar_metrics['backpointer_accuracies'][0]
+            ar_bp_loss = ar_metrics['backpointer_losses'][0]
+            print(f"[Auto-regressive] Backpointer accuracy (per CoT, per example):")
+            print(" | ".join([f"CoT {i}: {ar_bp_acc[i]:.4f}" for i in range(ar_bp_acc.size(0))]))
+            print(f"[Auto-regressive] Backpointer loss (per CoT, per example):")
+            print(" | ".join([f"CoT {i}: {ar_bp_loss[i]:.4f}" for i in range(ar_bp_loss.size(0))]))
     
     # Helper function for chunking text
     def chunk_text(text, chunk_size=20):
@@ -1418,19 +1622,28 @@ def demonstrate_model_from_checkpoint(checkpoint_path: str,
         data_dir = f"data/GSM8K/128_128/batch_{num_thoughts}"
     print(f"Loading example data from: {data_dir}")
     try:
-        train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, \
-        test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask = load_training_data(
+        out = load_training_data(
             data_dir=data_dir, max_samples=num_examples, num_thoughts=num_thoughts, seed=seed
         )
+        # without backpointers
+        if len(out) == 8:
+            train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, \
+                test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask = out
+            train_backpointers, test_backpointers = None, None
+        # with backpointers (required for compress_beam_search mode)
+        else: # len(out) == 10:
+            train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, train_backpointers, \
+                test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask, test_backpointers = out
+        
     except Exception as e:
         print(f"Error loading data: {e}")
         return
     run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num_embeddings, use_vq,
                               train_prompt_sequences, train_cot_sequences, train_prompt_mask, train_cot_mask, "train", checkpoint_path, 
-                              do_figure_analyses)
+                              do_figure_analyses, train_backpointers)
     run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num_embeddings, use_vq,
                               test_prompt_sequences, test_cot_sequences, test_prompt_mask, test_cot_mask, "test", checkpoint_path, 
-                              do_figure_analyses)
+                              do_figure_analyses, test_backpointers)
 
 def demonstrate_custom_prompt_cot(checkpoint_path: str,
                                  prompt_file: str = "test_prompt.txt",
@@ -1518,7 +1731,7 @@ def demonstrate_custom_prompt_cot(checkpoint_path: str,
     run_demonstration_on_split(
         model, tokenizer, 1, num_thoughts, num_embeddings, use_vq,
         prompt, cot_gt, prompt_mask_ex, cot_mask_ex, "custom", checkpoint_path, 
-        do_figure_analyses
+        do_figure_analyses # won't add backpointers for now coz I'm lazy
     )
     print("\nCustom prompt-CoT demonstration completed!")
 
