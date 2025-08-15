@@ -427,7 +427,8 @@ def compute_reconstruction_loss(output_logits: torch.Tensor,
         reduction: optionally specifies if the criterion reduces, in case we wanna compute per-item loss
         
     Returns:
-        torch.Tensor: Reconstruction loss only
+        (torch.Tensor, torch.Tensor): Reconstruction loss, and backpointer loss if backpointers are 
+                                      provided, else torch.tensor(0.0).
     """
     # Flatten all dimensions except vocab_size
     logits_flat = output_logits.reshape(-1, output_logits.size(-1))
