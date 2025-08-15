@@ -650,7 +650,8 @@ class GPT2VQVAE(nn.Module):
             attn_pdrop=final_decoder_dropout,
             activation_function=final_decoder_activation_function,
         )
-        if self.only_latent_decode or self.simple_decoder or self.embed_sum_decode:
+        if self.only_latent_decode or self.simple_decoder or self.embed_sum_decode or \
+           self.compress_beam_search or self.interchain or self.interchain_positional:
             self.decoder_config.add_cross_attention = False
         
         if self.compress_beam_search and (use_pretrained_encoder or use_pretrained_decoder):
