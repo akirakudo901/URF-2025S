@@ -249,7 +249,9 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                 metrics = compute_cot_reconstruction_metrics(
                     cot_gt, output_logits, cot_mask_ex, backpointers_ex, bp_logits)  
                 if output_logits is not None and cot_gt is not None and cot_mask_ex is not None:  
-                    recon_loss = compute_reconstruction_loss(output_logits, cot_gt, cot_mask_ex)  
+                    # TODO DO SOMETHING WITH bp_loss, CURRENTLY DOING NOTHING
+                    recon_loss, bp_loss = compute_reconstruction_loss(
+                        output_logits, cot_gt, cot_mask_ex, bp_logits, backpointers_ex)
             return {
                 "output_sequences": output_sequences,
                 "output_logits": output_logits,
@@ -260,7 +262,8 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                 "bp_logits": bp_logits,
                 "cot_texts": cot_texts,
                 "metrics": metrics,
-                "recon_loss": recon_loss
+                "recon_loss": recon_loss,
+                "bp_loss": bp_loss
             }
 
         for i in range(min(num_examples, len(prompt_sequences))):
@@ -297,7 +300,8 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                 for name in metrics_to_store: 
                     if name in tf_results["metrics"]:
                         metric_val = tf_results["metrics"][name][0].mean().item()
-                        lst = tf_mean_per_example_metric.get(name, []).append(metric_val)
+                        lst = tf_mean_per_example_metric.get(name, [])
+                        lst.append(metric_val)
                         tf_mean_per_example_metric[name] = lst
 
             # Process auto-regressive mode
@@ -315,7 +319,8 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                 for name in metrics_to_store: 
                     if name in ar_results["metrics"]:
                         metric_val = ar_results["metrics"][name][0].mean().item()
-                        lst = ar_mean_per_example_metric.get(name, []).append(metric_val)
+                        lst = ar_mean_per_example_metric.get(name, [])
+                        lst.append(metric_val)
                         ar_mean_per_example_metric[name] = lst
 
             # Print results using the helper function
@@ -463,23 +468,24 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
                         
                     if do_figure_analyses:
                         try:
-                            print(f"\n{'='*80}")
-                            print(f"GENERATING WORD-TO-LATENT MAPPING ANALYSIS FOR {split_name.upper()} DATA")
-                            print(f"{'='*80}")
-                            word_mapping_dir = os.path.join(os.path.dirname(checkpoint_path), 
-                                                            f"word_mapping_analysis_{split_name}")
-                            os.makedirs(word_mapping_dir, exist_ok=True)
-                            analyzer.analyze_word_to_latent_mapping(
-                                prompt_sequences=prompt_sequences,
-                                cot_sequences=cot_sequences,
-                                prompt_mask=prompt_mask,
-                                cot_mask=cot_mask,
-                                output_dir=word_mapping_dir,
-                                sample_size=min(100, len(prompt_sequences)),
-                                top_k_words=15,
-                                top_k_codes=25
-                            )
-                            print(f"Word-to-latent mapping analysis completed for {split_name} data!")
+                            print("WORD TO LATENT MAPPING CURRENTLY DISABLED.")
+                            # print(f"\n{'='*80}")
+                            # print(f"GENERATING WORD-TO-LATENT MAPPING ANALYSIS FOR {split_name.upper()} DATA")
+                            # print(f"{'='*80}")
+                            # word_mapping_dir = os.path.join(os.path.dirname(checkpoint_path), 
+                            #                                 f"word_mapping_analysis_{split_name}")
+                            # os.makedirs(word_mapping_dir, exist_ok=True)
+                            # analyzer.analyze_word_to_latent_mapping(
+                            #     prompt_sequences=prompt_sequences,
+                            #     cot_sequences=cot_sequences,
+                            #     prompt_mask=prompt_mask,
+                            #     cot_mask=cot_mask,
+                            #     output_dir=word_mapping_dir,
+                            #     sample_size=min(100, len(prompt_sequences)),
+                            #     top_k_words=15,
+                            #     top_k_codes=25
+                            # )
+                            # print(f"Word-to-latent mapping analysis completed for {split_name} data!")
                         except Exception as e:
                             print(f"Error during word-to-latent mapping analysis: {e}")
                             import traceback
