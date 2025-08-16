@@ -425,7 +425,7 @@ class SimpleGPT2VQVAE(GPT2VQVAE):
         
         return cot_logits
 
-    def forward(self, prompt, cot_sequences, cot_mask=None, prompt_mask=None, inference=False, quantize_cot_only=True, pad_token_id=50256, use_vq=True):
+    def forward(self, prompt, cot_sequences, cot_mask=None, prompt_mask=None, inference=False, quantize_cot_only=True, pad_token_id=50256, use_vq=True, debug_artificial_memory=None):
         """
         Forward pass through the model.
         
@@ -439,6 +439,7 @@ class SimpleGPT2VQVAE(GPT2VQVAE):
             pad_token_id (int): Token ID to use for padding when K=0, defaults to 50256
             use_vq (bool): If True, apply vector quantization to encoder outputs.
                           If False, pass encoder outputs directly without quantization.
+            debug_artificial_memory (torch.Tensor, optional): Artificial memory tensor to use instead of encoding (for debugging)
             
         Returns:
             tuple: (output_sequences, output_logits, vq_loss, perplexity, indices)
@@ -458,19 +459,38 @@ class SimpleGPT2VQVAE(GPT2VQVAE):
         batch_size, K = prompt.shape
         _, L = cot_sequences.shape  # Now single CoT sequence per prompt
         
-        # Encode using the new approach (with optional VQ)
-        quantized, vq_loss, perplexity, indices = self.encode(
-            prompt, cot_sequences, 
-            prompt_mask, cot_mask, 
-            quantize_cot_only=quantize_cot_only,
-            use_vq=use_vq
-        )
-        
-        # quantized shape depends on quantize_cot_only:
-        if quantize_cot_only:          # if True: [batch_size, L, d_model] (only COT positions)
-            cot_quantized = quantized
-        else:                          # if False: [batch_size, K+L, d_model] (all positions)
-            cot_quantized = quantized[:, K:, :]
+        # If debug_artificial_memory is provided, bypass encoding and use it directly
+        if debug_artificial_memory is not None:
+            print(f"DEBUG: Using artificial memory with shape {debug_artificial_memory.shape}")
+            # Set dummy values for encoding-related outputs
+            vq_loss = torch.tensor(0.0, device=debug_artificial_memory.device)
+            perplexity = torch.tensor(1.0, device=debug_artificial_memory.device)
+            indices = torch.zeros(batch_size, L if quantize_cot_only else K+L, device=debug_artificial_memory.device, dtype=torch.long)
+            
+            # Use the provided artificial memory directly
+            if quantize_cot_only:
+                cot_quantized = debug_artificial_memory  # Should be [B, L, d_model]
+            else:
+                # For non-quantize_cot_only, we need to handle the shape appropriately
+                if debug_artificial_memory.dim() == 3 and debug_artificial_memory.size(1) == K + L:
+                    cot_quantized = debug_artificial_memory[:, K:, :]  # Extract COT portion
+                else:
+                    cot_quantized = debug_artificial_memory  # Assume it's already in the right shape
+        else:
+            # Normal encoding path
+            # Encode using the new approach (with optional VQ)
+            quantized, vq_loss, perplexity, indices = self.encode(
+                prompt, cot_sequences, 
+                prompt_mask, cot_mask, 
+                quantize_cot_only=quantize_cot_only,
+                use_vq=use_vq
+            )
+            
+            # quantized shape depends on quantize_cot_only:
+            if quantize_cot_only:          # if True: [batch_size, L, d_model] (only COT positions)
+                cot_quantized = quantized
+            else:                          # if False: [batch_size, K+L, d_model] (all positions)
+                cot_quantized = quantized[:, K:, :]
         
         if not inference:
             # During training, use teacher forcing with single forward pass to get all logits

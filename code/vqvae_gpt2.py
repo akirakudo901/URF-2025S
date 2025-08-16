@@ -1256,11 +1256,11 @@ class GPT2VQVAE(nn.Module):
             quantized, vq_loss, perplexity, indices = vq_out
         
         # Tile back to obtain the same shape and amount of info
-        quantized = aggregated.unsqueeze(1).expand(-1, M, -1)  # [B * L, M, d_model]
+        quantized = quantized.unsqueeze(1).expand(-1, M, -1)  # [B * L, M, d_model]
         
         # Reshape back using the appropriate length
         quantized = quantized.reshape(batch_size, M*L, quantized.size(-1)) # [B, M*L, d_model]
-        indices = indices.reshape(batch_size, -1) # [B, M*L]
+        indices = indices.reshape(batch_size, -1) # [B, L]
         
         return quantized, vq_loss, perplexity, indices, debug_stats
     
@@ -1656,7 +1656,7 @@ class GPT2VQVAE(nn.Module):
                     del decoder_outputs
                     
                     # Subsequent positions: use prompt + generated tokens + current latent
-                    generated_embed = self.decoder.transformer.wte(torch.argmax(latest_logits, dim=-1, keepdim=True))  # [B*M, 1, d_model]
+                    generated_embed = self.decoder.transformer.wte(torch.argmax(latest_logits, dim=-1))  # [B*M, 1, d_model]
                     generated_embed.add_(chain_memory[:, t:t+1, :])   # [B*M, 1, d_model]
                     
                     decoder_outputs = self.decoder(
@@ -2053,7 +2053,7 @@ class GPT2VQVAE(nn.Module):
             full_positions = None
 
         if not inference:
-            # TEACHER-FORCING MOD
+            # TEACHER-FORCING MODE
             # Create beam search sequence
             beam_sequence = positionwise_flatten(cot_sequences)  # [batch_size, M*L] each
 
@@ -2445,12 +2445,13 @@ class GPT2VQVAE(nn.Module):
             
             return output_logits
 
-    def forward(self, prompt, cot_sequences, cot_mask=None, prompt_mask=None, inference=False, quantize_cot_only=True, pad_token_id=50256, no_vq=False, backpointers=None):
+    def forward(self, prompt, cot_sequences, cot_mask=None, prompt_mask=None, inference=False, quantize_cot_only=True, pad_token_id=50256, no_vq=False, backpointers=None, debug_artificial_memory=None):
         """
         Forward pass through the model.
         If no_vq is True, bypass vector quantization and use aggregated embeddings directly.
         If self.only_latent_decode is True, always decode in a single pass regardless of 'inference'.
         If self.simple_decoder is True, use decoder-only logic for both teacher-forced and auto-regressive generation.
+        If debug_artificial_memory is provided, bypass encoding and use the provided memory directly (for debugging purposes).
         
                 Args:
             prompt (torch.Tensor): Prompt sequences [batch_size, K] where K is prompt length
@@ -2462,6 +2463,7 @@ class GPT2VQVAE(nn.Module):
             pad_token_id (int): Token ID to use for padding when K=0, defaults to 50256
             no_vq (bool): If True, bypass vector quantization and use aggregated embeddings directly.
             backpointers (torch.Tensor, optional): Backpointer indices [batch_size, M, L] for compress_beam_search mode
+            debug_artificial_memory (torch.Tensor, optional): Artificial memory tensor to use instead of encoding (for debugging)
             
         Returns:
             tuple: (output_sequences, output_logits, vq_loss, perplexity, indices, debug_stats)
@@ -2475,20 +2477,40 @@ class GPT2VQVAE(nn.Module):
         batch_size, K = prompt.shape
         _, M, L = cot_sequences.shape
         
-        # Encode using the new separate prompt and COT approach
-        quantized, vq_loss, perplexity, indices, debug_stats = self.encode(
-            prompt, cot_sequences, 
-            prompt_mask, cot_mask, 
-            quantize_cot_only=quantize_cot_only,
-            no_vq=no_vq,
-            backpointers=backpointers
-        )
-        
-        # quantized shape depends on quantize_cot_only:
-        if quantize_cot_only:          # if True: [batch_size, L, M, d_model] (only COT positions)
-            cot_quantized = quantized
-        else:                          # if False: [batch_size, K+L, M, d_model] (all positions)
-            cot_quantized = quantized[:, K:, :, :]
+        # If debug_artificial_memory is provided, bypass encoding and use it directly
+        if debug_artificial_memory is not None:
+            print(f"DEBUG: Using artificial memory with shape {debug_artificial_memory.shape}")
+            # Set dummy values for encoding-related outputs
+            vq_loss = torch.tensor(0.0, device=debug_artificial_memory.device)
+            perplexity = torch.tensor(1.0, device=debug_artificial_memory.device)
+            indices = torch.zeros(batch_size, L if quantize_cot_only else K+L, device=debug_artificial_memory.device, dtype=torch.long)
+            debug_stats = {}
+            
+            # Use the provided artificial memory directly
+            if quantize_cot_only:
+                cot_quantized = debug_artificial_memory  # Should be [B, L, M, d_model] or [B, M*L, d_model]
+            else:
+                # For non-quantize_cot_only, we need to handle the shape appropriately
+                if debug_artificial_memory.dim() == 4 and debug_artificial_memory.size(1) == K + L:
+                    cot_quantized = debug_artificial_memory[:, K:, :, :]  # Extract COT portion
+                else:
+                    cot_quantized = debug_artificial_memory  # Assume it's already in the right shape
+        else:
+            # Normal encoding path
+            # Encode using the new separate prompt and COT approach
+            quantized, vq_loss, perplexity, indices, debug_stats = self.encode(
+                prompt, cot_sequences, 
+                prompt_mask, cot_mask, 
+                quantize_cot_only=quantize_cot_only,
+                no_vq=no_vq,
+                backpointers=backpointers
+            )
+            
+            # quantized shape depends on quantize_cot_only:
+            if quantize_cot_only:          # if True: [batch_size, L, M, d_model] (only COT positions)
+                cot_quantized = quantized  # Or [B, M*L, d_model] for any of the new modes (interchain, positional, compress search)
+            else:                          # if False: [batch_size, K+L, M, d_model] (all positions)
+                cot_quantized = quantized[:, K:, :, :]
         
         # Decode using the updated decode function that handles both teacher-forcing and auto-regression
         if self.compress_beam_search:
