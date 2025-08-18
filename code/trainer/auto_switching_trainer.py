@@ -11,12 +11,21 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
     """
     Trainer that automatically switches from initialization to reestimation phase
     based on validation reconstruction loss trend or a step threshold.
+    
+    Two switching mechanisms are supported:
+    1. Patience-based: Switch after consecutive validation loss increases (default)
+    2. Threshold-based: Switch when validation loss drops below a threshold
+    
     Inherits from PhasedEnhancedGPT2VQVAETrainer.
     """
     def __init__(self, model_config: Dict[str, Any], training_config: Dict[str, Any], device: str = "cuda" if torch.cuda.is_available() else "cpu", run_name: Optional[str] = "ANONYM_RUN"):
         # Extract auto-switching parameters from training_config
         self.patience = training_config.pop('auto_switch_patience', 3)
         self.validation_checks_per_epoch = training_config.pop('auto_switch_validation_checks_per_epoch', 5)
+        self.threshold = training_config.pop('auto_switch_threshold', None)  # New threshold parameter
+        
+        # Note: If threshold is set, it takes precedence over patience mechanism
+        # If threshold is None, patience-based switching is used
         
         # Initialize parent with cleaned configs
         super().__init__(model_config, training_config, device, run_name=run_name)
@@ -25,6 +34,12 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
         self._val_recon_loss_history = []
         self._val_loss_increase_count = 0
         self._force_reestimation_phase = False
+        
+        # Print auto-switching configuration
+        if self.threshold is not None:
+            print(f"[AutoSwitch] Threshold-based switching enabled: {self.threshold:.4f}")
+        else:
+            print(f"[AutoSwitch] Patience-based switching enabled: {self.patience}")
 
     def train(self, 
               train_prompt_sequences: torch.Tensor,
@@ -88,7 +103,7 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
             val_metrics = self.validate(self._val_loader)
             val_recon_loss = val_metrics.get('recon_loss', None)
             
-            # Check for consecutive increases
+            # Check for consecutive increases (patience-based mechanism)
             if len(self._val_recon_loss_history) > 0:
                 if val_recon_loss > self._val_recon_loss_history[-1]:
                     self._val_loss_increase_count += 1
@@ -96,9 +111,22 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
                     self._val_loss_increase_count = 0
             self._val_recon_loss_history.append(val_recon_loss)
             
-            print(f"\n[AutoSwitch] Step {self.current_step}, Val Recon Loss: {val_recon_loss:.4f}, Increases: {self._val_loss_increase_count}/{self.patience}")
-            if self._val_loss_increase_count >= self.patience:
-                print(f"\n[AutoSwitch] Switching to reestimation phase at step {self.current_step} (patience={self.patience})")
+            # Determine switching reason
+            switch_reason = None
+            if self.threshold is not None and val_recon_loss < self.threshold:
+                switch_reason = f"threshold ({val_recon_loss:.4f} < {self.threshold:.4f})"
+            elif self.threshold is None and self._val_loss_increase_count >= self.patience:
+                switch_reason = f"patience ({self._val_loss_increase_count}/{self.patience})"
+            
+            # Print current status
+            if self.threshold is not None:
+                print(f"\n[AutoSwitch] Step {self.current_step}, Val Recon Loss: {val_recon_loss:.4f}, Threshold: {self.threshold:.4f}")
+            else:
+                print(f"\n[AutoSwitch] Step {self.current_step}, Val Recon Loss: {val_recon_loss:.4f}, Increases: {self._val_loss_increase_count}/{self.patience}")
+            
+            # Switch to reestimation phase if criteria are met
+            if switch_reason is not None:
+                print(f"\n[AutoSwitch] Switching to reestimation phase at step {self.current_step} ({switch_reason})")
                 self._force_reestimation_phase = True
                 # If using phase lengths, dynamically set phase boundaries
                 if self.reestimation_phase_length is not None:
@@ -126,6 +154,7 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
         self._force_reestimation_phase = False
         self._val_recon_loss_history = []
         self._val_loss_increase_count = 0
+        # Note: threshold is not reset as it's a configuration parameter
 
     def save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False, checkpoint_path: Optional[str] = None, remove_other_best_models: bool = True, loss_type: str = 'total', **kwargs):
         """
@@ -135,6 +164,7 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
         auto_switch_state = {
             'patience': self.patience,
             'validation_checks_per_epoch': self.validation_checks_per_epoch,
+            'threshold': self.threshold,  # Save threshold parameter
             'val_recon_loss_history': self._val_recon_loss_history,
             'val_loss_increase_count': self._val_loss_increase_count,
             'force_reestimation_phase': self._force_reestimation_phase,
@@ -160,6 +190,10 @@ class AutoSwitchingTrainer(PhasedEnhancedGPT2VQVAETrainer):
         if 'patience' in checkpoint:
             self.patience = checkpoint['patience']
             print(f"Restored patience: {self.patience}")
+        
+        if 'threshold' in checkpoint:
+            self.threshold = checkpoint['threshold']
+            print(f"Restored threshold: {self.threshold}")
         
         if 'validation_checks_per_epoch' in checkpoint:
             self.validation_checks_per_epoch = checkpoint['validation_checks_per_epoch']
