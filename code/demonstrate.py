@@ -554,7 +554,8 @@ def compute_cot_reconstruction_metrics(
             - reconstruction_losses: [batch, num_thoughts]
             - token_level_accuracies: [batch, num_thoughts]
             - sequence_level_accuracies: {threshold: float}
-            - perplexities: [batch, num_thoughts]
+            - log_perplexities: [batch, num_thoughts]
+            - num_valid: [batch, num_thoughts] - number of non-masked tokens per sequence
             - backpointer_accuracies: [batch, num_thoughts] (if backpointer data provided)
             - backpointer_losses: [batch, num_thoughts] (if backpointer data provided)
     """
@@ -574,46 +575,46 @@ def compute_cot_reconstruction_metrics(
             mask: Bool tensor of shape [B, M, L]
         Returns:
             avg: Tensor of shape [B, M]
+            num_valid: Tensor of shape [B, M]
         """
         mask_f = mask.float()  # [B, M, L]
         num_valid = mask_f.sum(dim=2)  # [B, M]
         num_valid = num_valid + (num_valid == 0)  # [B, M]
         avg = (metric_arr * mask_f).sum(dim=2) / num_valid  # [B, M]
-        return avg  # [B, M]
+        return avg, num_valid  # both [B, M]
 
     def compute_reconstruction_losses(ground_truth_cots, predicted_logits, mask):
         batch_size, num_thoughts, seq_len = ground_truth_cots.shape
-        flat_logits = predicted_logits.reshape(-1, predicted_logits.size(-1))  # [B*M*L, V]  # [B*M*L, V]
-        flat_targets = ground_truth_cots.reshape(-1)  # [B*M*L]  # [B*M*L]
-        flat_mask = mask.reshape(-1)  # [B*M*L]  # [B*M*L]
+        flat_logits = predicted_logits.reshape(-1, predicted_logits.size(-1))  # [B*M*L, V]
+        flat_targets = ground_truth_cots.reshape(-1)  # [B*M*L]
+        flat_mask = mask.reshape(-1)  # [B*M*L]
         per_token_loss = torch.zeros_like(flat_targets, dtype=predicted_logits.dtype, device=ground_truth_cots.device)  # [B*M*L]
         if flat_mask.sum() > 0:
             criterion = torch.nn.CrossEntropyLoss(ignore_index=50256, reduction='none')
             per_token_loss[flat_mask] = criterion(flat_logits[flat_mask], flat_targets[flat_mask])
         per_token_loss = per_token_loss.view(batch_size, num_thoughts, seq_len)  # [B, M, L]
-        reconstruction_losses = average_over_valid_positions(per_token_loss, mask)  # [B, M]
-        return reconstruction_losses  # [B, M]
+        reconstruction_losses, num_valid = average_over_valid_positions(per_token_loss, mask)  # [B, M]
+        return reconstruction_losses, num_valid  # [B, M]
 
     def compute_token_level_accuracies(ground_truth_cots, predicted_logits, mask):
         predicted_tokens = torch.argmax(predicted_logits, dim=-1)  # [B, M, L]
         correct = ((predicted_tokens == ground_truth_cots) & mask).float()  # [B, M, L]
-        token_level_accuracies = average_over_valid_positions(correct, mask)  # [B, M]
-        return token_level_accuracies  # [B, M]
+        token_level_accuracies, num_valid = average_over_valid_positions(correct, mask)  # [B, M]
+        return token_level_accuracies, num_valid  # [B, M]
 
     def compute_sequence_level_accuracies(token_level_accuracies, thresholds):
         sequence_level_accuracies = {}
         for thresh in thresholds:
-            sequence_level_accuracies[thresh] = (token_level_accuracies >= thresh).sum().item()
+            sequence_level_accuracies[thresh] = (token_level_accuracies >= thresh).mean().item()
         return sequence_level_accuracies
 
-    def compute_perplexities(ground_truth_cots, predicted_logits, mask):
+    def compute_log_perplexities(ground_truth_cots, predicted_logits, mask):
         log_probs = F.log_softmax(predicted_logits, dim=-1)  # [B, M, L, V]
         gt_log_probs = log_probs.gather(-1, ground_truth_cots.unsqueeze(-1)).squeeze(-1)  # [B, M, L]
         nll = torch.zeros_like(gt_log_probs)  # [B, M, L]
         nll[mask] = -gt_log_probs[mask]
-        nll_mean = average_over_valid_positions(nll, mask)  # [B, M]
-        perplexities = torch.exp(nll_mean)  # [B, M]
-        return perplexities  # [B, M]
+        nll_mean, num_valid = average_over_valid_positions(nll, mask)  # [B, M] each
+        return nll_mean, num_valid  # [B, M]
 
     def compute_backpointer_accuracies(backpointer_gt, backpointer_logits, mask):
         """
@@ -624,11 +625,12 @@ def compute_cot_reconstruction_metrics(
             mask: Mask tensor [B, M, L]
         Returns:
             backpointer_accuracies: [B, M]
+            num_valid: [B, M]
         """
         predicted_backpointers = torch.argmax(backpointer_logits, dim=-1)  # [B, M, L]
         correct = ((predicted_backpointers == backpointer_gt) & mask).float()  # [B, M, L]
-        backpointer_accuracies = average_over_valid_positions(correct, mask)  # [B, M]
-        return backpointer_accuracies  # [B, M]
+        backpointer_accuracies, num_valid = average_over_valid_positions(correct, mask)  # [B, M]
+        return backpointer_accuracies, num_valid  # [B, M]
 
     def compute_backpointer_losses(backpointer_gt, backpointer_logits, mask):
         """
@@ -639,6 +641,7 @@ def compute_cot_reconstruction_metrics(
             mask: Mask tensor [B, M, L]
         Returns:
             backpointer_losses: [B, M]
+            num_valid: [B, M]
         """
         batch_size, num_thoughts, seq_len = backpointer_gt.shape
         flat_logits = backpointer_logits.reshape(-1, backpointer_logits.size(-1))  # [B*M*L, num_thoughts]
@@ -649,27 +652,28 @@ def compute_cot_reconstruction_metrics(
             criterion = torch.nn.CrossEntropyLoss(reduction='none')
             per_token_loss[flat_mask] = criterion(flat_logits[flat_mask], flat_targets[flat_mask])
         per_token_loss = per_token_loss.view(batch_size, num_thoughts, seq_len)  # [B, M, L]
-        backpointer_losses = average_over_valid_positions(per_token_loss, mask)  # [B, M]
-        return backpointer_losses  # [B, M]
+        backpointer_losses, num_valid = average_over_valid_positions(per_token_loss, mask)  # [B, M]
+        return backpointer_losses, num_valid  # [B, M]
     
 
     mask = compute_mask(ground_truth_cots, cot_mask)  # [B, M, L]
-    reconstruction_losses = compute_reconstruction_losses(ground_truth_cots, predicted_logits, mask)  # [B, M]
-    token_level_accuracies = compute_token_level_accuracies(ground_truth_cots, predicted_logits, mask)  # [B, M]
+    reconstruction_losses, num_valid = compute_reconstruction_losses(ground_truth_cots, predicted_logits, mask)  # [B, M]
+    token_level_accuracies, _ = compute_token_level_accuracies(ground_truth_cots, predicted_logits, mask)  # [B, M]
     sequence_level_accuracies = compute_sequence_level_accuracies(token_level_accuracies, thresholds)
-    perplexities = compute_perplexities(ground_truth_cots, predicted_logits, mask)  # [B, M]
+    log_perplexities, _ = compute_log_perplexities(ground_truth_cots, predicted_logits, mask)  # [B, M]
 
     metrics = {
         'reconstruction_losses': reconstruction_losses,
         'token_level_accuracies': token_level_accuracies,
         'sequence_level_accuracies': sequence_level_accuracies,
-        'perplexities': perplexities
+        'log_perplexities': log_perplexities,
+        'num_valid': num_valid
     }
 
     # Add backpointer metrics if data is provided
     if backpointer_gt is not None and backpointer_logits is not None:
-        backpointer_accuracies = compute_backpointer_accuracies(backpointer_gt, backpointer_logits, mask)  # [B, M]
-        backpointer_losses = compute_backpointer_losses(backpointer_gt, backpointer_logits, mask)  # [B, M]
+        backpointer_accuracies, _ = compute_backpointer_accuracies(backpointer_gt, backpointer_logits, mask)  # [B, M]
+        backpointer_losses, _ = compute_backpointer_losses(backpointer_gt, backpointer_logits, mask)  # [B, M]
         metrics['backpointer_accuracies'] = backpointer_accuracies
         metrics['backpointer_losses'] = backpointer_losses
 
@@ -857,11 +861,12 @@ def compute_dataset_reconstruction_metrics_with_examples(
     # Accumulators for averaging
     total_reconstruction_loss = 0.0
     total_token_accuracy = 0.0
-    total_perplexity = 0.0
+    total_log_perplexity = 0.0
+    total_valid_tokens = 0
     total_sequences = 0
     
     # For sequence-level accuracies, we need to track all individual accuracies
-    sequence_level_accuracies = {}
+    sequence_level_accuracy_counts = {}
     thresholds = [1.0, 0.95, 0.9, 0.8, 0.7]
     
     # Track best and worst examples using lists
@@ -959,20 +964,37 @@ def compute_dataset_reconstruction_metrics_with_examples(
             if TRACK_BATCH_MEMORY_USE:
                 log_memory_point(f"batch_{batch_idx}_metrics_computed", batch_idx)
             
-            # Accumulate metrics
-            batch_size_actual = batch_cots.size(0)
-            total_sequences += batch_size_actual * batch_cots.size(1)  # batch_size * num_thoughts
+            # Get num_valid for this batch
+            num_valid = batch_metrics['num_valid']  # [B, M]
             
-            # Average over batch and num_thoughts dimensions
-            total_reconstruction_loss += batch_metrics['reconstruction_losses'].mean().item() * batch_size_actual
-            total_token_accuracy += batch_metrics['token_level_accuracies'].mean().item() * batch_size_actual
-            total_perplexity += batch_metrics['perplexities'].mean().item() * batch_size_actual
+            # Accumulate metrics using proper weighted averaging
+            # For each metric, multiply by num_valid to get non-normalized values, then accumulate
+            batch_reconstruction_losses = batch_metrics['reconstruction_losses']  # [B, M]
+            batch_token_accuracies = batch_metrics['token_level_accuracies']  # [B, M]
+            batch_log_perplexities = batch_metrics['log_perplexities']  # [B, M]
+            
+            # Non-normalized metrics (weighted by number of valid tokens)
+            non_norm_reconstruction_loss = (batch_reconstruction_losses * num_valid).sum().item()  # scalar
+            non_norm_token_accuracy = (batch_token_accuracies * num_valid).sum().item()  # scalar
+            non_norm_log_perplexity = (batch_log_perplexities * num_valid).sum().item()  # scalar
+            
+            # Accumulate non-normalized metrics
+            total_reconstruction_loss += non_norm_reconstruction_loss
+            total_token_accuracy += non_norm_token_accuracy
+            total_log_perplexity += non_norm_log_perplexity
+            
+            # Accumulate total number of valid tokens
+            total_valid_tokens += num_valid.sum().item()
+            
+            # For sequence-level accuracies, we still count sequences (not weighted by tokens)
+            batch_size_actual = batch_cots.size(0)
+            batch_sequence_numbers = batch_size_actual * batch_cots.size(1) # batch_size * num_thoughts
+            total_sequences += batch_sequence_numbers
             
             # Compute and store sequence-level accuracies
-            token_accuracies = batch_metrics['token_level_accuracies'].flatten()
-            for thresh in thresholds:
-                sequence_level_accuracies[thresh] = (token_accuracies >= thresh).sum().item()
-            del token_accuracies
+            for thresh, proportion in batch_metrics['sequence_level_accuracies'].items():
+                sequence_level_accuracy_counts[thresh] = sequence_level_accuracy_counts.get(thresh, 0) + \
+                                                         proportion * batch_sequence_numbers
             
             if k is not None:
                 # Track examples (multiple CoTs) with their average metrics
@@ -981,7 +1003,8 @@ def compute_dataset_reconstruction_metrics_with_examples(
                     
                     # Compute average metrics across all CoTs for this example
                     avg_loss = batch_metrics['reconstruction_losses'][i].mean().item()
-                    avg_perplexity = batch_metrics['perplexities'][i].mean().item()
+                    avg_log_perplexity = batch_metrics['log_perplexities'][i].mean().item()
+                    avg_perplexity = torch.exp(torch.tensor(avg_log_perplexity)).item()  # avg_perplexity: float (converted from torch.Tensor)
                     
                     # Get original prompt and all cots for this example
                     prompt = batch_prompts[i]
@@ -1040,10 +1063,19 @@ def compute_dataset_reconstruction_metrics_with_examples(
     # Log memory after main processing
     log_memory_point("main_processing_complete")
     
-    # Compute final averages
-    avg_reconstruction_loss = total_reconstruction_loss / total_samples
-    avg_token_accuracy = total_token_accuracy / total_samples
-    avg_perplexity = total_perplexity / total_samples
+    # Compute final averages using proper weighted averaging
+    # For metrics that should be averaged over tokens (loss, accuracy, log_perplexity)
+    if total_valid_tokens > 0:
+        avg_reconstruction_loss = total_reconstruction_loss / total_valid_tokens
+        avg_token_accuracy = total_token_accuracy / total_valid_tokens
+        avg_log_perplexity = total_log_perplexity / total_valid_tokens
+        # Convert log_perplexity back to perplexity for final display
+        avg_perplexity = torch.exp(torch.tensor(avg_log_perplexity)).item()  # avg_perplexity: float (converted from torch.Tensor)
+    else:
+        avg_reconstruction_loss = 0.0
+        avg_token_accuracy = 0.0
+        avg_log_perplexity = 0.0
+        avg_perplexity = 1.0
     
     # Prepare tracked examples from lists
     # Extract examples from tracked lists
@@ -1124,7 +1156,8 @@ def compute_dataset_reconstruction_metrics_with_examples(
                     cot_mask_ex = batch_cot_mask[i] if batch_cot_mask is not None else None
 
                     avg_loss = batch_metrics['reconstruction_losses'][i].mean().item()
-                    avg_perplexity = batch_metrics['perplexities'][i].mean().item()
+                    avg_log_perplexity = batch_metrics['log_perplexities'][i].mean().item()
+                    avg_perplexity = torch.exp(torch.tensor(avg_log_perplexity)).item()  # avg_perplexity: float (converted from torch.Tensor)
 
                     example_data = {
                         'example_idx': example_idx,
@@ -1165,6 +1198,9 @@ def compute_dataset_reconstruction_metrics_with_examples(
         log_memory_point("random_examples_complete")
     else:
         tracked_examples = {}
+
+    sequence_level_accuracies = dict([(thresh, count / total_sequences) for thresh, count in 
+                                      sequence_level_accuracy_counts.items()])
     
     results = {
         'avg_reconstruction_loss': avg_reconstruction_loss,
@@ -1180,7 +1216,7 @@ def compute_dataset_reconstruction_metrics_with_examples(
     print(f"Average token-level accuracy: {avg_token_accuracy:.4f}")
     print(f"Average perplexity: {avg_perplexity:.4f}")
     print(f"Sequence-level accuracies:")
-    for thresh, count in sequence_level_accuracies.items():
+    for thresh, count in sequence_level_accuracy_counts.items():
         percentage = (count / total_sequences) * 100
         print(f"  Threshold {int(thresh*100)}%: {count}/{total_sequences} sequences ({percentage:.1f}%)")
     
@@ -1514,7 +1550,8 @@ def print_demonstration_results(
         print(f"[Teacher-forced] Mean token-level accuracy per example:")
         print(f"{mean_per_example_tf:.4f}")
         print(f"[Teacher-forced] Perplexity (per CoT, per example):")
-        tf_ppl = tf_metrics['perplexities'][0]
+        tf_log_ppl = tf_metrics['log_perplexities'][0]  # tf_log_ppl: torch.Tensor [num_thoughts]
+        tf_ppl = torch.exp(tf_log_ppl)  # tf_ppl: torch.Tensor [num_thoughts] (converted from log_perplexities to perplexities)
         print(" | ".join([f"CoT {i}: {tf_ppl[i]:.4f}" for i in range(tf_ppl.size(0))]))
         
         # Print backpointer metrics if available (for compress beam search mode)
@@ -1541,7 +1578,8 @@ def print_demonstration_results(
         print(f"[Auto-regressive] Mean token-level accuracy per example:")
         print(f"{mean_per_example_ar:.4f}")
         print(f"[Auto-regressive] Perplexity (per CoT, per example):")
-        ar_ppl = ar_metrics['perplexities'][0]
+        ar_log_ppl = ar_metrics['log_perplexities'][0]  # ar_log_ppl: torch.Tensor [num_thoughts]
+        ar_ppl = torch.exp(ar_log_ppl)  # ar_ppl: torch.Tensor [num_thoughts] (converted from log_perplexities to perplexities)
         print(" | ".join([f"CoT {i}: {ar_ppl[i]:.4f}" for i in range(ar_ppl.size(0))]))
         
         # Print backpointer metrics if available (for compress beam search mode)
