@@ -1028,6 +1028,11 @@ def compute_dataset_reconstruction_metrics_with_examples(
             if batch_backpointers is not None:
                 del batch_backpointers, batch_bp_logits
             
+            # Force garbage collection every few steps to prevent memory accumulation
+            gc.collect()
+            if hasattr(torch.cuda, 'empty_cache'):
+                torch.cuda.empty_cache()
+            
             # Log memory after cleanup
             if TRACK_BATCH_MEMORY_USE:
                 log_memory_point(f"batch_{batch_idx}_cleanup_complete", batch_idx)
@@ -1148,6 +1153,11 @@ def compute_dataset_reconstruction_metrics_with_examples(
                 del batch_metrics, batch_prompts, batch_cots, batch_prompt_mask, batch_cot_mask
                 if batch_backpointers is not None:
                     del batch_backpointers, batch_bp_logits
+                
+                # Force garbage collection every few steps to prevent memory accumulation
+                gc.collect()
+                if hasattr(torch.cuda, 'empty_cache'):
+                    torch.cuda.empty_cache()
                 
         tracked_examples['random'] = random_examples
         
@@ -1767,13 +1777,15 @@ if __name__ == "__main__":
         # r"checkpoints/asw_embsum/big/four_thoughts/2048/checkpoint_epoch_40.pt",
         
         # r"checkpoints/asw_embsum/big/four_thoughts/4096/best_model_reinitialization_recon_epoch_19.pt"
-        r"checkpoints/asw_embsum/big/four_thoughts/4096/checkpoint_epoch_40.pt"
+        # r"checkpoints/asw_embsum/big/four_thoughts/4096/checkpoint_epoch_40.pt"
+
+        r"checkpoints/asw_positional/big/four/8192/checkpoint_epoch_60.pt"
     ]
     
-    TRAIN_SAMPLES = 75
-    TEST_SAMPLES = 75
+    TRAIN_SAMPLES = None
+    TEST_SAMPLES = None
     BATCH_SIZE_2 = 200
-    BATCH_SIZE_4 = 25  # Reduced from 25 to 10
+    BATCH_SIZE_4 = 100  # Reduced from 25 to 10
     K = 3
     AR_GEN = True
 
@@ -1802,12 +1814,12 @@ if __name__ == "__main__":
                 checkpoint_path=path,
                 data_dir=None, #assigns default
                 split_name="both",  # "train", "test", or "both"
-                num_examples_train=TRAIN_SAMPLES, #all
-                num_examples_test=TEST_SAMPLES, #all
+                num_examples_train=TRAIN_SAMPLES,
+                num_examples_test=TEST_SAMPLES,
                 batch_size=BATCH_SIZE_4,
                 ar_gen=AR_GEN,
                 k=K,  # Number of examples to keep for each category
-                device= "cuda:1",
+                device= "cuda:0",
                 use_vq=True,
                 seed=42
             )
