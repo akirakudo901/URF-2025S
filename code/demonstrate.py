@@ -159,7 +159,8 @@ def visualize_token_latent_alignment_multi_cot(
 
 def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num_embeddings, use_vq,
                               prompt_sequences, cot_sequences, prompt_mask, cot_mask, split_name, 
-                              checkpoint_path, do_figure_analyses : bool=True, backpointers=None):
+                              checkpoint_path, do_figure_analyses : bool=True, backpointers=None, 
+                              thresholds=[1.0, 0.95, 0.9, 0.8, 0.7]):
     print("\n" + "="*80)
     print(f"GENERATION DEMONSTRATION ON {split_name.upper()} DATA")
     print("="*80)
@@ -247,7 +248,7 @@ def run_demonstration_on_split(model, tokenizer, num_examples, num_thoughts, num
             if output_sequences is not None and output_logits is not None:
                 # Pass backpointer data if available for compress beam search mode
                 metrics = compute_cot_reconstruction_metrics(
-                    cot_gt, output_logits, cot_mask_ex, backpointers_ex, bp_logits)  
+                    cot_gt, output_logits, cot_mask_ex, backpointers_ex, bp_logits, thresholds)  
                 if output_logits is not None and cot_gt is not None and cot_mask_ex is not None:  
                     # TODO DO SOMETHING WITH bp_loss, CURRENTLY DOING NOTHING
                     recon_loss, bp_loss = compute_reconstruction_loss(
@@ -957,7 +958,7 @@ def compute_dataset_reconstruction_metrics_with_examples(
             
             # Compute metrics for this batch
             batch_metrics = compute_cot_reconstruction_metrics(
-                batch_cots, output_logits, batch_cot_mask, batch_backpointers, batch_bp_logits
+                batch_cots, output_logits, batch_cot_mask, batch_backpointers, batch_bp_logits, thresholds
             )
             
             # Log memory after metrics computation
@@ -1144,7 +1145,7 @@ def compute_dataset_reconstruction_metrics_with_examples(
 
                 # Compute metrics for this batch
                 batch_metrics = compute_cot_reconstruction_metrics(
-                    batch_cots, output_logits, batch_cot_mask, batch_backpointers, batch_bp_logits
+                    batch_cots, output_logits, batch_cot_mask, batch_backpointers, batch_bp_logits, thresholds
                 )
 
                 for i in range(batch_prompts.size(0)):
