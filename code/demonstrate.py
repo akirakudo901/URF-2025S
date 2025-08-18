@@ -606,7 +606,7 @@ def compute_cot_reconstruction_metrics(
     def compute_sequence_level_accuracies(token_level_accuracies, thresholds):
         sequence_level_accuracies = {}
         for thresh in thresholds:
-            sequence_level_accuracies[thresh] = (token_level_accuracies >= thresh).mean().item()
+            sequence_level_accuracies[thresh] = (token_level_accuracies >= thresh).float().mean().item()
         return sequence_level_accuracies
 
     def compute_log_perplexities(ground_truth_cots, predicted_logits, mask):
@@ -1024,7 +1024,7 @@ def compute_dataset_reconstruction_metrics_with_examples(
                         'prompt_mask': prompt_mask_ex,
                         'cot_mask': cot_mask_ex,
                         'individual_losses': batch_metrics['reconstruction_losses'][i],
-                        'individual_perplexities': batch_metrics['perplexities'][i],
+                        'individual_perplexities': batch_metrics['log_perplexities'][i].exp(),
                         'individual_token_accuracies': batch_metrics['token_level_accuracies'][i]
                     }
                     
@@ -1170,7 +1170,7 @@ def compute_dataset_reconstruction_metrics_with_examples(
                         'prompt_mask': prompt_mask_ex.clone(),
                         'cot_mask': cot_mask_ex.clone(),
                         'individual_losses': batch_metrics['reconstruction_losses'][i].clone(),
-                        'individual_perplexities': batch_metrics['perplexities'][i].clone(),
+                        'individual_perplexities': batch_metrics['log_perplexities'][i].clone().exp(),
                         'individual_token_accuracies': batch_metrics['token_level_accuracies'][i].clone()
                     }
                     
@@ -1821,8 +1821,8 @@ if __name__ == "__main__":
         r"checkpoints/asw_positional/big/four/8192/checkpoint_epoch_60.pt"
     ]
     
-    TRAIN_SAMPLES = None
-    TEST_SAMPLES = None
+    TRAIN_SAMPLES = 1000
+    TEST_SAMPLES = 1000
     BATCH_SIZE_2 = 200
     BATCH_SIZE_4 = 100  # Reduced from 25 to 10
     K = 3
