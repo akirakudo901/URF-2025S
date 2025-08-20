@@ -466,13 +466,14 @@ class EnhancedVectorQuantizer(nn.Module):
             return False
         return self._reset_counter % self.reset_frequency == 0
     
-    def _reset_codebook(self, device, reset_strategy='partial'):
+    def _reset_codebook(self, device, reset_strategy='partial', clear_reservoir=True):
         """
-        Reset codebook using data-dependent K-means++ clustering with reservoir samples.
+        Reset codebook using data-dependent K-means++ clustering with reservoir samples, then optionally clears the reservoir.
         
         Args:
             device (torch.device): Device to use for tensor operations
             reset_strategy (str): Reset strategy - 'partial' (reset unused codes) or 'full' (reset entire codebook)
+            clear_reservoir (bool): Optional bool on whether to clear the reservoir after resetting codebook, defaults to True
         """
         if reset_strategy == 'partial':
             print("\nCodebook reset triggered - performing partial reset of unused codes")
@@ -526,6 +527,10 @@ class EnhancedVectorQuantizer(nn.Module):
         
         # Reset usage counts
         self._usage_counts.zero_()
+
+        if clear_reservoir:
+            # Reset reservoir content
+            self.reservoir_sampler.clear_reservoir()
         
     def forward(self, inputs):
         """
