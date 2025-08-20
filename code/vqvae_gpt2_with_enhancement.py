@@ -20,6 +20,21 @@ from vqvae_gpt2 import (
 
 logger = logging.getLogger(__name__)
 
+class NotEnoughReservoirSamplesException(Exception):
+    """
+    Exception raised when attempting to get embeddings from the reservoir sampler
+    without having enough samples available.
+    """
+    def __init__(self, requested, available, context="operation"):
+        super().__init__(
+            f"Not enough reservoir samples to perform {context}: "
+            f"requested {requested}, but only {available} available."
+        )
+        self.requested = requested
+        self.available = available
+        self.context = context
+
+
 class ReservoirSampler:
     """
     Reservoir sampling for efficient data-dependent initialization.
@@ -369,9 +384,8 @@ class EnhancedVectorQuantizer(nn.Module):
             embeddings = self._perform_kmeans_clustering(reservoir_samples, num_embeddings, device)
             print(f"Data-dependent {context} completed using {len(reservoir_samples)} reservoir samples")
         else:
-            # Fallback to random initialization if not enough samples
-            embeddings = torch.randn(num_embeddings, self.embedding_dim, device=device) * 0.02
-            print(f"Warning: Not enough reservoir samples for {context}, using random initialization for {num_embeddings} embeddings")
+            # Raise an exception if we attempt getting embeddings without enough samples
+            raise NotEnoughReservoirSamplesException(num_embeddings, len(reservoir_samples), "embedding clustering")
         
         return embeddings
         
@@ -474,7 +488,11 @@ class EnhancedVectorQuantizer(nn.Module):
             
             # Get embeddings for unused codes using reservoir samples
             unused_indices = torch.where(unused_mask)[0]
-            new_embeddings = self._get_embeddings_from_reservoir(num_unused, device, "partial reset")
+            try:
+                new_embeddings = self._get_embeddings_from_reservoir(num_unused, device, "partial reset")
+            except NotEnoughReservoirSamplesException as e:
+                print(f"Reservoir has {e.available} samples vs. the requested {e.requested}, not performing reset.")
+                return
             
             # Update only unused embeddings
             self.embedding.weight.data[unused_indices] = new_embeddings
@@ -488,9 +506,13 @@ class EnhancedVectorQuantizer(nn.Module):
                 
         elif reset_strategy == 'full':
             print("\nCodebook reset triggered - performing full data-dependent re-initialization")
-            
+
             # Get embeddings for entire codebook using reservoir samples
-            new_embeddings = self._get_embeddings_from_reservoir(self.num_embeddings, device, "full reset")
+            try:
+                new_embeddings = self._get_embeddings_from_reservoir(self.num_embeddings, device, "full reset")
+            except NotEnoughReservoirSamplesException as e:
+                print(f"Reservoir has {e.available} samples vs. the requested {e.requested}, not performing reset.")
+                return
             
             # Update embedding weights with new embeddings
             self.embedding.weight.data.copy_(new_embeddings)
@@ -728,7 +750,11 @@ class EnhancedVectorQuantizer(nn.Module):
             self.embedding.weight.data.copy_(normalized_vectors * 0.02)
         elif reset_strategy == 'kmeans':
             # Use reservoir samples for K-means reset
-            new_embeddings = self._get_embeddings_from_reservoir(self.num_embeddings, self.embedding.weight.device, "manual reset")
+            try:
+                new_embeddings = self._get_embeddings_from_reservoir(self.num_embeddings, self.embedding.weight.device, "manual reset")
+            except NotEnoughReservoirSamplesException as e:
+                print(f"Reservoir has {e.available} samples vs. the requested {e.requested}, not performing reset.")
+                return
             self.embedding.weight.data.copy_(new_embeddings)
         else:
             raise ValueError(f"Unknown reset strategy: {reset_strategy}")
