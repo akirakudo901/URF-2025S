@@ -516,7 +516,8 @@ def run_single_mode(model, prompt_sequences, cot_sequences, prompt_mask, cot_mas
             # Extract average metrics
             avg_loss = recon_loss.item() if recon_loss is not None else 0.0
             avg_accuracy = metrics['token_level_accuracies'].mean().item()
-            avg_perplexity = metrics['perplexities'].mean().item()
+            avg_log_perplexity = metrics['log_perplexities'].mean().item()
+            avg_perplexity = torch.exp(torch.tensor(avg_log_perplexity)).item()  # Convert log_perplexity to perplexity
         else:
             avg_loss = avg_accuracy = avg_perplexity = 0.0
         
