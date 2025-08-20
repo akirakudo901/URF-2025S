@@ -101,6 +101,9 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
 
         # Initialize parent trainer
         super().__init__(model_config, training_config, device, phased_tracking_functions, run_name)
+
+        # Disable automatic resets by the enhanced quantizer, since the reinitialization phase handles this
+        self.model.vector_quantizer.max_reset_steps = 0
         
         # Override optimizer with codebook-specific learning rates
         self._setup_codebook_optimizer()
@@ -280,28 +283,6 @@ class PhasedEnhancedGPT2VQVAETrainer(EnhancedGPT2VQVAETrainer):
         
         # Perform forward pass with appropriate VQ setting and handle mixed precision
         return super()._forward_pass(prompts, cots, prompt_masks, cot_masks, backpointers, no_vq=no_vq)
-    
-    def train_epoch(self, train_loader, num_measurements_per_epoch, current_epoch=0, detailed_metrics_callback=None):
-        """
-        Enhanced train_epoch that tracks training steps and handles phase transitions.
-        
-        Args:
-            train_loader: Training data loader
-            num_measurements_per_epoch: Number of measurements per epoch
-            current_epoch: Current epoch number
-            
-        Returns:
-            dict: Training metrics for the epoch
-        """
-        # Set max_reset_steps on the first epoch if it's still None
-        if current_epoch == 0 and self.model.vector_quantizer.max_reset_steps is None:
-            # Set max_reset_steps to quantization_start to disable automatic resets during normal training
-            self.model.vector_quantizer.max_reset_steps = self.quantization_start
-        
-        # Call parent train_epoch
-        metrics = super().train_epoch(train_loader, num_measurements_per_epoch, current_epoch, detailed_metrics_callback)
-        
-        return metrics
 
     def _phased_track_codebook_usage(self, dataset: Any, measurement_point: int) -> None:
         """
