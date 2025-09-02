@@ -44,13 +44,15 @@ def main():
     """
     Main function for command-line training with memory optimizations.
     """
-    parser = argparse.ArgumentParser(description='Train GPT2VQVAE model with memory optimizations and perplexity threshold monitoring')
+    parser = argparse.ArgumentParser(description='Train GPT2VQVAE model with memory optimizations and perplexity threshold monitoring. Use --resume-from to continue training, or --load-weights-from to start fresh training with pre-trained weights.')
     parser.add_argument('--config', '-c', type=str, #not required anymore as it will be skipped when demonstrating
                        help='Path to configuration file (YAML or JSON)')
     parser.add_argument('--data-dir', type=str, default=None,
                        help='Override data directory from config')
     parser.add_argument('--resume-from', type=str, default=None,
                        help='Path to checkpoint to resume training from')
+    parser.add_argument('--load-weights-from', type=str, default=None,
+                       help='Path to checkpoint to load only model weights from (new training config will be used)')
     parser.add_argument('--create-config', type=str, default=None,
                        help='Create a default configuration file at the specified path')
     parser.add_argument('--device', type=str, default=None,
@@ -166,6 +168,13 @@ def main():
 
     if not args.config and not (args.demonstrate or args.demonstrate_custom):
         print("Error: --config required unless --demonstrate or --demonstrate-custom is specified")
+        return
+    
+    # Validate that resume-from and load-weights-from are not used together
+    if args.resume_from and args.load_weights_from:
+        print("Error: --resume-from and --load-weights-from cannot be used together")
+        print("Use --resume-from to continue training with the same config")
+        print("Use --load-weights-from to start new training with different config but same model weights")
         return
     
     # Check for nvidia-ml-py3 availability
@@ -450,6 +459,22 @@ def main():
                 trainer = GPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
             print(f"Resuming from checkpoint: {args.resume_from}")
             trainer.load_checkpoint(args.resume_from)
+        elif args.load_weights_from:
+            # Initialize trainer with new config but load model weights from checkpoint
+            model_config['use_pretrained_encoder'] = False
+            model_config['use_pretrained_decoder'] = False
+            if args.auto:
+                trainer = AutoSwitchingTrainer(model_config, training_config, device=device, run_name=run_name)
+            elif args.phased:
+                trainer = PhasedEnhancedGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
+            elif args.enhanced:
+                trainer = EnhancedGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
+            elif args.simple:
+                trainer = SimpleGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
+            else:
+                trainer = GPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
+            print(f"Loading model weights from checkpoint: {args.load_weights_from}")
+            trainer.load_model_weights_only(args.load_weights_from)
         else:
             if args.auto:
                 trainer = AutoSwitchingTrainer(model_config, training_config, device=device, run_name=run_name)
@@ -499,7 +524,7 @@ def main():
             test_cot_mask=test_cot_mask,
             train_backpointers=train_backpointers,
             test_backpointers=test_backpointers,
-            resume_from=args.resume_from,
+            resume_from=args.resume_from if args.resume_from else None,
             num_measurements_per_epoch=training_config.get('num_measurements_per_epoch', 20)
         )
         
@@ -588,6 +613,26 @@ class SimpleGPT2VQVAETrainer(GPT2VQVAETrainer):
             print("Gradient checkpointing enabled for SimpleGPT2VQVAE")
         
         print("SimpleGPT2VQVAE trainer initialized successfully.")
+    
+    def load_model_weights_only(self, checkpoint_path: str, additional_critical_keys: Optional[list] = None):
+        """
+        Simple model weights loading with additional critical keys for SimpleGPT2VQVAE parameters.
+        
+        Args:
+            checkpoint_path: Path to checkpoint file
+            additional_critical_keys: Optional list of additional critical keys to check for compatibility
+        """
+        # SimpleGPT2VQVAE specific critical keys (if any)
+        simple_critical_keys = [
+            # Add any SimpleGPT2VQVAE specific parameters here if needed
+        ]
+        
+        # Combine with any additional critical keys provided
+        if additional_critical_keys:
+            simple_critical_keys.extend(additional_critical_keys)
+        
+        # Call parent method with simple critical keys
+        return super().load_model_weights_only(checkpoint_path, simple_critical_keys)
     
     def _forward_pass(self, prompts, cots, prompt_masks, cot_masks):
         """Helper function for forward pass and loss calculation with use_vq parameter"""

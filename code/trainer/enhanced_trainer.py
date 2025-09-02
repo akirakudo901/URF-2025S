@@ -313,6 +313,26 @@ class EnhancedGPT2VQVAETrainer(GPT2VQVAETrainer):
         
         return checkpoint
     
+    def load_model_weights_only(self, checkpoint_path: str, additional_critical_keys: Optional[list] = None):
+        """
+        Enhanced model weights loading with additional critical keys for enhanced VQ-VAE parameters.
+        
+        Args:
+            checkpoint_path: Path to checkpoint file
+            additional_critical_keys: Optional list of additional critical keys to check for compatibility
+        """
+        # Enhanced VQ-VAE specific critical keys
+        enhanced_critical_keys = [
+            'reservoir_size', 'use_batch_norm'
+        ]
+        
+        # Combine with any additional critical keys provided
+        if additional_critical_keys:
+            enhanced_critical_keys.extend(additional_critical_keys)
+        
+        # Call parent method with enhanced critical keys
+        return super().load_model_weights_only(checkpoint_path, enhanced_critical_keys)
+    
     def _enhanced_track_codebook_usage(self, dataset: Any, measurement_point: int) -> None:
         """
         Enhanced codebook tracking with additional statistics.

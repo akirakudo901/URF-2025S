@@ -1295,6 +1295,56 @@ class GPT2VQVAETrainer:
         
         return checkpoint
     
+    def load_model_weights_only(self, checkpoint_path: str, additional_critical_keys: Optional[list] = None):
+        """
+        Load only model weights from a checkpoint, ignoring optimizer, scheduler, and training history.
+        This is useful for transfer learning or fine-tuning with new training configurations.
+        
+        Args:
+            checkpoint_path: Path to checkpoint file
+            additional_critical_keys: Optional list of additional critical keys to check for compatibility
+        """
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        
+        # Validate model configuration compatibility
+        if 'model_config' in checkpoint:
+            checkpoint_model_config = checkpoint['model_config']
+            current_model_config = self.model_config
+            
+            # Check for critical model configuration mismatches
+            critical_keys = ['vocab_size', 'd_model', 'n_positions', 'num_embeddings', 
+                             'commitment_cost', 'aggregation_hidden_dim', 'num_thoughts'
+                             'encoder_n_layer', 'encoder_n_head', 'encoder_dropout',
+                             'decoder_n_layer', 'decoder_n_head']
+            
+            # Add any additional critical keys if provided
+            if additional_critical_keys:
+                critical_keys.extend(additional_critical_keys)
+   
+            mismatches = []
+            
+            for key in critical_keys:
+                if key in checkpoint_model_config and key in current_model_config:
+                    if checkpoint_model_config[key] != current_model_config[key]:
+                        mismatches.append(f"{key}: checkpoint={checkpoint_model_config[key]}, current={current_model_config[key]}")
+            
+            if mismatches:
+                print("Warning: Model configuration mismatches detected!")
+                print("Critical mismatches:")
+                for mismatch in mismatches:
+                    print(f"  {mismatch}")
+                print("This may cause issues. Aborting weight loading.")
+            else:
+                print("Model configuration compatibility check passed.")
+        
+        # Load only the model state dict
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Model weights loaded from: {checkpoint_path}")
+        print("Note: Optimizer, scheduler, and training history were not loaded.")
+        print("Training will start fresh with the new configuration.")
+        
+        return checkpoint
+    
     def _train_with_loaders(self, 
                            train_loader: DataLoader,
                            test_loader: DataLoader,
