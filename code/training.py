@@ -443,49 +443,33 @@ def main():
         # Initialize trainer first to use its memory-efficient loading method
         print("Initializing trainer...")
         
-        # If resume_from, initialize weights randomly
-        if args.resume_from:
+        # Helper to select trainer class based on args
+        def get_trainer_class(args):
+            if args.auto:
+                return AutoSwitchingTrainer
+            elif args.phased:
+                return PhasedEnhancedGPT2VQVAETrainer
+            elif args.enhanced:
+                return EnhancedGPT2VQVAETrainer
+            elif args.simple:
+                return SimpleGPT2VQVAETrainer
+            else:
+                return GPT2VQVAETrainer
+
+        trainer_class = get_trainer_class(args)
+
+        if args.resume_from or args.load_weights_from:
             model_config['use_pretrained_encoder'] = False
             model_config['use_pretrained_decoder'] = False
-            if args.auto:
-                trainer = AutoSwitchingTrainer(model_config, training_config, device=device, run_name=run_name)
-            elif args.phased:
-                trainer = PhasedEnhancedGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
-            elif args.enhanced:
-                trainer = EnhancedGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
-            elif args.simple:
-                trainer = SimpleGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
+            trainer = trainer_class(model_config, training_config, device=device, run_name=run_name)
+            if args.resume_from:
+                print(f"Resuming from checkpoint: {args.resume_from}")
+                trainer.load_checkpoint(args.resume_from)
             else:
-                trainer = GPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
-            print(f"Resuming from checkpoint: {args.resume_from}")
-            trainer.load_checkpoint(args.resume_from)
-        elif args.load_weights_from:
-            # Initialize trainer with new config but load model weights from checkpoint
-            model_config['use_pretrained_encoder'] = False
-            model_config['use_pretrained_decoder'] = False
-            if args.auto:
-                trainer = AutoSwitchingTrainer(model_config, training_config, device=device, run_name=run_name)
-            elif args.phased:
-                trainer = PhasedEnhancedGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
-            elif args.enhanced:
-                trainer = EnhancedGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
-            elif args.simple:
-                trainer = SimpleGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
-            else:
-                trainer = GPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
-            print(f"Loading model weights from checkpoint: {args.load_weights_from}")
-            trainer.load_model_weights_only(args.load_weights_from)
+                print(f"Loading model weights from checkpoint: {args.load_weights_from}")
+                trainer.load_model_weights_only(args.load_weights_from)
         else:
-            if args.auto:
-                trainer = AutoSwitchingTrainer(model_config, training_config, device=device, run_name=run_name)
-            elif args.phased:
-                trainer = PhasedEnhancedGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
-            elif args.enhanced:
-                trainer = EnhancedGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
-            elif args.simple:
-                trainer = SimpleGPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
-            else:
-                trainer = GPT2VQVAETrainer(model_config, training_config, device=device, run_name=run_name)
+            trainer = trainer_class(model_config, training_config, device=device, run_name=run_name)
 
         # Load training and test data using memory-efficient method with num_thoughts truncation
         out = load_training_data(
