@@ -1032,12 +1032,35 @@ class GPT2VQVAETrainer:
             hours = int(elapsed // 3600)
             minutes = int((elapsed % 3600) // 60)
             
-            # Format the message
+            # Gather latest metrics (safe defaults if empty)
+            last_train_loss = self.train_losses[-1] if self.train_losses else 0.0
+            last_train_recon_loss = self.recon_losses[-1] if self.recon_losses else 0.0
+            last_val_loss = self.val_losses[-1] if self.val_losses else 0.0
+            last_val_recon_loss = self.val_recon_losses[-1] if self.val_recon_losses else 0.0
+            last_vq_loss = self.vq_losses[-1] if self.vq_losses else 0.0
+            last_perplexity = self.perplexities[-1] if self.perplexities else 0.0
+
+            # Format the message with metrics
             if is_best:
-                message = f"💾 Best checkpoint saved for {self.run_name}!\nEpoch {epoch}, Time: {hours:02d}:{minutes:02d}"
+                message = (
+                    f"💾 Best checkpoint saved for {self.run_name}!\n"
+                    f"Epoch {epoch}, Time: {hours:02d}:{minutes:02d}\n"
+                )
             else:
-                message = f"💾 Checkpoint saved for {self.run_name}\nEpoch {epoch}, Time: {hours:02d}:{minutes:02d}"
-            
+                message = (
+                    f"💾 Checkpoint saved for {self.run_name}\n"
+                    f"Epoch {epoch}, Time: {hours:02d}:{minutes:02d}\n"
+                )
+
+            message += (
+                f"Train Loss: {last_train_loss:.4f}\n"
+                f"Train Recon Loss: {last_train_recon_loss:.4f}\n"
+                f"Val Loss: {last_val_loss:.4f}\n"
+                f"Val Recon Loss: {last_val_recon_loss:.4f}\n"
+                f"VQ Loss: {last_vq_loss:.4f}\n"
+                f"Perplexity: {last_perplexity:.2f}"
+            )
+
             # Send the phone notification
             return send_notification(message)
             
