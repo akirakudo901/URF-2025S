@@ -700,10 +700,7 @@ class GPT2VQVAE(nn.Module):
         
         if use_pretrained_decoder and not self.compress_beam_search:
             print(f"Loading pretrained {pretrained_model_name} weights for decoder...")
-            if self.compress_beam_search:
-                self.decoder = model_class.from_pretrained(num_thoughts, pretrained_model_name, config=self.decoder_config)
-            else:
-                self.decoder = model_class.from_pretrained(pretrained_model_name, config=self.decoder_config)
+            self.decoder = model_class.from_pretrained(pretrained_model_name, config=self.decoder_config)
             # Ensure the decoder uses our config
             if self.decoder.config.vocab_size != vocab_size:
                 print(f"Warning: Pretrained model vocab_size ({self.decoder.config.vocab_size}) "
@@ -717,10 +714,7 @@ class GPT2VQVAE(nn.Module):
                 print("Loaded text embeddings in decoder (trainable)")
         elif load_text_embeddings_decoder and not self.compress_beam_search:
             print(f"Loading only text embeddings from {pretrained_model_name} for decoder...")
-            if self.compress_beam_search:
-                self.decoder = model_class(self.decoder_config, num_thoughts=num_thoughts)
-            else:
-                self.decoder = model_class(self.decoder_config)
+            self.decoder = model_class(self.decoder_config)
             # Load only the text embeddings from pretrained model
             pretrained_decoder = GPT2LMHeadModel.from_pretrained(pretrained_model_name)
             self.decoder.transformer.wte.weight.data.copy_(pretrained_decoder.transformer.wte.weight.data)
