@@ -440,8 +440,8 @@ def example_maze_search():
         print("Neither method found a solution")
 
 
-def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int = 3, 
-                      backtrack_gen: bool = True, min_length: int = 5, 
+def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int = 4, 
+                      backtrack_gen: bool = True, min_length: int = 5, max_steps: int = 1000,
                       save_results: bool = False):
     """
     Run multiple maze searches and track statistics comparing A* vs Beam Search.
@@ -453,6 +453,7 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
         beam_size: Beam width for beam search
         backtrack_gen: Whether to generate mazes using backtracking (true), or randomly (false).
         min_length: Minimum length of A* solution required to accept a maze.
+        max_steps: Maximum steps before giving up for A* and beam search.
         save_results: Whether to save the generated mazes & search results.
     """
 
@@ -524,7 +525,7 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
         # Run A* search first to check solution length
         astar_solution, astar_cost = beam_search.solve_normal_astar(
             start_state=start_pos,
-            max_steps=1000
+            max_steps=max_steps
         )
         
         # Check if maze meets minimum length requirement
@@ -541,7 +542,7 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
         beam_solution, _, _, beam_cost = beam_search.solve(
             start_state=start_pos,
             beam_size=beam_size,
-            max_steps=1000
+            max_steps=max_steps
         )
         
         # Update statistics
