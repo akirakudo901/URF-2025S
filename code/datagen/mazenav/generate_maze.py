@@ -9,7 +9,7 @@ import sys
 import json
 import base64
 import zlib
-from typing import List, Tuple, Set, Dict, Any
+from typing import List, Tuple, Set, Dict, Any, Optional
 
 def generate_maze_recursive_backtracking(size: int = 10) -> Tuple[List[Tuple[int, int]], Tuple[int, int], Tuple[int, int]]:
     """
@@ -129,7 +129,7 @@ def format_maze_output(walls: List[Tuple[int, int]], start_pos: Tuple[int, int],
     
     return "\n".join(output_lines)
 
-def visualize_maze(walls: List[Tuple[int, int]], start_pos: Tuple[int, int], end_pos: Tuple[int, int], size: int = 10) -> str:
+def visualize_maze(walls: List[Tuple[int, int]], start_pos: Tuple[int, int], end_pos: Tuple[int, int], size: int = 10, path: Optional[List[Tuple[int, int]]] = None) -> str:
     """
     Create a visual representation of the maze using ASCII characters.
     
@@ -138,6 +138,7 @@ def visualize_maze(walls: List[Tuple[int, int]], start_pos: Tuple[int, int], end
         start_pos: Start position coordinates
         end_pos: End position coordinates
         size: Size of the maze
+        path: Optional path from start to end, showing direction arrows
     
     Returns:
         ASCII representation of the maze
@@ -155,7 +156,32 @@ def visualize_maze(walls: List[Tuple[int, int]], start_pos: Tuple[int, int], end
     for wall in walls:
         grid[wall[1]+1][wall[0]+1] = '#'
     
-    # Place start and end
+    # Add path visualization if provided
+    if path:
+        for i in range(len(path) - 1):
+            current_pos = path[i]
+            next_pos = path[i + 1]
+            
+            # Calculate direction
+            dx = next_pos[0] - current_pos[0]
+            dy = next_pos[1] - current_pos[1]
+            
+            # Choose direction symbol
+            if dx == 1:
+                direction_symbol = '>'  # Right
+            elif dx == -1:
+                direction_symbol = '<'  # Left
+            elif dy == -1:
+                direction_symbol = '^'  # Up
+            elif dy == 1:
+                direction_symbol = 'v'  # Down
+            else:
+                direction_symbol = '.'  # No movement (shouldn't happen)
+            
+            # Place direction symbol in grid (offset by border)
+            grid[current_pos[1]+1][current_pos[0]+1] = direction_symbol
+    
+    # Place start and end (override path symbols at start/end positions)
     grid[start_pos[1]+1][start_pos[0]+1] = 'S'
     grid[end_pos[1]  +1][end_pos[0]  +1] = 'E'
     
