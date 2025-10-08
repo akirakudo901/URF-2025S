@@ -83,6 +83,7 @@ def generate_gsm8k_datasets(
     results_per_prompt: int = 1,
     require_answerbox: bool = False,
     stop_at_answer: bool = False,
+    keep_done_beams: bool = False,
     length_penalty: float = 1.0,
     temperature: float = 0,
     batch_size: int = 32
@@ -105,6 +106,9 @@ def generate_gsm8k_datasets(
         stop_at_answer: If True, enables special mode where each beam tracks if it has encountered
                         the complete "\\boxed{ANSWER}" pattern. This can be useful for monitoring
                         when sequences reach a complete answer format.
+        keep_done_beams: If True, keep beams that are "done" (reached EOS or an answer box) inside
+                         the active beam set. These beams are excluded from LLM calls and instead have
+                         an EOS token appended at each subsequent step with probability 1.
         length_penalty: Penalizes longer sequences, score = (prob)**{1/(length ** length_penalty)}.
                         Handy to encourage shorter sequences. The higher the stronger the penalty, defaults to 1.0.
         temperature: Determines how variable the generation sequence is. Could be set to a decently high value provided that 
@@ -245,7 +249,7 @@ def generate_gsm8k_datasets(
                         params = BeamSearchParams(beam_width=beam_width, max_tokens=max_tokens, 
                                                   length_penalty=length_penalty, temperature=temperature)
                         outputs, token_ids_list, backpointers_list, mask_list, debug_info = beam_search_with_backpointers(
-                            llm, prompt_batch, params, require_answerbox=require_answerbox, stop_at_answer=stop_at_answer)
+                            llm, prompt_batch, params, require_answerbox=require_answerbox, stop_at_answer=stop_at_answer, keep_done_beams=keep_done_beams)
 
                         redo_prompt_batch, redo_og_prompt_token_ids_batch, redo_og_prompt_batch = [], [], []
     
@@ -411,7 +415,8 @@ def beam_search_with_backpointers(
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         use_tqdm: bool = False,
         require_answerbox: bool = False,
-        stop_at_answer: bool = False
+        stop_at_answer: bool = False,
+        keep_done_beams: bool = False
     ) -> tuple[np.ndarray, np.ndarray, dict]:
         """
         Generate sequences using beam search and return token_ids and backpointers as numpy arrays.
@@ -426,6 +431,9 @@ def beam_search_with_backpointers(
             stop_at_answer: If True, track when sequences encounter "\\boxed{ANSWER}" pattern.
                             Each beam tracks if it has found the complete pattern. The final token_ids
                             / backpointers then gets rid of any entries past the pattern for each final beam.
+            keep_done_beams: If True, keep beams that are "done" (reached EOS or an answer box) inside
+                             the active beam set. These beams are excluded from LLM calls and instead have
+                             an EOS token appended at each subsequent step with probability 1.
             
         Returns:
             tuple: (outputs, token_ids, backpointers, debug_info)
@@ -546,6 +554,8 @@ def beam_search_with_backpointers(
             for beam in instance.beams:
                 beam.rank = 0
                 beam.parent_rank = 0
+                # Track completion state for the new mode
+                beam.done = False
                 # Initialize answer tracking for stop_at_answer or require_answerbox mode
                 if stop_at_answer or require_answerbox:
                     beam.has_answer = False
@@ -564,16 +574,31 @@ def beam_search_with_backpointers(
             if len(all_beams) == 0:
                 break
 
-            # create the corresponding batch entries for prompt & optional lora
-            prompts_batch, lora_req_batch = zip(
-                *[(create_tokens_prompt_from_beam(beam), beam.lora_request)
-                    for beam in all_beams])
+            # Build batches for only non-done beams if keeping done beams; otherwise include all
+            if keep_done_beams:
+                active_beams = [beam for beam in all_beams if not getattr(beam, 'done', False)]
+                if len(active_beams) > 0:
+                    prompts_batch, lora_req_batch = zip(
+                        *[(create_tokens_prompt_from_beam(beam), beam.lora_request)
+                            for beam in active_beams])
+                    output_active = llm.generate(prompts_batch,
+                                                 sampling_params=beam_search_params,
+                                                 use_tqdm=False,
+                                                 lora_request=lora_req_batch)
+                else:
+                    output_active = []
+                active_out_idx = 0
+            else:
+                # create the corresponding batch entries for prompt & optional lora
+                prompts_batch, lora_req_batch = zip(
+                    *[(create_tokens_prompt_from_beam(beam), beam.lora_request)
+                        for beam in all_beams])
 
-            # only runs for one step
-            output = llm.generate(prompts_batch,
-                                    sampling_params=beam_search_params,
-                                    use_tqdm=False,
-                                    lora_request=lora_req_batch)
+                # only runs for one step
+                output = llm.generate(prompts_batch,
+                                        sampling_params=beam_search_params,
+                                        use_tqdm=False,
+                                        lora_request=lora_req_batch)
 
             for instance_idx, (start, end) in enumerate(instance_start_and_end):
                 instance = instances[instance_idx]
@@ -581,7 +606,33 @@ def beam_search_with_backpointers(
 
                 for i in range(start, end):
                     current_beam = all_beams[i]
-                    result = output[i]
+
+                    # If keeping done beams and this beam is already done, append EOS and carry forward
+                    if keep_done_beams and getattr(current_beam, 'done', False):
+                        new_beam = BeamSearchSequence(
+                            tokens=current_beam.tokens + [tokenizer.eos_token_id],
+                            logprobs=current_beam.logprobs + [{}],
+                            lora_request=current_beam.lora_request,
+                            cum_logprob=current_beam.cum_logprob + 0.0,
+                            multi_modal_data=current_beam.multi_modal_data,
+                            mm_processor_kwargs=current_beam.mm_processor_kwargs)
+
+                        new_beam.parent_rank = current_beam.rank
+                        new_beam.done = True
+
+                        # Preserve answer tracking fields if present
+                        if stop_at_answer or require_answerbox:
+                            new_beam.has_answer = getattr(current_beam, 'has_answer', False)
+                            new_beam.answer_state = getattr(current_beam, 'answer_state', 0)
+                            new_beam.last_pos = getattr(current_beam, 'last_pos', None)
+
+                        instance_new_beams.append(new_beam)
+                        continue
+
+                    # Otherwise expand using LLM outputs
+                    result = output_active[active_out_idx] if keep_done_beams else output[i]
+                    if keep_done_beams:
+                        active_out_idx += 1
 
                     if result.outputs[0].logprobs is not None:
                         # if `result.outputs[0].logprobs` is None, it means
@@ -601,12 +652,16 @@ def beam_search_with_backpointers(
                             
                             # Assign beam parent rank
                             new_beam.parent_rank = current_beam.rank
+
+                            # Default done state
+                            new_beam.done = getattr(current_beam, 'done', False)
                             
                             # Handle answer tracking for stop_at_answer or require_answerbox mode
                             if stop_at_answer or require_answerbox:
                                 new_beam.has_answer = current_beam.has_answer
                                 new_beam.answer_state = current_beam.answer_state
                                 new_beam.last_pos = current_beam.last_pos
+                                new_beam.done = current_beam.done
                                 
                                 # Update answer state based on the new token
                                 # IMPORTANT: ASSUMES THAT '\\boxed{' WILL ONLY APPEAR WHEN THE FINAL ANSWER IS
@@ -619,12 +674,18 @@ def beam_search_with_backpointers(
                                     elif new_beam.answer_state == 3 and (token_id in close_brace_token_ids):
                                         new_beam.answer_state = 4
                                         new_beam.has_answer = True
+                                        new_beam.done = True
                                     elif new_beam.answer_state < 3:
                                         # Reset state if we encounter a different token
                                         new_beam.answer_state = 0
-                            
+
+                            # EOS handling
                             if token_id == tokenizer.eos_token_id and not ignore_eos:
-                                instance.completed.append(new_beam)
+                                if keep_done_beams:
+                                    new_beam.done = True
+                                    instance_new_beams.append(new_beam)
+                                else:
+                                    instance.completed.append(new_beam)
                             else:
                                 instance_new_beams.append(new_beam)
                 
@@ -645,7 +706,7 @@ def beam_search_with_backpointers(
                         if beam.has_answer and beam.last_pos is None:
                             beam.last_pos = (token_idx-1, beam.parent_rank)
                     
-                            if stop_at_answer:
+                            if stop_at_answer and not keep_done_beams:
                                 # Move this to 'completed' and consider the next ranking beam for new_beams
                                 instance.completed.append(beam)
                                 num_stop_beam_seen += 1
@@ -1527,7 +1588,7 @@ def test_dataset_loading():
     Test function to load and display a generated dataset.
     """
     BEAM_SIZE = 4
-    DATADIR_PATH = f"data/GSM8K/generate_test/beam_width_{BEAM_SIZE}/"
+    DATADIR_PATH = f"data/GSM8K/generate_test_hightemp/beam_width_{BEAM_SIZE}/"
     MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
     print("\n" + "="*80)
     print("TESTING DATASET LOADING")
@@ -1553,11 +1614,12 @@ def main():
     NUM_TRAIN_PROMPTS = 20
     NUM_TEST_PROMPTS = 20
     RESULTS_PER_PROMPT = 1
-    SAVE_PATH = "data/GSM8K/generate_test"
+    SAVE_PATH = "data/GSM8K/generate_test_hightemp"
     REQUIRE_ANSWERBOX = True
     STOP_AT_ANSWER = True
+    KEEP_DONE_BEAMS = True
     LENGTH_PENALTY = 1.0
-    TEMPERATURE = 0.5
+    TEMPERATURE = 1.0
     BATCH_SIZE = 20
 
     llm = LLM(model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
@@ -1574,6 +1636,7 @@ def main():
         results_per_prompt=RESULTS_PER_PROMPT,
         require_answerbox=REQUIRE_ANSWERBOX,
         stop_at_answer=STOP_AT_ANSWER,
+        keep_done_beams=KEEP_DONE_BEAMS,
         length_penalty=LENGTH_PENALTY,
         temperature=TEMPERATURE, 
         batch_size=BATCH_SIZE
