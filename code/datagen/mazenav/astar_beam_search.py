@@ -8,8 +8,7 @@ from typing import Any, Callable, Dict, Generic, Iterable, List, Optional, Seque
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from generate_maze import (
-    generate_maze_random, generate_maze_recursive_backtracking, visualize_maze,
-    save_multiple_mazes_compressed
+    generate_maze_random, generate_maze_recursive_backtracking, visualize_maze, Maze
 )
     
 
@@ -349,49 +348,27 @@ def example_maze_search():
     """
     SIZE = 20
     # Generate a small maze for demonstration
-    walls, start_pos, end_pos = generate_maze_recursive_backtracking(size=SIZE)
-    # walls, start_pos, end_pos = generate_maze_random(size=SIZE, wall_density=0.4)
+    maze = generate_maze_recursive_backtracking(size=SIZE)
+    # maze = generate_maze_random(size=SIZE, wall_density=0.4)
     
     print("Generated Maze:")
-    print(visualize_maze(walls, start_pos, end_pos, size=SIZE))
-    print(f"Start: {start_pos}, End: {end_pos}")
-    print(f"Walls: {walls}")
+    print(visualize_maze(maze))
+    print(f"Start: {maze.start_pos}, End: {maze.end_pos}")
+    print(f"Walls: {maze.walls}")
     print()
     
-    # Define maze navigation functions
-    def get_neighbors(pos):
-        """Get valid neighboring positions (up, down, left, right)."""
-        x, y = pos
-        neighbors = []
-        for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-            new_pos = (x + dx, y + dy)
-            nx, ny = new_pos
-            # Check bounds and walls
-            if (0 <= nx < SIZE and 0 <= ny < SIZE and 
-                new_pos not in walls):
-                neighbors.append((new_pos, 1.0))  # (state, step_cost)
-        return neighbors
-    
-    def manhattan_distance(pos):
-        """Heuristic: Manhattan distance to goal."""
-        return abs(pos[0] - end_pos[0]) + abs(pos[1] - end_pos[1])
-    
-    def is_goal(pos):
-        """Check if position is the goal."""
-        return pos == end_pos
-    
-    # Create beam search instance
+    # Create beam search instance using the maze's navigation methods
     beam_search = AStarBeamSearch(
-        next_states=get_neighbors,
-        heuristic_fn=manhattan_distance,
-        is_goal_fn=is_goal,
+        next_states=maze.get_neighbors,
+        heuristic_fn=maze.manhattan_distance,
+        is_goal_fn=maze.is_goal,
         cost_fn=None  # Use additive costs (g + step_cost)
     )
     
     # Run normal A* search first
     print("Running Normal A* Search:")
     astar_solution, astar_cost = beam_search.solve_normal_astar(
-        start_state=start_pos,
+        start_state=maze.start_pos,
         max_steps=1000
     )
     print(f"A* Solution found: {astar_solution is not None}")
@@ -404,7 +381,7 @@ def example_maze_search():
     # Run beam search
     print("Running Beam Search:")
     solution, state_matrix, backpointer_matrix, solution_cost = beam_search.solve(
-        start_state=start_pos,
+        start_state=maze.start_pos,
         beam_size=3,
         max_steps=None
     )
@@ -486,43 +463,21 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
         
         # Generate maze
         if backtrack_gen:
-            walls, start_pos, end_pos = generate_maze_recursive_backtracking(size=maze_size)
+            maze = generate_maze_recursive_backtracking(size=maze_size)
         else:
-            walls, start_pos, end_pos = generate_maze_random(size=maze_size, wall_density=0.4)
+            maze = generate_maze_random(size=maze_size, wall_density=0.4)
         
-        # Define maze navigation functions
-        def get_neighbors(pos):
-            """Get valid neighboring positions (up, down, left, right)."""
-            x, y = pos
-            neighbors = []
-            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-                new_pos = (x + dx, y + dy)
-                nx, ny = new_pos
-                # Check bounds and walls
-                if (0 <= nx < maze_size and 0 <= ny < maze_size and 
-                    new_pos not in walls):
-                    neighbors.append((new_pos, 1.0))  # (state, step_cost)
-            return neighbors
-        
-        def manhattan_distance(pos):
-            """Heuristic: Manhattan distance to goal."""
-            return abs(pos[0] - end_pos[0]) + abs(pos[1] - end_pos[1])
-        
-        def is_goal(pos):
-            """Check if position is the goal."""
-            return pos == end_pos
-        
-        # Create beam search instance
+        # Create beam search instance using the maze's navigation methods
         beam_search = AStarBeamSearch(
-            next_states=get_neighbors,
-            heuristic_fn=manhattan_distance,
-            is_goal_fn=is_goal,
+            next_states=maze.get_neighbors,
+            heuristic_fn=maze.manhattan_distance,
+            is_goal_fn=maze.is_goal,
             cost_fn=None  # Use additive costs (g + step_cost)
         )
         
         # Run A* search first to check solution length
         astar_solution, astar_cost = beam_search.solve_normal_astar(
-            start_state=start_pos,
+            start_state=maze.start_pos,
             max_steps=max_steps
         )
         
@@ -533,7 +488,7 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
         
         # Run beam search
         beam_solution, _, _, beam_cost = beam_search.solve(
-            start_state=start_pos,
+            start_state=maze.start_pos,
             beam_size=beam_size,
             max_steps=max_steps
         )
@@ -558,7 +513,7 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
             
             # Store maze data for saving
             maze_data = {
-                'maze': (walls, start_pos, end_pos, maze_size),
+                'maze': maze,
                 'beam_solution': beam_solution,
                 'beam_cost': beam_cost,
                 'astar_cost': astar_cost if astar_solution is not None else float('inf')
@@ -618,15 +573,16 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
         print(f"\nSaving results for {len(stats['accepted_mazes'])} accepted mazes...")
         
         # Extract maze data for saving
-        maze_tuples = []
+        mazes = []
         for maze_data in stats['accepted_mazes']:
-            walls, start_pos, end_pos, maze_size = maze_data['maze']
-            maze_tuples.append((walls, start_pos, end_pos, maze_size))
+            maze = maze_data['maze']
+            mazes.append(maze)
         
         # Save mazes using the multi-maze storage function
+        # TODO: Implement save_multiple_mazes_compressed function
         maze_filename = f"beam_search_mazes_size{maze_size}_beam{beam_size}_count{len(stats['accepted_mazes'])}.txt"
-        save_multiple_mazes_compressed(maze_tuples, maze_filename)
-        print(f"Saved {len(maze_tuples)} mazes to '{maze_filename}'")
+        # save_multiple_mazes_compressed(maze_tuples, maze_filename)
+        print(f"Would save {len(maze_tuples)} mazes to '{maze_filename}' (function not implemented)")
         
         # Save search results data
         results_filename = f"beam_search_results_size{maze_size}_beam{beam_size}_count{len(stats['accepted_mazes'])}.txt"
@@ -657,10 +613,10 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
             f.write("=" * 20 + "\n\n")
             
             for i, maze_data in enumerate(stats['accepted_mazes'][:5]):
-                walls, start_pos, end_pos, maze_size_maze = maze_data['maze']
+                maze = maze_data['maze']
                 f.write(f"Maze {i+1}:\n")
-                f.write(f"  Start: {start_pos}, End: {end_pos}, Size: {maze_size_maze}x{maze_size_maze}\n")
-                f.write(f"  Walls: {len(walls)} walls\n")
+                f.write(f"  Start: {maze.start_pos}, End: {maze.end_pos}, Size: {maze.size}x{maze.size}\n")
+                f.write(f"  Walls: {len(maze.walls)} walls\n")
                 
                 beam_solution = maze_data['beam_solution']
                 beam_cost = maze_data['beam_cost']
@@ -671,7 +627,7 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
                 
                 # Create maze visualizations with paths
                 f.write(f"\n  Maze visualization with beam search path:\n")
-                beam_visualization = visualize_maze(walls, start_pos, end_pos, maze_size_maze, beam_solution)
+                beam_visualization = visualize_maze(maze, beam_solution)
                 f.write("  ")
                 f.write(beam_visualization.replace('\n', '\n  '))
                 f.write("\n")

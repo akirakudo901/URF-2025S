@@ -4,6 +4,7 @@ Generate a textual 10x10 maze with randomly placed walls, start, and end positio
 The maze uses a 0-based index grid where walls are specified as a list of coordinates.
 """
 
+from dataclasses import dataclass
 import random
 import sys
 import json
@@ -11,7 +12,126 @@ import base64
 import zlib
 from typing import List, Tuple, Set, Dict, Any, Optional
 
-def generate_maze_recursive_backtracking(size: int = 10) -> Tuple[List[Tuple[int, int]], Tuple[int, int], Tuple[int, int]]:
+@dataclass
+class Maze:
+    """Container for a maze with navigation methods."""
+    
+    size: int
+    start_pos: Tuple[int, int]
+    end_pos: Tuple[int, int]
+    walls: Tuple[Tuple[int, int], ...]
+    
+    def __post_init__(self):
+        """Validate maze data after initialization."""
+        # Ensure walls is a tuple of tuples
+        if isinstance(self.walls, list) or isinstance(self.walls, tuple):
+            self.walls = tuple(tuple(wall) for wall in self.walls)
+        
+        # Validate start & end positions are valid
+        if not self.is_valid_position(self.start_pos):
+            raise ValueError(f"Start position {self.start_pos} is not valid")
+        if not self.is_valid_position(self.end_pos):
+            raise ValueError(f"End position {self.end_pos} is not valid")
+    
+    def get_neighbors(self, pos: Tuple[int, int]) -> List[Tuple[Tuple[int, int], float]]:
+        """
+        Get valid neighboring positions (up, down, left, right).
+        
+        Args:
+            pos: Current position as (x, y)
+            
+        Returns:
+            List of (neighbor_position, step_cost) tuples
+        """
+        x, y = pos
+        neighbors = []
+        for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+            new_pos = (x + dx, y + dy)
+            nx, ny = new_pos
+            # Check bounds and walls
+            if (0 <= nx < self.size and 0 <= ny < self.size and 
+                new_pos not in self.walls):
+                neighbors.append((new_pos, 1.0))  # (state, step_cost)
+        return neighbors
+    
+    def manhattan_distance(self, pos: Tuple[int, int]) -> float:
+        """
+        Heuristic: Manhattan distance to goal.
+        
+        Args:
+            pos: Position as (x, y)
+            
+        Returns:
+            Manhattan distance to the goal position
+        """
+        return abs(pos[0] - self.end_pos[0]) + abs(pos[1] - self.end_pos[1])
+    
+    def is_goal(self, pos: Tuple[int, int]) -> bool:
+        """
+        Check if position is the goal.
+        
+        Args:
+            pos: Position as (x, y)
+            
+        Returns:
+            True if position is the goal, False otherwise
+        """
+        return pos == self.end_pos
+    
+    def is_valid_position(self, pos: Tuple[int, int]) -> bool:
+        """
+        Check if a position is valid (within bounds and not a wall).
+        
+        Args:
+            pos: Position as (x, y)
+            
+        Returns:
+            True if position is valid, False otherwise
+        """
+        x, y = pos
+        return (0 <= x < self.size and 0 <= y < self.size and pos not in self.walls)
+    
+    def get_all_valid_positions(self) -> List[Tuple[int, int]]:
+        """
+        Get all valid (non-wall) positions in the maze.
+        
+        Returns:
+            List of all valid positions
+        """
+        valid_positions = []
+        for y in range(self.size):
+            for x in range(self.size):
+                pos = (x, y)
+                if self.is_valid_position(pos):
+                    valid_positions.append(pos)
+        return valid_positions
+    
+    def visualize(self, path: Optional[List[Tuple[int, int]]] = None) -> str:
+        """
+        Create a visual representation of the maze using ASCII characters.
+        
+        Args:
+            path: Optional path from start to end, showing direction arrows
+            
+        Returns:
+            ASCII representation of the maze
+        """
+        return visualize_maze(self, path)
+    
+    def to_string_format(self, add_special_tokens: bool = True) -> str:
+        """
+        Convert maze data to string format for training.
+        
+        Args:
+            add_special_tokens: Whether to add bos/eos tokens
+            
+        Returns:
+            String representation of the maze
+        """
+        return maze_to_string_format(self, add_special_tokens)
+
+
+def generate_maze_recursive_backtracking(size: int = 10) -> Maze:
     """
     Generate a proper maze using recursive backtracking algorithm.
     Creates a perfect maze with exactly one path between any two points.
@@ -20,7 +140,7 @@ def generate_maze_recursive_backtracking(size: int = 10) -> Tuple[List[Tuple[int
         size: Size of the maze (size x size)
     
     Returns:
-        Tuple of (walls, start_pos, end_pos)
+        Maze instance
     """
     # Initialize maze grid: True = wall, False = path
     # Start with all walls
@@ -76,10 +196,9 @@ def generate_maze_recursive_backtracking(size: int = 10) -> Tuple[List[Tuple[int
     # Randomly select start and end positions
     start_pos, end_pos = random.sample(path_positions, 2)
     
-    return walls, start_pos, end_pos
+    return Maze(size=size, start_pos=start_pos, end_pos=end_pos, walls=walls)
 
-def generate_maze_random(size: int = 10, wall_density: float = 0.4
-                        ) -> Tuple[List[Tuple[int, int]], Tuple[int, int], Tuple[int, int]]:
+def generate_maze_random(size: int = 10, wall_density: float = 0.4) -> Maze:
     """
     Generate a maze with random walls (original algorithm).
     
@@ -88,7 +207,7 @@ def generate_maze_random(size: int = 10, wall_density: float = 0.4
         wall_density: Fraction of cells that should be walls (0.0 to 1.0)
     
     Returns:
-        Tuple of (walls, start_pos, end_pos)
+        Maze instance
     """
     # Calculate number of walls to place
     total_cells = size * size
@@ -102,16 +221,14 @@ def generate_maze_random(size: int = 10, wall_density: float = 0.4
     available_positions = [pos for pos in all_positions if pos not in walls]
     start_pos, end_pos = random.sample(available_positions, 2)
     
-    return walls, start_pos, end_pos
+    return Maze(size=size, start_pos=start_pos, end_pos=end_pos, walls=walls)
 
-def format_maze_output(walls: List[Tuple[int, int]], start_pos: Tuple[int, int], end_pos: Tuple[int, int]) -> str:
+def format_maze_output(maze: Maze) -> str:
     """
     Format the maze data as a textual representation.
     
     Args:
-        walls: List of wall coordinates
-        start_pos: Start position coordinates
-        end_pos: End position coordinates
+        maze: Maze object to format
     
     Returns:
         Formatted string representation
@@ -120,40 +237,37 @@ def format_maze_output(walls: List[Tuple[int, int]], start_pos: Tuple[int, int],
     
     # Add walls
     output_lines.append("Walls:")
-    for wall in sorted(walls):
+    for wall in sorted(maze.walls):
         output_lines.append(f"  ({wall[0]}, {wall[1]})")
     
     # Add start and end positions
-    output_lines.append(f"Start: ({start_pos[0]}, {start_pos[1]})")
-    output_lines.append(f"End: ({end_pos[0]}, {end_pos[1]})")
+    output_lines.append(f"Start: ({maze.start_pos[0]}, {maze.start_pos[1]})")
+    output_lines.append(f"End: ({maze.end_pos[0]}, {maze.end_pos[1]})")
     
     return "\n".join(output_lines)
 
-def visualize_maze(walls: List[Tuple[int, int]], start_pos: Tuple[int, int], end_pos: Tuple[int, int], size: int = 10, path: Optional[List[Tuple[int, int]]] = None) -> str:
+def visualize_maze(maze: Maze, path: Optional[List[Tuple[int, int]]] = None) -> str:
     """
     Create a visual representation of the maze using ASCII characters.
     
     Args:
-        walls: List of wall coordinates
-        start_pos: Start position coordinates
-        end_pos: End position coordinates
-        size: Size of the maze
+        maze: Maze object to visualize
         path: Optional path from start to end, showing direction arrows
     
     Returns:
         ASCII representation of the maze
     """
     # Create grid encircled by walls
-    grid = [[' ' for _ in range(size+2)] for _ in range(size+2)]
+    grid = [[' ' for _ in range(maze.size+2)] for _ in range(maze.size+2)]
     
     # Place walls
-    for i in range(size+2):
+    for i in range(maze.size+2):
         grid[i][0] = '#'
         grid[0][i] = '#'
-        grid[i][size+1] = '#'
-        grid[size+1][i] = '#'
+        grid[i][maze.size+1] = '#'
+        grid[maze.size+1][i] = '#'
     
-    for wall in walls:
+    for wall in maze.walls:
         grid[wall[1]+1][wall[0]+1] = '#'
     
     # Add path visualization if provided
@@ -182,8 +296,8 @@ def visualize_maze(walls: List[Tuple[int, int]], start_pos: Tuple[int, int], end
             grid[current_pos[1]+1][current_pos[0]+1] = direction_symbol
     
     # Place start and end (override path symbols at start/end positions)
-    grid[start_pos[1]+1][start_pos[0]+1] = 'S'
-    grid[end_pos[1]  +1][end_pos[0]  +1] = 'E'
+    grid[maze.start_pos[1]+1][maze.start_pos[0]+1] = 'S'
+    grid[maze.end_pos[1]  +1][maze.end_pos[0]  +1] = 'E'
     
     # Convert to string
     lines = []
@@ -196,231 +310,73 @@ def visualize_maze(walls: List[Tuple[int, int]], start_pos: Tuple[int, int], end
 # CONVENIENCE FUNCTIONS FOR MAZE STORAGE AND COMPRESSION
 # =============================================================================
 
-def format_maze_compact(walls: List[Tuple[int, int]], start_pos: Tuple[int, int], 
-                       end_pos: Tuple[int, int], size: int) -> str:
+def mazes_to_npz():
     """
-    Format a maze in compact format for storage and later reconstruction : "size:walls_encoded:start:end"
-    - size: Grid size as integer
-    - walls_encoded: Base64-encoded JSON list of wall coordinates
-    - start: Start position as "x,y"
-    - end: End position as "x,y"
+    Placeholder function for converting mazes to NPZ format.
+    TODO: Implement this function if needed.
+    """
+    pass
+
+def maze_to_string_format(maze: Maze, 
+                         add_special_tokens: bool = True) -> str:
+    """
+    Convert maze data to the format:
+    "bos start x y goal x y wall x1 y1 wall x2 y2 ... wall xn yn eos"
     
     Args:
-        walls: List of wall coordinates
-        start_pos: Start position coordinates
-        end_pos: End position coordinates
-        size: Size of the maze grid
+        maze: Maze to convert
+        add_special_tokens: Whether to add bos/eos tokens (default True for training)
     
     Returns:
-        Compact string representation
+        String representation of the maze
     """
-    # Encode walls as base64 JSON for compactness
-    walls_json = json.dumps(walls, separators=(',', ':'))  # Compact JSON
-    walls_encoded = base64.b64encode(walls_json.encode('utf-8')).decode('ascii')
+    start_pos, end_pos, walls = maze.start_pos, maze.end_pos, maze.walls
+    tokens = []
     
-    # Format as compact string
-    compact_format = f"{size}:{walls_encoded}:{start_pos[0]},{start_pos[1]}:{end_pos[0]},{end_pos[1]}"
+    if add_special_tokens:
+        tokens.append("bos")
     
-    return compact_format
+    # Add start position
+    tokens.extend(["start", str(start_pos[0]), str(start_pos[1])])
+    # Add goal position  
+    tokens.extend(["goal", str(end_pos[0]), str(end_pos[1])])
+    # Add wall positions
+    for wall_x, wall_y in walls:
+        tokens.extend(["wall", str(wall_x), str(wall_y)])
+    
+    if add_special_tokens:
+        tokens.append("eos")
+    
+    return " ".join(tokens)
 
-def reconstruct_maze_from_compact(compact_format: str) -> Tuple[List[Tuple[int, int]], Tuple[int, int], Tuple[int, int], int]:
+
+def path_to_string_format(path: List[Tuple[int, int]], 
+                         add_special_tokens: bool = True) -> str:
     """
-    Reconstruct maze data from compact format.
+    Convert path data to the format:
+    "bos plan x1 y1 plan x2 y2 ... plan xm ym eos"
     
     Args:
-        compact_format: Compact string format from format_maze_compact()
+        path: List of position coordinates (x, y) in order
+        add_special_tokens: Whether to add bos/eos tokens (default True for training)
     
     Returns:
-        Tuple of (walls, start_pos, end_pos, size)
+        String representation of the path
     """
-    parts = compact_format.split(':')
-    if len(parts) != 4:
-        raise ValueError("Invalid compact format")
+    tokens = []
     
-    size = int(parts[0])
+    if add_special_tokens:
+        tokens.append("bos")
     
-    # Decode walls
-    walls_encoded = parts[1]
-    walls_json = base64.b64decode(walls_encoded.encode('ascii')).decode('utf-8')
-    walls = json.loads(walls_json)
-    walls = [(int(x), int(y)) for x, y in walls]  # Ensure integers
+    # Add path positions
+    for x, y in path:
+        tokens.extend(["plan", str(x), str(y)])
     
-    # Parse start and end positions
-    start_x, start_y = map(int, parts[2].split(','))
-    end_x, end_y = map(int, parts[3].split(','))
+    if add_special_tokens:
+        tokens.append("eos")
     
-    start_pos = (start_x, start_y)
-    end_pos = (end_x, end_y)
-    
-    return walls, start_pos, end_pos, size
+    return " ".join(tokens)
 
-def compress_maze(compact_format: str) -> str:
-    """
-    Compress the compact maze format further using zlib compression and base64 encoding.
-    
-    Compression algorithm:
-    1. Take the compact format string
-    2. Compress using zlib (deflate algorithm) - reduces redundant data
-    3. Encode compressed bytes as base64 for safe string transmission
-    
-    This achieves compression by:
-    - zlib/deflate removes redundancy in the JSON data and coordinate patterns
-    - Base64 encoding ensures the compressed data is ASCII-safe
-    - Typical compression ratios: 60-80% for maze data
-    
-    Args:
-        compact_format: Compact string format from format_maze_compact()
-    
-    Returns:
-        Compressed and base64-encoded string
-    """
-    # Compress the compact format string
-    compressed_bytes = zlib.compress(compact_format.encode('utf-8'), level=9)  # Maximum compression
-    
-    # Encode as base64 for safe string handling
-    compressed_string = base64.b64encode(compressed_bytes).decode('ascii')
-    
-    return compressed_string
-
-def decompress_maze(compressed_string: str) -> str:
-    """
-    Decompress a compressed maze format back to the original compact format.
-    
-    Decompression algorithm:
-    1. Decode base64 string back to compressed bytes
-    2. Decompress using zlib (inflate algorithm)
-    3. Decode bytes back to original compact format string
-    
-    Args:
-        compressed_string: Compressed string from compress_maze()
-    
-    Returns:
-        Original compact format string
-    """
-    # Decode base64 back to compressed bytes
-    compressed_bytes = base64.b64decode(compressed_string.encode('ascii'))
-    
-    # Decompress using zlib
-    compact_format = zlib.decompress(compressed_bytes).decode('utf-8')
-    
-    return compact_format
-
-def save_maze_compressed(walls: List[Tuple[int, int]], start_pos: Tuple[int, int], 
-                        end_pos: Tuple[int, int], size: int, filename: str) -> None:
-    """
-    Save a maze in compressed format to a file.
-    
-    Args:
-        walls: List of wall coordinates
-        start_pos: Start position coordinates
-        end_pos: End position coordinates
-        size: Size of the maze grid
-        filename: Output filename
-    """
-    compact_format = format_maze_compact(walls, start_pos, end_pos, size)
-    compressed_format = compress_maze(compact_format)
-    
-    with open(filename, 'w') as f:
-        f.write(compressed_format)
-
-def load_maze_compressed(filename: str) -> Tuple[List[Tuple[int, int]], Tuple[int, int], Tuple[int, int], int]:
-    """
-    Load a maze from a compressed file format.
-    
-    Args:
-        filename: Input filename
-    
-    Returns:
-        Tuple of (walls, start_pos, end_pos, size)
-    """
-    with open(filename, 'r') as f:
-        compressed_format = f.read().strip()
-    
-    compact_format = decompress_maze(compressed_format)
-    return reconstruct_maze_from_compact(compact_format)
-
-# =============================================================================
-# MULTI-MAZE STORAGE AND COMPRESSION FUNCTIONS
-# =============================================================================
-
-def format_multiple_mazes_compact(mazes: List[Tuple[List[Tuple[int, int]], Tuple[int, int], Tuple[int, int], int]]) -> str:
-    """
-    Format multiple mazes in compact format for storage.
-    
-    Multi-maze format: "count|maze1|maze2|...|mazeN"
-    - count: Number of mazes as integer
-    - maze1, maze2, etc.: Individual maze compact formats (separated by |)
-    
-    Args:
-        mazes: List of maze tuples (walls, start_pos, end_pos, size)
-    
-    Returns:
-        Compact string representation of multiple mazes
-    """
-    maze_compacts = []
-    for walls, start_pos, end_pos, size in mazes:
-        compact = format_maze_compact(walls, start_pos, end_pos, size)
-        maze_compacts.append(compact)
-    
-    # Join with count prefix using | as delimiter (since : is used within maze formats)
-    multi_maze_format = f"{len(mazes)}|" + "|".join(maze_compacts)
-    return multi_maze_format
-
-def reconstruct_multiple_mazes_from_compact(multi_maze_format: str) -> List[Tuple[List[Tuple[int, int]], Tuple[int, int], Tuple[int, int], int]]:
-    """
-    Reconstruct multiple maze data from compact format.
-    
-    Args:
-        multi_maze_format: Compact string format from format_multiple_mazes_compact()
-    
-    Returns:
-        List of maze tuples (walls, start_pos, end_pos, size)
-    """
-    parts = multi_maze_format.split('|')
-    if len(parts) < 2:
-        raise ValueError("Invalid multi-maze format")
-    
-    count = int(parts[0])
-    if len(parts) != count + 1:
-        raise ValueError(f"Expected {count + 1} parts, got {len(parts)}")
-    
-    mazes = []
-    for i in range(1, count + 1):
-        maze_compact = parts[i]
-        walls, start_pos, end_pos, size = reconstruct_maze_from_compact(maze_compact)
-        mazes.append((walls, start_pos, end_pos, size))
-    
-    return mazes
-
-def save_multiple_mazes_compressed(mazes: List[Tuple[List[Tuple[int, int]], Tuple[int, int], Tuple[int, int], int]], filename: str) -> None:
-    """
-    Save multiple mazes in compressed format to a file.
-    
-    Args:
-        mazes: List of maze tuples (walls, start_pos, end_pos, size)
-        filename: Output filename
-    """
-    multi_maze_format = format_multiple_mazes_compact(mazes)
-    compressed_format = compress_maze(multi_maze_format)
-    
-    with open(filename, 'w') as f:
-        f.write(compressed_format)
-
-def load_multiple_mazes_compressed(filename: str) -> List[Tuple[List[Tuple[int, int]], Tuple[int, int], Tuple[int, int], int]]:
-    """
-    Load multiple mazes from a compressed file format.
-    
-    Args:
-        filename: Input filename
-    
-    Returns:
-        List of maze tuples (walls, start_pos, end_pos, size)
-    """
-    with open(filename, 'r') as f:
-        compressed_format = f.read().strip()
-    
-    multi_maze_format = decompress_maze(compressed_format)
-    return reconstruct_multiple_mazes_from_compact(multi_maze_format)
 
 def main():
     """Generate and display a 10x10 maze."""
@@ -433,19 +389,46 @@ def main():
     # Generate maze using recursive backtracking (proper maze)
     print("\n1. PROPER MAZE (Recursive Backtracking Algorithm):")
     print("-" * 50)
-    walls_proper, start_pos_proper, end_pos_proper = generate_maze_recursive_backtracking(size=10)
-    print(format_maze_output(walls_proper, start_pos_proper, end_pos_proper))
+    maze_proper = generate_maze_recursive_backtracking(size=10)
+    print(format_maze_output(maze_proper))
     print("\nVisual representation:")
-    print(visualize_maze(walls_proper, start_pos_proper, end_pos_proper, size=10))
+    print(visualize_maze(maze_proper))
     print("\nLegend: S=Start, E=End, #=Wall, .=Empty")
+    
+    # Demonstrate new Maze class
+    print("\n\n3. NEW MAZE CLASS DEMONSTRATION:")
+    print("-" * 50)
+    maze = generate_maze_recursive_backtracking(size=8)
+    print(f"Maze size: {maze.size}x{maze.size}")
+    print(f"Start position: {maze.start_pos}")
+    print(f"End position: {maze.end_pos}")
+    print(f"Number of walls: {len(maze.walls)}")
+    
+    # Test navigation functions
+    print(f"\nNavigation function tests:")
+    test_pos = maze.start_pos
+    print(f"Testing from position {test_pos}:")
+    print(f"  Is goal? {maze.is_goal(test_pos)}")
+    print(f"  Manhattan distance to goal: {maze.manhattan_distance(test_pos)}")
+    neighbors = maze.get_neighbors(test_pos)
+    print(f"  Valid neighbors: {[pos for pos, cost in neighbors]}")
+    print(f"  Is valid position? {maze.is_valid_position(test_pos)}")
+    
+    # Show visualization
+    print(f"\nMaze visualization:")
+    print(maze.visualize())
+    
+    # Test string format conversion
+    print(f"\nString format (for training):")
+    print(maze.to_string_format())
     
     # Generate maze using random placement (original algorithm)
     print("\n\n2. RANDOM WALL PLACEMENT (Original Algorithm):")
     print("-" * 50)
-    walls_random, start_pos_random, end_pos_random = generate_maze_random(size=10, wall_density=0.4)
-    print(format_maze_output(walls_random, start_pos_random, end_pos_random))
+    maze_random = generate_maze_random(size=10, wall_density=0.4)
+    print(format_maze_output(maze_random))
     print("\nVisual representation:")
-    print(visualize_maze(walls_random, start_pos_random, end_pos_random, size=10))
+    print(visualize_maze(maze_random))
     print("\nLegend: S=Start, E=End, #=Wall, .=Empty")
     
     print("\n" + "=" * 60)
@@ -453,84 +436,7 @@ def main():
     print("- The proper maze guarantees connectivity and a single solution path")
     print("- The random placement may create isolated regions or multiple paths")
     print("- Both mazes have implicit boundary walls (not listed in coordinates)")
-    
-    # Test the new convenience functions
-    print("\n" + "=" * 60)
-    print("TESTING CONVENIENCE FUNCTIONS:")
-    print("-" * 50)
-    
-    # Test with the proper maze
-    compact_format = format_maze_compact(walls_proper, start_pos_proper, end_pos_proper, size=10)
-    print(f"Compact format size: {len(compact_format)} characters")
-    print(f"Compact format: {compact_format}")
-    
-    compressed = compress_maze(compact_format)
-    print(f"Compressed size: {len(compressed)} characters")
-    print(f"Compression ratio: {len(compressed)/len(compact_format):.2%}")
-    print(f"Compressed data: {compressed}")
-    
-    decompressed = decompress_maze(compressed)
-    print(f"Decompressed matches original: {decompressed == compact_format}")
-    
-    # Test reconstruction
-    reconstructed_walls, reconstructed_start, reconstructed_end, reconstructed_size = reconstruct_maze_from_compact(decompressed)
-    print(f"Reconstruction successful: {reconstructed_walls == walls_proper and reconstructed_start == start_pos_proper and reconstructed_end == end_pos_proper}")
-    
-    # Test multi-maze functionality
-    print("\n" + "=" * 60)
-    print("TESTING MULTI-MAZE FUNCTIONALITY:")
-    print("-" * 50)
-    
-    # Generate multiple mazes for testing
-    test_mazes = []
-    for i in range(3):
-        walls, start_pos, end_pos = generate_maze_recursive_backtracking(size=8)
-        test_mazes.append((walls, start_pos, end_pos, 8))
-    
-    print(f"Generated {len(test_mazes)} test mazes")
-    
-    # Test multi-maze compact format
-    multi_compact = format_multiple_mazes_compact(test_mazes)
-    print(f"Multi-maze compact format size: {len(multi_compact)} characters")
-    
-    # Test multi-maze compression
-    multi_compressed = compress_maze(multi_compact)
-    print(f"Multi-maze compressed size: {len(multi_compressed)} characters")
-    print(f"Multi-maze compression ratio: {len(multi_compressed)/len(multi_compact):.2%}")
-    
-    # Test multi-maze decompression and reconstruction
-    multi_decompressed = decompress_maze(multi_compressed)
-    reconstructed_mazes = reconstruct_multiple_mazes_from_compact(multi_decompressed)
-    
-    print(f"Multi-maze decompression successful: {multi_decompressed == multi_compact}")
-    print(f"Multi-maze reconstruction successful: {len(reconstructed_mazes) == len(test_mazes)}")
-    
-    # Verify each maze matches
-    all_match = True
-    for i, (original, reconstructed) in enumerate(zip(test_mazes, reconstructed_mazes)):
-        walls_match = original[0] == reconstructed[0]
-        start_match = original[1] == reconstructed[1]
-        end_match = original[2] == reconstructed[2]
-        size_match = original[3] == reconstructed[3]
-        maze_match = walls_match and start_match and end_match and size_match
-        print(f"Maze {i+1} matches: {maze_match}")
-        if not maze_match:
-            all_match = False
-    
-    print(f"All mazes match: {all_match}")
-    
-    # Test file I/O with multiple mazes
-    test_filename = "test_multiple_mazes.txt"
-    save_multiple_mazes_compressed(test_mazes, test_filename)
-    loaded_mazes = load_multiple_mazes_compressed(test_filename)
-    
-    print(f"File I/O test successful: {len(loaded_mazes) == len(test_mazes)}")
-    
-    # Clean up test file
-    import os
-    if os.path.exists(test_filename):
-        os.remove(test_filename)
-        print(f"Cleaned up test file: {test_filename}")
+    print("- The new Maze class provides convenient navigation methods")
 
 if __name__ == "__main__":
     main()
