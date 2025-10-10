@@ -228,13 +228,9 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
     # Statistics tracking
     stats = {
         'total_generation_trials': 0,  # Total number of mazes generated
-        'astar_only_solutions': 0,     # A* found solution but beam didn't
-        'beam_accepted_mazes': 0,      # Beam search found solution (accepted)
         'both_same_solution': 0,       # Both find same solution
         'both_different_solution': 0,  # Both find solution, beam is longer
-        'neither': 0,                  # Neither finds solution
         'total_astar_solutions': 0,   # Total A* solutions found
-        'total_beam_solutions': 0,    # Total beam solutions found
         'cost_differences': [],        # List of (astar_cost, beam_cost) when both find solutions
         'accepted_mazes': [],          # List of accepted maze data for saving
     }
@@ -273,28 +269,20 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
         if astar_solution is None or len(astar_solution) < min_length:
             print(f"  Rejected: A* solution length {len(astar_solution) if astar_solution else 'None'} < {min_length}")
             continue
+        else: # otherwise, count the new astar solution
+            stats['total_astar_solutions'] += 1
         
         # Run beam search
-        beam_solution, _, _, beam_cost = beam_search.solve(
+        beam_solution, state_matrix, bp_matrix, beam_cost = beam_search.solve(
             start_state=maze.start_pos,
             beam_size=beam_size,
             max_steps=max_steps
         )
         
-        # Update statistics
-        astar_found = astar_solution is not None
-        beam_found = beam_solution is not None
-        
-        if astar_found:
-            stats['total_astar_solutions'] += 1
-        if beam_found:
-            stats['total_beam_solutions'] += 1
-        
         # Check acceptance criteria: beam search must find a solution
-        if beam_found:
+        if beam_solution is not None:
             # Maze accepted - beam search found solution
             accepted_trials += 1
-            stats['beam_accepted_mazes'] += 1
             
             print(f"  Accepted: Beam search found solution (length: {len(beam_solution)}, cost: {beam_cost:.2f})")
             print(f"Trial {accepted_trials}/{num_trials}")
@@ -308,8 +296,7 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
             }
             stats['accepted_mazes'].append(maze_data)
             
-        # Update comparison statistics
-        if astar_found and beam_found:
+            # Update comparison statistics
             if astar_solution == beam_solution:
                 stats['both_same_solution'] += 1
                 print(f"  ✓ Both found same solution (length: {len(astar_solution)})")
@@ -319,29 +306,26 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
                 print(f"  ⚠ Both found solutions but different:")
                 print(f"    A* length: {len(astar_solution)}, cost: {astar_cost:.2f}")
                 print(f"    Beam length: {len(beam_solution)}, cost: {beam_cost:.2f}")
-        else:
-            # Maze rejected - beam search didn't find solution
-            if astar_found:
-                stats['astar_only_solutions'] += 1
-                print(f"  Rejected: Only A* found solution (length: {len(astar_solution)})")
-            else:
-                stats['neither'] += 1
-                print(f"  Rejected: Neither found solution")
     
     # Print summary statistics
     print("\n" + "=" * 60)
     print("SUMMARY STATISTICS")
     print("=" * 60)
+    # Calculate derived statistics
+    beam_accepted_mazes = len(stats['accepted_mazes'])  # Same as total_beam_solutions
+    total_beam_solutions = beam_accepted_mazes  # Since we only accept when beam finds solution
+    astar_only_solutions = stats['total_astar_solutions'] - stats['both_same_solution'] - stats['both_different_solution']
+    
     print(f"Total mazes generated: {stats['total_generation_trials']}")
-    print(f"Accepted mazes (beam found solution): {stats['beam_accepted_mazes']}")
-    print(f"Acceptance rate: {100*stats['beam_accepted_mazes']/stats['total_generation_trials']:.1f}%")
-    print(f"A* found solution but beam didn't: {stats['astar_only_solutions']}")
+    print(f"Accepted mazes (beam found solution): {beam_accepted_mazes}")
+    print(f"Acceptance rate: {100*beam_accepted_mazes/stats['total_generation_trials']:.1f}%")
+    print(f"A* found solution but beam didn't: {astar_only_solutions}")
     print(f"A* success rate: {stats['total_astar_solutions']}/{stats['total_generation_trials']} ({100*stats['total_astar_solutions']/stats['total_generation_trials']:.1f}%)")
-    print(f"Beam success rate: {stats['total_beam_solutions']}/{stats['total_generation_trials']} ({100*stats['total_beam_solutions']/stats['total_generation_trials']:.1f}%)")
+    print(f"Beam success rate: {total_beam_solutions}/{stats['total_generation_trials']} ({100*total_beam_solutions/stats['total_generation_trials']:.1f}%)")
     print()
     print("Solution comparison (accepted mazes only):")
-    print(f"  Both found same solution: {stats['both_same_solution']} ({100*stats['both_same_solution']/stats['beam_accepted_mazes']:.1f}%)")
-    print(f"  Both found different solutions: {stats['both_different_solution']} ({100*stats['both_different_solution']/stats['beam_accepted_mazes']:.1f}%)")
+    print(f"  Both found same solution: {stats['both_same_solution']} ({100*stats['both_same_solution']/beam_accepted_mazes:.1f}%)")
+    print(f"  Both found different solutions: {stats['both_different_solution']} ({100*stats['both_different_solution']/beam_accepted_mazes:.1f}%)")
     
     # Cost analysis when both found solutions
     if stats['cost_differences']:
@@ -389,12 +373,12 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
             
             # Write statistics summary
             f.write("Statistics Summary:\n")
-            f.write(f"  Acceptance rate: {100*stats['beam_accepted_mazes']/stats['total_generation_trials']:.1f}%\n")
-            f.write(f"  A* found solution but beam didn't: {stats['astar_only_solutions']}\n")
+            f.write(f"  Acceptance rate: {100*beam_accepted_mazes/stats['total_generation_trials']:.1f}%\n")
+            f.write(f"  A* found solution but beam didn't: {astar_only_solutions}\n")
             f.write(f"  A* success rate: {stats['total_astar_solutions']}/{stats['total_generation_trials']} ({100*stats['total_astar_solutions']/stats['total_generation_trials']:.1f}%)\n")
-            f.write(f"  Beam success rate: {stats['total_beam_solutions']}/{stats['total_generation_trials']} ({100*stats['total_beam_solutions']/stats['total_generation_trials']:.1f}%)\n")
-            f.write(f"  Both found same solution: {stats['both_same_solution']} ({100*stats['both_same_solution']/stats['beam_accepted_mazes']:.1f}%)\n")
-            f.write(f"  Both found different solutions: {stats['both_different_solution']} ({100*stats['both_different_solution']/stats['beam_accepted_mazes']:.1f}%)\n")
+            f.write(f"  Beam success rate: {total_beam_solutions}/{stats['total_generation_trials']} ({100*total_beam_solutions/stats['total_generation_trials']:.1f}%)\n")
+            f.write(f"  Both found same solution: {stats['both_same_solution']} ({100*stats['both_same_solution']/beam_accepted_mazes:.1f}%)\n")
+            f.write(f"  Both found different solutions: {stats['both_different_solution']} ({100*stats['both_different_solution']/beam_accepted_mazes:.1f}%)\n")
             
             # Write detailed maze results
             f.write("Detailed Maze Results, first five mazes:\n")
