@@ -26,38 +26,6 @@ from generate_maze import (
 # Import beam search functions
 from astar_beam_search import AStarBeamSearch
 
-def compute_maze_solution_path(maze: Maze,
-                              beam_size: int=4,
-                              max_steps: int=1000) -> Tuple[Optional[List[Tuple[int, int]]], List[List[Optional[Tuple[int, int]]]], List[List[Optional[int]]], float]:
-    """
-    Compute solution path for a maze using A* beam search.
-    
-    Args:
-        maze: Maze object containing walls, start_pos, end_pos, and size
-        beam_size: Size of beam search beam, defaults to 4
-        max_steps: Max steps before beam search fails, defaults to 1000
-        
-    Returns:
-        Tuple of (solution_path, state_matrix, backpointer_matrix, solution_cost)
-    """
-    # Create beam search instance using the maze's navigation methods
-    beam_search = AStarBeamSearch(
-        next_states=maze.get_neighbors,
-        heuristic_fn=maze.manhattan_distance,
-        is_goal_fn=maze.is_goal,
-        cost_fn=None  # Use additive costs
-    )
-    
-    # Run beam search
-    solution, state_matrix, backpointer_matrix, solution_cost = beam_search.solve(
-        start_state=maze.start_pos,
-        beam_size=beam_size,
-        max_steps=max_steps
-    )
-    
-    return solution, state_matrix, backpointer_matrix, solution_cost
-
-
 def load_and_tokenize_mazes(maze_strings_file: str,
                            tokenizer_name: str = "gpt2",
                            max_length: int = 1024) -> Tuple[torch.Tensor, torch.Tensor]:
