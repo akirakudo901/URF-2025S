@@ -6,6 +6,7 @@ The maze uses a 0-based index grid where walls are specified as a list of coordi
 
 from dataclasses import dataclass
 import random
+import numpy as np
 from typing import List, Tuple, Optional
 
 @dataclass
@@ -322,12 +323,83 @@ def visualize_maze(maze: Maze, path: Optional[List[Tuple[int, int]]] = None) -> 
 # CONVENIENCE FUNCTIONS FOR MAZE STORAGE AND COMPRESSION
 # =============================================================================
 
-def mazes_to_npz():
+def mazes_to_npz(mazes: List[Maze], filename: str) -> None:
     """
-    Placeholder function for converting mazes to NPZ format.
-    TODO: Implement this function if needed.
+    Convert a list of Maze objects to NPZ format and save to file.
+    
+    Args:
+        mazes: List of Maze objects to save
+        filename: Path to save the NPZ file
     """
-    pass
+    num_mazes = len(mazes)
+    
+    # Initialize arrays for each field
+    sizes = np.zeros(num_mazes, dtype=np.int8)
+    start_positions = np.zeros((num_mazes, 2), dtype=np.int8)
+    end_positions = np.zeros((num_mazes, 2), dtype=np.int8)
+    
+    # Find the maximum number of walls across all mazes to determine array size
+    max_walls = max(len(maze.walls) for maze in mazes) if mazes else 0
+    
+    # Initialize walls array with -1 as padding value (invalid coordinate)
+    walls = np.full((num_mazes, max_walls, 2), -1, dtype=np.int8)
+    
+    # Fill arrays with maze data
+    for i, maze in enumerate(mazes):
+        sizes[i] = maze.size
+        start_positions[i] = [maze.start_pos[0], maze.start_pos[1]]
+        end_positions[i] = [maze.end_pos[0], maze.end_pos[1]]
+        
+        # Fill walls array
+        for j, wall in enumerate(maze.walls):
+            walls[i, j] = [wall[0], wall[1]]
+    
+    # Save to NPZ file
+    np.savez(filename, 
+             sizes=sizes,
+             start_positions=start_positions,
+             end_positions=end_positions,
+             walls=walls)
+
+
+def npz_to_mazes(filename: str) -> List[Maze]:
+    """
+    Load mazes from NPZ format and recreate Maze objects.
+    
+    Args:
+        filename: Path to the NPZ file
+        
+    Returns:
+        List of Maze objects reconstructed from the NPZ data
+    """
+    # Load NPZ file
+    data = np.load(filename)
+    
+    sizes = data['sizes']
+    start_positions = data['start_positions']
+    end_positions = data['end_positions']
+    walls = data['walls']
+    
+    num_mazes = len(sizes)
+    mazes = []
+    
+    # Reconstruct each maze
+    for i in range(num_mazes):
+        size = int(sizes[i])
+        start_pos = (int(start_positions[i, 0]), int(start_positions[i, 1]))
+        end_pos = (int(end_positions[i, 0]), int(end_positions[i, 1]))
+        
+        # Extract walls, filtering out padding values (-1)
+        maze_walls = []
+        for wall_coord in walls[i]:
+            if wall_coord[0] != -1 and wall_coord[1] != -1:  # Skip padding
+                maze_walls.append((int(wall_coord[0]), int(wall_coord[1])))
+        
+        # Create Maze object
+        maze = Maze(size=size, start_pos=start_pos, end_pos=end_pos, walls=tuple(maze_walls))
+        mazes.append(maze)
+    
+    return mazes
 
 
 def path_to_string_format(path: List[Tuple[int, int]], 
@@ -411,12 +483,53 @@ def main():
     print(visualize_maze(maze_random))
     print("\nLegend: S=Start, E=End, #=Wall, .=Empty")
     
+    # Demonstrate NPZ save/load functionality
+    print("\n\n4. NPZ SAVE/LOAD DEMONSTRATION:")
+    print("-" * 50)
+    
+    # Create a few test mazes
+    test_mazes = [
+        generate_maze_recursive_backtracking(size=6),
+        generate_maze_random(size=7, wall_density=0.3)
+    ]
+    
+    print(f"Created {len(test_mazes)} test mazes for NPZ demonstration")
+    
+    # Save to NPZ
+    npz_filename = "demo_mazes.npz"
+    mazes_to_npz(test_mazes, npz_filename)
+    print(f"Saved mazes to {npz_filename}")
+    
+    # Load from NPZ
+    loaded_mazes = npz_to_mazes(npz_filename)
+    print(f"Loaded {len(loaded_mazes)} mazes from NPZ file")
+    
+    # Verify integrity
+    all_match = True
+    for i, (original, loaded) in enumerate(zip(test_mazes, loaded_mazes)):
+        match = (original.size == loaded.size and 
+                original.start_pos == loaded.start_pos and 
+                original.end_pos == loaded.end_pos and 
+                original.walls == loaded.walls)
+        print(f"Maze {i+1} integrity: {'✅ Match' if match else '❌ Mismatch'}")
+        if not match:
+            all_match = False
+    
+    print(f"NPZ save/load test: {'✅ PASSED' if all_match else '❌ FAILED'}")
+    
+    # Clean up
+    import os
+    if os.path.exists(npz_filename):
+        os.remove(npz_filename)
+        print(f"Cleaned up {npz_filename}")
+    
     print("\n" + "=" * 60)
     print("NOTES:")
     print("- The proper maze guarantees connectivity and a single solution path")
     print("- The random placement may create isolated regions or multiple paths")
     print("- Both mazes have implicit boundary walls (not listed in coordinates)")
     print("- The new Maze class provides convenient navigation methods")
+    print("- NPZ format efficiently stores maze data using int8 arrays")
 
 if __name__ == "__main__":
     main()
