@@ -6,11 +6,7 @@ The maze uses a 0-based index grid where walls are specified as a list of coordi
 
 from dataclasses import dataclass
 import random
-import sys
-import json
-import base64
-import zlib
-from typing import List, Tuple, Set, Dict, Any, Optional
+from typing import List, Tuple, Optional
 
 @dataclass
 class Maze:
@@ -128,7 +124,23 @@ class Maze:
         Returns:
             String representation of the maze
         """
-        return maze_to_string_format(self, add_special_tokens)
+        tokens = []
+        
+        if add_special_tokens:
+            tokens.append("bos")
+        
+        # Add start position
+        tokens.extend(["start", str(self.start_pos[0]), str(self.start_pos[1])])
+        # Add goal position  
+        tokens.extend(["goal", str(self.end_pos[0]), str(self.end_pos[1])])
+        # Add wall positions
+        for wall_x, wall_y in self.walls:
+            tokens.extend(["wall", str(wall_x), str(wall_y)])
+        
+        if add_special_tokens:
+            tokens.append("eos")
+        
+        return " ".join(tokens)
 
 
 def generate_maze_recursive_backtracking(size: int = 10) -> Maze:
@@ -316,38 +328,6 @@ def mazes_to_npz():
     TODO: Implement this function if needed.
     """
     pass
-
-def maze_to_string_format(maze: Maze, 
-                         add_special_tokens: bool = True) -> str:
-    """
-    Convert maze data to the format:
-    "bos start x y goal x y wall x1 y1 wall x2 y2 ... wall xn yn eos"
-    
-    Args:
-        maze: Maze to convert
-        add_special_tokens: Whether to add bos/eos tokens (default True for training)
-    
-    Returns:
-        String representation of the maze
-    """
-    start_pos, end_pos, walls = maze.start_pos, maze.end_pos, maze.walls
-    tokens = []
-    
-    if add_special_tokens:
-        tokens.append("bos")
-    
-    # Add start position
-    tokens.extend(["start", str(start_pos[0]), str(start_pos[1])])
-    # Add goal position  
-    tokens.extend(["goal", str(end_pos[0]), str(end_pos[1])])
-    # Add wall positions
-    for wall_x, wall_y in walls:
-        tokens.extend(["wall", str(wall_x), str(wall_y)])
-    
-    if add_special_tokens:
-        tokens.append("eos")
-    
-    return " ".join(tokens)
 
 
 def path_to_string_format(path: List[Tuple[int, int]], 
