@@ -197,7 +197,7 @@ def generate_and_save_maze_training_data(num_mazes: int = 1000,
                                         tokenizer_name: str = "gpt2",
                                         test_split_ratio: float = 0.1) -> None:
     """
-    Complete pipeline: generate mazes, convert to strings, and save as tokenized training data.
+    Complete pipeline: generate mazes, save as npz, convert to strings, and save as tokenized training data.
     
     Args:
         num_mazes: Number of mazes to generate
@@ -240,28 +240,258 @@ def generate_and_save_maze_training_data(num_mazes: int = 1000,
     print(f"Complete pipeline finished. Data saved to {output_dir}")
 
 
-def main():
-    """Example usage of the maze training data generation pipeline."""
-    print("Maze Training Data Generation Pipeline")
-    print("=" * 50)
+def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int = 4, 
+                      backtrack_gen: bool = True, min_length: int = 5, max_steps: int = 1000,
+                      save_results: bool = False):
+    """
+    Run multiple maze searches and track statistics comparing A* vs Beam Search.
+    Only accepts mazes where beam search found a solution, and A*'s solution is at least min_length.
     
-    # Example: Generate a small dataset
-    beam_search_params = {
-        'beam_size': 4,
-        'max_steps': 1000
+    Args:
+        num_trials: Number of accepted maze instances to test
+        maze_size: Size of each maze (maze_size x maze_size)
+        beam_size: Beam width for beam search
+        backtrack_gen: Whether to generate mazes using backtracking (true), or randomly (false).
+        min_length: Minimum length of A* solution required to accept a maze.
+        max_steps: Maximum steps before giving up for A* and beam search.
+        save_results: Whether to save the generated mazes & search results.
+    """
+
+    # Statistics tracking
+    stats = {
+        'total_generation_trials': 0,  # Total number of mazes generated
+        'astar_only_solutions': 0,     # A* found solution but beam didn't
+        'beam_accepted_mazes': 0,      # Beam search found solution (accepted)
+        'both_same_solution': 0,       # Both find same solution
+        'both_different_solution': 0,  # Both find solution, beam is longer
+        'neither': 0,                  # Neither finds solution
+        'total_astar_solutions': 0,   # Total A* solutions found
+        'total_beam_solutions': 0,    # Total beam solutions found
+        'cost_differences': [],        # List of (astar_cost, beam_cost) when both find solutions
+        'accepted_mazes': [],          # List of accepted maze data for saving
     }
     
-    generate_and_save_maze_training_data(
-        num_mazes=100,
-        maze_size=10,
-        output_dir="data/mazes_example",
-        beam_search_params=beam_search_params,
-        tokenizer_name="gpt2",
-        test_split_ratio=0.1
-    )
+    print(f"Running {num_trials} accepted maze search trials...")
+    print(f"Maze size: {maze_size}x{maze_size}, Beam size: {beam_size}, Min length: {min_length}")
+    print("=" * 60)
     
-    print("\nExample completed successfully!")
+    accepted_trials = 0
+    
+    while accepted_trials < num_trials:
+        stats['total_generation_trials'] += 1
+        print(f"\nGenerating maze {stats['total_generation_trials']} (accepted: {accepted_trials}/{num_trials})")
+        
+        # Generate maze
+        if backtrack_gen:
+            maze = generate_maze_recursive_backtracking(size=maze_size)
+        else:
+            maze = generate_maze_random(size=maze_size, wall_density=0.4)
+        
+        # Create beam search instance using the maze's navigation methods
+        beam_search = AStarBeamSearch(
+            next_states=maze.get_neighbors,
+            heuristic_fn=maze.manhattan_distance,
+            is_goal_fn=maze.is_goal,
+            cost_fn=None  # Use additive costs (g + step_cost)
+        )
+        
+        # Run A* search first to check solution length
+        astar_solution, astar_cost = beam_search.solve_normal_astar(
+            start_state=maze.start_pos,
+            max_steps=max_steps
+        )
+        
+        # Check if maze meets minimum length requirement
+        if astar_solution is None or len(astar_solution) < min_length:
+            print(f"  Rejected: A* solution length {len(astar_solution) if astar_solution else 'None'} < {min_length}")
+            continue
+        
+        # Run beam search
+        beam_solution, _, _, beam_cost = beam_search.solve(
+            start_state=maze.start_pos,
+            beam_size=beam_size,
+            max_steps=max_steps
+        )
+        
+        # Update statistics
+        astar_found = astar_solution is not None
+        beam_found = beam_solution is not None
+        
+        if astar_found:
+            stats['total_astar_solutions'] += 1
+        if beam_found:
+            stats['total_beam_solutions'] += 1
+        
+        # Check acceptance criteria: beam search must find a solution
+        if beam_found:
+            # Maze accepted - beam search found solution
+            accepted_trials += 1
+            stats['beam_accepted_mazes'] += 1
+            
+            print(f"  Accepted: Beam search found solution (length: {len(beam_solution)}, cost: {beam_cost:.2f})")
+            print(f"Trial {accepted_trials}/{num_trials}")
+            
+            # Store maze data for saving
+            maze_data = {
+                'maze': maze,
+                'beam_solution': beam_solution,
+                'beam_cost': beam_cost,
+                'astar_cost': astar_cost if astar_solution is not None else float('inf')
+            }
+            stats['accepted_mazes'].append(maze_data)
+            
+        # Update comparison statistics
+        if astar_found and beam_found:
+            if astar_solution == beam_solution:
+                stats['both_same_solution'] += 1
+                print(f"  ✓ Both found same solution (length: {len(astar_solution)})")
+            else:
+                stats['both_different_solution'] += 1
+                stats['cost_differences'].append((astar_cost, beam_cost))
+                print(f"  ⚠ Both found solutions but different:")
+                print(f"    A* length: {len(astar_solution)}, cost: {astar_cost:.2f}")
+                print(f"    Beam length: {len(beam_solution)}, cost: {beam_cost:.2f}")
+        else:
+            # Maze rejected - beam search didn't find solution
+            if astar_found:
+                stats['astar_only_solutions'] += 1
+                print(f"  Rejected: Only A* found solution (length: {len(astar_solution)})")
+            else:
+                stats['neither'] += 1
+                print(f"  Rejected: Neither found solution")
+    
+    # Print summary statistics
+    print("\n" + "=" * 60)
+    print("SUMMARY STATISTICS")
+    print("=" * 60)
+    print(f"Total mazes generated: {stats['total_generation_trials']}")
+    print(f"Accepted mazes (beam found solution): {stats['beam_accepted_mazes']}")
+    print(f"Acceptance rate: {100*stats['beam_accepted_mazes']/stats['total_generation_trials']:.1f}%")
+    print(f"A* found solution but beam didn't: {stats['astar_only_solutions']}")
+    print(f"A* success rate: {stats['total_astar_solutions']}/{stats['total_generation_trials']} ({100*stats['total_astar_solutions']/stats['total_generation_trials']:.1f}%)")
+    print(f"Beam success rate: {stats['total_beam_solutions']}/{stats['total_generation_trials']} ({100*stats['total_beam_solutions']/stats['total_generation_trials']:.1f}%)")
+    print()
+    print("Solution comparison (accepted mazes only):")
+    print(f"  Both found same solution: {stats['both_same_solution']} ({100*stats['both_same_solution']/stats['beam_accepted_mazes']:.1f}%)")
+    print(f"  Both found different solutions: {stats['both_different_solution']} ({100*stats['both_different_solution']/stats['beam_accepted_mazes']:.1f}%)")
+    
+    # Cost analysis when both found solutions
+    if stats['cost_differences']:
+        print(f"\nCost analysis (when both found solutions):")
+        astar_costs = [cost[0] for cost in stats['cost_differences']]
+        beam_costs = [cost[1] for cost in stats['cost_differences']]
+        cost_ratios = [beam_cost/astar_cost for astar_cost, beam_cost in stats['cost_differences']]
+        
+        print(f"  Average A* cost: {sum(astar_costs)/len(astar_costs):.2f}")
+        print(f"  Average beam cost: {sum(beam_costs)/len(beam_costs):.2f}")
+        print(f"  Average cost ratio (beam/A*): {sum(cost_ratios)/len(cost_ratios):.2f}")
+        print(f"  Max cost ratio: {max(cost_ratios):.2f}")
+        print(f"  Min cost ratio: {min(cost_ratios):.2f}")
+    
+    # Save results if requested
+    if save_results and stats['accepted_mazes']:
+        print(f"\nSaving results for {len(stats['accepted_mazes'])} accepted mazes...")
+        
+        # Extract maze data for saving
+        mazes = []
+        for maze_data in stats['accepted_mazes']:
+            maze = maze_data['maze']
+            mazes.append(maze)
+        
+        # Save mazes using the multi-maze storage function
+        # TODO: Implement save_multiple_mazes_compressed function
+        maze_filename = f"beam_search_mazes_size{maze_size}_beam{beam_size}_count{len(stats['accepted_mazes'])}.txt"
+        # save_multiple_mazes_compressed(maze_tuples, maze_filename)
+        print(f"Would save {len(mazes)} mazes to '{maze_filename}' (function not implemented)")
+        
+        # Save search results data
+        results_filename = f"beam_search_results_size{maze_size}_beam{beam_size}_count{len(stats['accepted_mazes'])}.txt"
+        with open(results_filename, 'w') as f:
+            f.write("Beam Search Experiment Results\n")
+            f.write("=" * 40 + "\n\n")
+            
+            # Write experiment parameters
+            f.write("Experiment Parameters:\n")
+            f.write(f"  Maze size: {maze_size}x{maze_size}\n")
+            f.write(f"  Beam size: {beam_size}\n")
+            f.write(f"  Generation method: {'recursive_backtracking' if backtrack_gen else 'random'}\n")
+            f.write(f"  Max steps: {max_steps}\n")
+            f.write(f"  Total generation trials: {stats['total_generation_trials']}\n")
+            f.write(f"  Accepted mazes: {len(stats['accepted_mazes'])}\n\n")
+            
+            # Write statistics summary
+            f.write("Statistics Summary:\n")
+            f.write(f"  Acceptance rate: {100*stats['beam_accepted_mazes']/stats['total_generation_trials']:.1f}%\n")
+            f.write(f"  A* found solution but beam didn't: {stats['astar_only_solutions']}\n")
+            f.write(f"  A* success rate: {stats['total_astar_solutions']}/{stats['total_generation_trials']} ({100*stats['total_astar_solutions']/stats['total_generation_trials']:.1f}%)\n")
+            f.write(f"  Beam success rate: {stats['total_beam_solutions']}/{stats['total_generation_trials']} ({100*stats['total_beam_solutions']/stats['total_generation_trials']:.1f}%)\n")
+            f.write(f"  Both found same solution: {stats['both_same_solution']} ({100*stats['both_same_solution']/stats['beam_accepted_mazes']:.1f}%)\n")
+            f.write(f"  Both found different solutions: {stats['both_different_solution']} ({100*stats['both_different_solution']/stats['beam_accepted_mazes']:.1f}%)\n")
+            
+            # Write detailed maze results
+            f.write("Detailed Maze Results, first five mazes:\n")
+            f.write("=" * 20 + "\n\n")
+            
+            for i, maze_data in enumerate(stats['accepted_mazes'][:5]):
+                maze = maze_data['maze']
+                f.write(f"Maze {i+1}:\n")
+                f.write(f"  Start: {maze.start_pos}, End: {maze.end_pos}, Size: {maze.size}x{maze.size}\n")
+                f.write(f"  Walls: {len(maze.walls)} walls\n")
+                
+                beam_solution = maze_data['beam_solution']
+                beam_cost = maze_data['beam_cost']
+                astar_cost = maze_data['astar_cost']
+                
+                f.write(f"  Beam solution: {len(beam_solution)} steps, cost {beam_cost:.2f}\n")
+                f.write(f"  A* solution cost: {astar_cost:.2f}\n")
+                
+                # Create maze visualizations with paths
+                f.write(f"\n  Maze visualization with beam search path:\n")
+                beam_visualization = maze.visualize(beam_solution)
+                f.write("  ")
+                f.write(beam_visualization.replace('\n', '\n  '))
+                f.write("\n")
+                
+                f.write(f"\n  Legend: S=Start, E=End, #=Wall, arrows show beam search path direction\n")
+                f.write("\n")
+        
+        print(f"Saved detailed results to '{results_filename}'")
+        print("Save completed successfully!")
+    elif save_results:
+        print("\nNo accepted mazes to save.")
+    else:
+        print(f"\nNot saving results (save_results=False)")
 
+
+def main():
+    """Example usage of the maze training data generation pipeline."""
+    
+    # print("Maze Training Data Generation Pipeline")
+    # print("=" * 50)
+    
+    # # Example: Generate a small dataset
+    # beam_search_params = {
+    #     'beam_size': 4,
+    #     'max_steps': 1000
+    # }
+    
+    # generate_and_save_maze_training_data(
+    #     num_mazes=100,
+    #     maze_size=10,
+    #     output_dir="data/mazes_example",
+    #     beam_search_params=beam_search_params,
+    #     tokenizer_name="gpt2",
+    #     test_split_ratio=0.1
+    # )
+    
+    # print("\nExample completed successfully!")
+
+    # print("\n" + "="*80)
+    # print("BATCH TESTING")
+    # print("="*80)
+    
+    # Run batch testing
+    batch_maze_search(num_trials=100, maze_size=10, beam_size=4, backtrack_gen=False, min_length=10, save_results=True)
 
 if __name__ == "__main__":
     main()
