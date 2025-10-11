@@ -355,7 +355,7 @@ def mazes_to_npz(mazes: List[Maze], filename: str) -> None:
             walls[i, j] = [wall[0], wall[1]]
     
     # Save to NPZ file
-    np.savez(filename, 
+    np.savez_compressed(filename, 
              sizes=sizes,
              start_positions=start_positions,
              end_positions=end_positions,
