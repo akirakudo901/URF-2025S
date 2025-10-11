@@ -115,12 +115,14 @@ class Maze:
         """
         return visualize_maze(self, path)
     
-    def to_string_format(self, add_special_tokens: bool = True) -> str:
+    def to_string_format(self, add_special_tokens: bool = True, bos: str="bos", eos: str="eos") -> str:
         """
         Convert maze data to string format for training.
         
         Args:
             add_special_tokens: Whether to add bos/eos tokens
+            bos: String put at beginning, default: 'bos'
+            eos: String put at end, default: 'eos'
             
         Returns:
             String representation of the maze
@@ -128,7 +130,7 @@ class Maze:
         tokens = []
         
         if add_special_tokens:
-            tokens.append("bos")
+            tokens.append(bos)
         
         # Add start position
         tokens.extend(["start", str(self.start_pos[0]), str(self.start_pos[1])])
@@ -139,7 +141,7 @@ class Maze:
             tokens.extend(["wall", str(wall_x), str(wall_y)])
         
         if add_special_tokens:
-            tokens.append("eos")
+            tokens.append(eos)
         
         return " ".join(tokens)
 
