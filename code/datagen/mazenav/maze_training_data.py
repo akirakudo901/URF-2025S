@@ -291,6 +291,8 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
             maze_data = {
                 'maze': maze,
                 'beam_solution': beam_solution,
+                'state_matrix': state_matrix, 
+                'bp_matrix': bp_matrix,
                 'beam_cost': beam_cost,
                 'astar_cost': astar_cost if astar_solution is not None else float('inf')
             }
@@ -312,20 +314,19 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
     print("SUMMARY STATISTICS")
     print("=" * 60)
     # Calculate derived statistics
-    beam_accepted_mazes = len(stats['accepted_mazes'])  # Same as total_beam_solutions
-    total_beam_solutions = beam_accepted_mazes  # Since we only accept when beam finds solution
+    total_beam_solutions = len(stats['accepted_mazes'])
     astar_only_solutions = stats['total_astar_solutions'] - stats['both_same_solution'] - stats['both_different_solution']
     
     print(f"Total mazes generated: {stats['total_generation_trials']}")
-    print(f"Accepted mazes (beam found solution): {beam_accepted_mazes}")
-    print(f"Acceptance rate: {100*beam_accepted_mazes/stats['total_generation_trials']:.1f}%")
+    print(f"Accepted mazes (beam found solution): {total_beam_solutions}")
+    print(f"Acceptance rate: {100*total_beam_solutions/stats['total_generation_trials']:.1f}%")
     print(f"A* found solution but beam didn't: {astar_only_solutions}")
     print(f"A* success rate: {stats['total_astar_solutions']}/{stats['total_generation_trials']} ({100*stats['total_astar_solutions']/stats['total_generation_trials']:.1f}%)")
     print(f"Beam success rate: {total_beam_solutions}/{stats['total_generation_trials']} ({100*total_beam_solutions/stats['total_generation_trials']:.1f}%)")
     print()
     print("Solution comparison (accepted mazes only):")
-    print(f"  Both found same solution: {stats['both_same_solution']} ({100*stats['both_same_solution']/beam_accepted_mazes:.1f}%)")
-    print(f"  Both found different solutions: {stats['both_different_solution']} ({100*stats['both_different_solution']/beam_accepted_mazes:.1f}%)")
+    print(f"  Both found same solution: {stats['both_same_solution']} ({100*stats['both_same_solution']/total_beam_solutions:.1f}%)")
+    print(f"  Both found different solutions: {stats['both_different_solution']} ({100*stats['both_different_solution']/total_beam_solutions:.1f}%)")
     
     # Cost analysis when both found solutions
     if stats['cost_differences']:
@@ -373,12 +374,12 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
             
             # Write statistics summary
             f.write("Statistics Summary:\n")
-            f.write(f"  Acceptance rate: {100*beam_accepted_mazes/stats['total_generation_trials']:.1f}%\n")
+            f.write(f"  Acceptance rate: {100*total_beam_solutions/stats['total_generation_trials']:.1f}%\n")
             f.write(f"  A* found solution but beam didn't: {astar_only_solutions}\n")
             f.write(f"  A* success rate: {stats['total_astar_solutions']}/{stats['total_generation_trials']} ({100*stats['total_astar_solutions']/stats['total_generation_trials']:.1f}%)\n")
             f.write(f"  Beam success rate: {total_beam_solutions}/{stats['total_generation_trials']} ({100*total_beam_solutions/stats['total_generation_trials']:.1f}%)\n")
-            f.write(f"  Both found same solution: {stats['both_same_solution']} ({100*stats['both_same_solution']/beam_accepted_mazes:.1f}%)\n")
-            f.write(f"  Both found different solutions: {stats['both_different_solution']} ({100*stats['both_different_solution']/beam_accepted_mazes:.1f}%)\n")
+            f.write(f"  Both found same solution: {stats['both_same_solution']} ({100*stats['both_same_solution']/total_beam_solutions:.1f}%)\n")
+            f.write(f"  Both found different solutions: {stats['both_different_solution']} ({100*stats['both_different_solution']/total_beam_solutions:.1f}%)\n")
             
             # Write detailed maze results
             f.write("Detailed Maze Results, first five mazes:\n")
