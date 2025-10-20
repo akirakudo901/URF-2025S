@@ -186,24 +186,6 @@ def _state_matrix_to_string_format(state_matrix: List[List[Optional[Tuple[int, i
     return result
 
 
-def _maze_to_hash(maze: Maze) -> str:
-    """
-    Generate a unique hash for a maze configuration.
-    
-    Args:
-        maze: Maze object to hash
-        
-    Returns:
-        String hash representing the maze configuration
-    """
-    # Create a deterministic representation of the maze
-    sorted_walls = sorted(maze.walls) # Sort wall
-    # Create hash string from maze components
-    maze_str = f"{maze.size}_{maze.start_pos[0]}_{maze.start_pos[1]}_{maze.end_pos[0]}_{maze.end_pos[1]}_{'_'.join([f'{w[0]}_{w[1]}' for w in sorted_walls])}"
-    # Use Python's built-in hash function for a compact representation
-    return str(hash(maze_str))
-
-
 def _extend_backpointer_matrix(bp_matrix: List[List[Optional[int]]]) -> List[List[str]]:
     """
     Extend backpointer matrix to align with tokenized state matrix.
@@ -741,7 +723,7 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
                 maze = generate_maze_random(size=maze_size, wall_density=0.4)
             
             # Check for duplicates
-            maze_hash = _maze_to_hash(maze)
+            maze_hash = hash(maze)
             if maze_hash in seen_mazes:
                 duplicate_count += 1
                 logger.debug(f"Trial {stats.total_generation_trials + 1}: Duplicate maze detected, skipping")
