@@ -96,9 +96,9 @@ class AStarBeamSearch(Generic[StateT]):
 
         Returns:
             (solution_path_or_None, state_matrix, backpointer_matrix, solution_cost)
-            - state_matrix: shape [k, L] where L = iterations performed; entries are states or None
-            - backpointer_matrix: shape [k, L]; entries are parent rank indices (int) or None
-            - solution_cost: cost of the solution path, or float('inf') if no solution found
+            - state_matrix, List[List[Optional[StateT]]]:  shape [k, L] where L = iterations performed; entries are states or None
+            - backpointer_matrix, List[List[Optional[int]]]: shape [k, L]; entries are parent rank indices (int) or None
+            - solution_cost, float: cost of the solution path, or float('inf') if no solution found
         """
         if beam_size <= 0:
             raise ValueError("beam_size must be positive")
