@@ -19,10 +19,11 @@ class Maze:
     walls: Tuple[Tuple[int, int], ...]
     
     def __post_init__(self):
-        """Validate maze data after initialization."""
-        # Ensure walls is a tuple of tuples
+        """Validate maze data after initialization and ensure walls are sorted."""
+        # Ensure walls is a sorted tuple of tuples
         if isinstance(self.walls, list) or isinstance(self.walls, tuple):
-            self.walls = tuple(tuple(wall) for wall in self.walls)
+            # Sort walls by coordinate before storing
+            self.walls = tuple(sorted(tuple(tuple(wall) for wall in self.walls)))
         
         # Validate start & end positions are valid
         if not self.is_valid_position(self.start_pos):
