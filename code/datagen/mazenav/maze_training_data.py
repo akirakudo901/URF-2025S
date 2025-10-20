@@ -562,7 +562,8 @@ def _npz_to_maze_beam_sols(filename: str):
 
 def _save_search_results(stats: MazeSearchStats, maze_size: int, beam_size: int, 
                         backtrack_gen: bool, max_steps: int, logger: logging.Logger,
-                        save_path: Optional[str] = None, tokenizer=None):
+                        save_path: Optional[str] = None, tokenizer=None, train_test_split: float = 0.8, 
+                        seed: Optional[int] = None):
     """Save search results to files."""
     if not stats.accepted_mazes:
         logger.warning("No accepted mazes to save.")
@@ -577,20 +578,67 @@ def _save_search_results(stats: MazeSearchStats, maze_size: int, beam_size: int,
     beam_sols      = [maze_data['beam_solution'] for maze_data in stats.accepted_mazes]
     beam_costs     = [maze_data['beam_cost']     for maze_data in stats.accepted_mazes]
     
-    # Save in npz format
-    basename = f"{maze_size}x{maze_size}_{beam_size}beam_{'backtrack' if backtrack_gen else 'random'}"
-    maze_path = f"{save_path}/{basename}_mazes.npz"
-    beamsol_path = f"{save_path}/{basename}_beam_sols.npz"
-    mazes_to_npz(mazes, maze_path)
-    _maze_beam_sols_to_npz(state_matrices, bp_matrices, beam_sols, beam_costs, beamsol_path)
+    # Split data into train/test sets using randomized indexing
+    indices = list(range(len(mazes)))
     
-    # Load and tokenize
-    tokenized_mazes = load_and_tokenize_mazes(maze_path, tokenizer)  # Shape: [B, max_length]
-    result = load_and_tokenize_beam_sols(beamsol_path, tokenizer)
-    state_matrices = result['state_matrices']  # Shape: [B, max_beam_size, max_sequence_length]
-    bp_matrices = result['bp_matrices']        # Shape: [B, max_beam_size, max_sequence_length]
-    beam_sols = result['beam_sols']            # Shape: [B, max_solution_length]
-    beam_costs = result['beam_costs']          # Shape: [B]
+    # Set random seed for deterministic shuffling if provided
+    if seed is not None:
+        random.seed(seed)
+        logger.info(f"Using deterministic seed {seed} for train/test split")
+    
+    random.shuffle(indices)  # Randomize the order
+    
+    train_size = int(len(mazes) * train_test_split)
+    train_indices, test_indices = indices[:train_size], indices[train_size:]
+    
+    # Split all data arrays
+    train_mazes = [mazes[i] for i in train_indices]
+    train_state_matrices = [state_matrices[i] for i in train_indices]
+    train_bp_matrices = [bp_matrices[i] for i in train_indices]
+    train_beam_sols = [beam_sols[i] for i in train_indices]
+    train_beam_costs = [beam_costs[i] for i in train_indices]
+    
+    test_mazes = [mazes[i] for i in test_indices]
+    test_state_matrices = [state_matrices[i] for i in test_indices]
+    test_bp_matrices = [bp_matrices[i] for i in test_indices]
+    test_beam_sols = [beam_sols[i] for i in test_indices]
+    test_beam_costs = [beam_costs[i] for i in test_indices]
+    
+    logger.info(f"Split {len(mazes)} mazes into {len(train_mazes)} training and {len(test_mazes)} testing samples")
+    
+    # Save in npz format - separate train and test files
+    basename = f"{maze_size}x{maze_size}_{beam_size}beam_{'backtrack' if backtrack_gen else 'random'}"
+    
+    # Save training data
+    train_maze_path = f"{save_path}/{basename}_train_mazes.npz"
+    train_beamsol_path = f"{save_path}/{basename}_train_beam_sols.npz"
+    mazes_to_npz(train_mazes, train_maze_path)
+    _maze_beam_sols_to_npz(train_state_matrices, train_bp_matrices, train_beam_sols, train_beam_costs, train_beamsol_path)
+    
+    # Save testing data
+    test_maze_path = f"{save_path}/{basename}_test_mazes.npz"
+    test_beamsol_path = f"{save_path}/{basename}_test_beam_sols.npz"
+    mazes_to_npz(test_mazes, test_maze_path)
+    _maze_beam_sols_to_npz(test_state_matrices, test_bp_matrices, test_beam_sols, test_beam_costs, test_beamsol_path)
+    
+    # Load and tokenize training data
+    tokenized_train_mazes = load_and_tokenize_mazes(train_maze_path, tokenizer)  # Shape: [B_train, max_length]
+    train_result = load_and_tokenize_beam_sols(train_beamsol_path, tokenizer)
+    train_state_matrices = train_result['state_matrices']  # Shape: [B_train, max_beam_size, max_sequence_length]
+    train_bp_matrices = train_result['bp_matrices']        # Shape: [B_train, max_beam_size, max_sequence_length]
+    train_beam_sols = train_result['beam_sols']            # Shape: [B_train, max_solution_length]
+    train_beam_costs = train_result['beam_costs']          # Shape: [B_train]
+    
+    # Load and tokenize testing data
+    tokenized_test_mazes = load_and_tokenize_mazes(test_maze_path, tokenizer)  # Shape: [B_test, max_length]
+    test_result = load_and_tokenize_beam_sols(test_beamsol_path, tokenizer)
+    test_state_matrices = test_result['state_matrices']  # Shape: [B_test, max_beam_size, max_sequence_length]
+    test_bp_matrices = test_result['bp_matrices']        # Shape: [B_test, max_beam_size, max_sequence_length]
+    test_beam_sols = test_result['beam_sols']            # Shape: [B_test, max_solution_length]
+    test_beam_costs = test_result['beam_costs']          # Shape: [B_test]
+    
+    logger.info(f"Saved training data: {train_maze_path}, {train_beamsol_path}")
+    logger.info(f"Saved testing data: {test_maze_path}, {test_beamsol_path}")
     
 
     """
@@ -674,7 +722,8 @@ def _save_search_results(stats: MazeSearchStats, maze_size: int, beam_size: int,
 
 def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int = 4, 
                       backtrack_gen: bool = True, min_length: int = 5, max_steps: int = 1000,
-                      save_path: Optional[str] = None, tokenizer=None, verbose: bool = False):
+                      save_path: Optional[str] = None, tokenizer=None, verbose: bool = False,
+                      train_test_split: float = 0.8, seed: Optional[int] = None):
     """
     Run multiple maze searches and track statistics comparing A* vs Beam Search.
     Only accepts mazes where beam search found a solution, and A*'s solution is at least min_length.
@@ -689,6 +738,8 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
         save_path: Path to save generated mazes & search results as npz, if provided.
         tokenizer: Tokenizer used for both maze and paths.
         verbose: Whether to use verbose logging (DEBUG level)
+        train_test_split: Proportion of data to use for training (default 0.8, meaning 80% train, 20% test)
+        seed: Random seed for deterministic train/test split. If None, uses random seed each time.
     
     Returns:
         MazeSearchStats object containing all statistics
@@ -759,7 +810,7 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
         
         # Save results if requested
         if save_path:
-            _save_search_results(stats, maze_size, beam_size, backtrack_gen, max_steps, logger, save_path, tokenizer)
+            _save_search_results(stats, maze_size, beam_size, backtrack_gen, max_steps, logger, save_path, tokenizer, train_test_split, seed)
         else:
             logger.info("Not saving results (save_results=False)")
     
