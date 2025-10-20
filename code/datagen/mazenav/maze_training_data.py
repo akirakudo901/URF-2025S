@@ -13,19 +13,23 @@ import json
 import os
 import random
 import torch
+import numpy as np
 import logging
 from typing import List, Tuple, Optional, Dict, Any
 from transformers import GPT2TokenizerFast
 
 # Import maze generation functions
 from generate_maze import (
+    Maze,
     generate_maze_recursive_backtracking, 
     generate_maze_random,
-    Maze
+    mazes_to_npz,
+    npz_to_mazes,
+    path_to_string_format
 )
 
 # Import beam search functions
-from astar_beam_search import AStarBeamSearch
+from astar_beam_search import AStarBeamSearch, StateT
 
 # Import logging utilities
 from logging_utils import (
@@ -38,55 +42,43 @@ from logging_utils import (
     setup_logging
 )
 
-def load_and_tokenize_mazes(maze_strings_file: str,
-                           tokenizer_name: str = "gpt2",
-                           max_length: int = 1024) -> Tuple[torch.Tensor, torch.Tensor]:
+def load_and_tokenize_mazes(maze_npz: str,
+                           tokenizer=None) -> torch.Tensor:
     """
-    Load maze strings from file and tokenize them.
+    Load maze npz from file and tokenize them.
     
     Args:
-        maze_strings_file: Path to JSON file containing maze strings
-        tokenizer_name: Name of the tokenizer to use
-        max_length: Maximum sequence length
+        maze_npz: Path to NPZ file containing mazes
+        tokenizer: Tokenizer to use (optional, defaults to GPT2TokenizerFast)
         
     Returns:
-        Tuple of (tokenized_sequences, attention_masks)
-        - tokenized_sequences: torch.Tensor of shape (num_mazes, max_length)
-        - attention_masks: torch.Tensor of shape (num_mazes, max_length)
+        tokenized_sequences: torch.Tensor of shape (num_mazes, max_length)
     """
     # Load tokenizer
-    tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_name)
-    
+    if tokenizer is None:
+        tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
     # Set padding token
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
     # Load maze data
-    # TODO FIX THIS ONCE IMPLEMENTATION OF MAZE SAVING IS DONE
-    maze_data = load_maze_to_be_implemented(maze_strings_file)
-    
+    maze_data = npz_to_mazes(maze_npz)
     # Extract maze strings
-    maze_strings = []
-    for maze_dict in maze_data:
-        maze_string = maze_dict['maze_string']
-        # Add bos and eos tokens
-        maze_string = f"bos {maze_string} eos"
-        maze_strings.append(maze_string)
-    # TODO END FIX UP UNTIL HERE
+    maze_strings = [m.to_string_format(add_special_tokens=False) for m in maze_data]
     
     # Tokenize
     tokenized = tokenizer(
         maze_strings,
         padding=True,
-        truncation=True,
-        max_length=max_length,
+        truncation=False,
+        max_length=None,
         return_tensors="pt"
     )
     
-    return tokenized['input_ids'], tokenized['attention_mask']
+    return tokenized['input_ids']
 
 
-def save_tokenized_maze_data(maze_strings_file: str,
+def save_tokenized_maze_data(maze_npz: str,
                             output_dir: str,
                             tokenizer_name: str = "gpt2",
                             pad_token_id: int = 50256,
@@ -94,12 +86,12 @@ def save_tokenized_maze_data(maze_strings_file: str,
                             test_split_ratio: float = 0.1,
                             random_seed: int = 42) -> None:
     """
-    Load maze strings, tokenize them, and save as torch files compatible with training.py.
+    Load mazes, tokenize them, and save as torch files compatible with training.py.
     
     This creates two files, prompt_sequences.pt and prompt_mask.pt (padding masks).
     
     Args:
-        maze_strings_file: Path to JSON file containing maze strings
+        maze_npz: Path to JSON file containing maze strings
         output_dir: Directory to save the torch files
         tokenizer_name: Name of the tokenizer to use
         pad_token_id: Token ID to use for padding
@@ -113,9 +105,9 @@ def save_tokenized_maze_data(maze_strings_file: str,
     os.makedirs(output_dir, exist_ok=True)
     
     # Tokenize mazes
-    print(f"Loading and tokenizing mazes from {maze_strings_file}...")
-    tokenized_sequences, attention_masks = load_and_tokenize_mazes(
-        maze_strings_file, tokenizer_name, max_length
+    print(f"Loading and tokenizing mazes from {maze_npz}...")
+    tokenized_sequences = load_and_tokenize_mazes(
+        maze_npz, tokenizer
     )
     
     # Split into train/test
@@ -168,6 +160,147 @@ def save_tokenized_maze_data(maze_strings_file: str,
     print(f"  Test: {len(test_indices)} mazes")
     print(f"  Sequence shape: {train_sequences.shape}")
 
+
+def _state_matrix_to_string_format(state_matrix: List[List[Optional[Tuple[int, int]]]]) -> List[List[str]]:
+    """
+    Convert state matrix to string format for tokenization.
+    
+    Args:
+        state_matrix: List[List[Optional[Tuple[int, int]]]] of shape [K, L] where K=beam_size, L=iterations
+        Each entry is either a (x, y) position tuple or None
+        
+    Returns:
+        List[List[str]] of shape [K, 3L] where each (x, y) becomes ["beam", str(x), str(y)]
+        and None entries become ["beam", "None", "None"]
+    """
+    result = []
+    for beam_idx, beam_row in enumerate(state_matrix):
+        string_row = []
+        for state in beam_row:
+            if state is not None:
+                x, y = state
+                string_row.extend(["beam", str(x), str(y)])
+            else:
+                string_row.extend(["beam", "None", "None"])
+        result.append(string_row)
+    return result
+
+
+def _extend_backpointer_matrix(bp_matrix: List[List[Optional[int]]]) -> List[List[str]]:
+    """
+    Extend backpointer matrix to align with tokenized state matrix.
+    
+    Args:
+        bp_matrix: List[List[Optional[int]]] of shape [K, L] where entries are parent rank indices or None
+        
+    Returns:
+        List[List[str]] of shape [K, 3L] where each bp entry becomes [str(bp), str(rank), str(rank)]
+        and None entries become ["None", "None", "None"]
+    """
+    result = []
+    for rank_idx, bp_row in enumerate(bp_matrix):
+        extended_row = []
+        for bp_val in bp_row:
+            if bp_val is not None:
+                extended_row.extend([str(bp_val), str(rank_idx), str(rank_idx)])
+            else:
+                extended_row.extend(["None", "None", "None"])
+        result.append(extended_row)
+    return result
+
+
+def load_and_tokenize_beam_sols(beam_sols_npz: str, tokenizer):
+    """
+    Load beam search solutions from NPZ and tokenize them for training.
+    
+    Args:
+        beam_sols_npz: Path to NPZ file containing beam search data
+        tokenizer: Tokenizer to use for converting strings to token IDs
+        
+    Returns:
+        Dict containing tokenized data as PyTorch tensors ready for training
+    """
+    # First load the data
+    state_matrices, bp_matrices, beam_sols, beam_costs = _npz_to_maze_beam_sols(beam_sols_npz)
+    
+    # Convert each state matrix to string format and tokenize
+    tokenized_state_matrices = []
+    for state_matrix in state_matrices:
+        string_matrix = _state_matrix_to_string_format(state_matrix)
+        
+        # Tokenize each row in the matrix
+        tokenized_rows = []
+        for row in string_matrix:
+            tokenized_row = tokenizer.encode(" ".join(row))  # Shape: [3L] where L=iterations
+            tokenized_rows.append(tokenized_row)
+        tokenized_state_matrices.append(tokenized_rows)
+    
+    # Extend backpointer matrices to align with tokenized state matrices
+    extended_bp_matrices = []
+    for bp_matrix in bp_matrices:
+        extended_bp = _extend_backpointer_matrix(bp_matrix)
+        # Tokenize each row in the extended backpointer matrix
+        tokenized_rows = []
+        for row in extended_bp:
+            tokenized_row = tokenizer.encode(" ".join(row))  # Shape: [3L] where L=iterations
+            tokenized_rows.append(tokenized_row)
+        extended_bp_matrices.append(tokenized_rows)
+
+    # Convert beam solutions to string format using path_to_string_format
+    tokenized_beam_sols = []
+    for beam_sol in beam_sols:
+        path_string = path_to_string_format(beam_sol, add_special_tokens=True)
+        tokenized_path = tokenizer.encode(path_string)  # Shape: [variable_length]
+        tokenized_beam_sols.append(tokenized_path)
+    
+    # Convert to PyTorch tensors with proper padding
+    num_mazes = len(state_matrices)
+    
+    # Find maximum dimensions for padding
+    max_beam_size = max(len(matrix) for matrix in tokenized_state_matrices) if tokenized_state_matrices else 0
+    max_sequence_length = max(max(len(row) for row in matrix) for matrix in tokenized_state_matrices) if tokenized_state_matrices else 0
+    max_solution_length = max(len(sol) for sol in tokenized_beam_sols) if tokenized_beam_sols else 0
+    
+    # Create padded tensors
+    state_matrices_tensor = torch.full((num_mazes, max_beam_size, max_sequence_length), tokenizer.pad_token_id, dtype=torch.long)  # Shape: [B, max_beam_size, max_sequence_length]
+    bp_matrices_tensor    = torch.full((num_mazes, max_beam_size, max_sequence_length), tokenizer.pad_token_id, dtype=torch.long)  # Shape: [B, max_beam_size, max_sequence_length]
+    beam_sols_tensor      = torch.full((num_mazes, max_solution_length), tokenizer.pad_token_id, dtype=torch.long)  # Shape: [B, max_solution_length]
+    beam_costs_tensor     = torch.tensor(beam_costs, dtype=torch.float32)  # Shape: [B]
+    
+    # Fill tensors with actual data
+    for maze_idx in range(num_mazes):
+        # Fill state matrix tensor
+        state_matrix = tokenized_state_matrices[maze_idx]
+        for beam_idx in range(len(state_matrix)):
+            sequence = state_matrix[beam_idx]
+            state_matrices_tensor[maze_idx, beam_idx, :len(sequence)] = torch.tensor(sequence, dtype=torch.long)
+        
+        # Fill backpointer matrix tensor
+        bp_matrix = extended_bp_matrices[maze_idx]
+        for beam_idx in range(len(bp_matrix)):
+            sequence = bp_matrix[beam_idx]
+            bp_matrices_tensor[maze_idx, beam_idx, :len(sequence)] = torch.tensor(sequence, dtype=torch.long)
+        
+        # Fill beam solution tensor
+        beam_sol = tokenized_beam_sols[maze_idx]
+        beam_sols_tensor[maze_idx, :len(beam_sol)] = torch.tensor(beam_sol, dtype=torch.long)
+    
+    # Create result dictionary with tensors
+    result = {
+        'state_matrices': state_matrices_tensor,
+        'bp_matrices': bp_matrices_tensor, 
+        'beam_sols': beam_sols_tensor,
+        'beam_costs': beam_costs_tensor
+    }
+    
+    print(f"Loaded and tokenized beam search data from {beam_sols_npz}")
+    print(f"  {num_mazes} mazes processed")
+    print(f"  State matrices tensor shape: {state_matrices_tensor.shape}")
+    print(f"  Backpointer matrices tensor shape: {bp_matrices_tensor.shape}")
+    print(f"  Beam solutions tensor shape: {beam_sols_tensor.shape}")
+    print(f"  Beam costs tensor shape: {beam_costs_tensor.shape}")
+    
+    return result
 
 # TODO IF NEEDED, GIVE CHOICE TO GENERATE MAZE WITH RANDOM OR BACKTRACKING
 def generate_and_save_maze_training_data(num_mazes: int = 1000,
@@ -295,9 +428,141 @@ def _run_single_maze_search(maze: Maze, beam_size: int, min_length: int, max_ste
             maze_data=None
         )
 
+def _maze_beam_sols_to_npz(state_matrices : List[List[List[Tuple[int, int]]]], 
+                           bp_matrices : List[List[List[int]]],
+                           beam_sols : List[List[Tuple[int, int]]], 
+                           beam_costs : List[float], 
+                           filename : str):
+    """
+    Save beam search data to NPZ format with proper padding.
+    
+    Args:
+        state_matrices: List of state matrices, each of shape [beam_size, max_steps] with Tuple[int, int] states
+        bp_matrices: List of backpointer matrices, each of shape [beam_size, max_steps] with int indices
+        beam_sols: List of solution paths, each of variable length with Tuple[int, int] positions
+        beam_costs: List of solution costs as floats
+        filename: Path to store beam search data to
+    """
+    num_mazes = len(state_matrices)
+    
+    # Find maximum dimensions across all mazes for proper padding
+    max_beam_size = max(len(matrix) for matrix in state_matrices) if state_matrices else 0
+    max_steps = max(max(len(row) for row in matrix) for matrix in state_matrices) if state_matrices else 0
+    max_solution_length = max(len(sol) for sol in beam_sols) if beam_sols else 0
+    
+    # Initialize arrays with proper paddin
+    padded_state_matrices = np.full((num_mazes, max_beam_size, max_steps, 2), -1, dtype=np.int8)  # Shape: [B, max_beam_size, max_steps, 2]    
+    padded_bp_matrices = np.full((num_mazes, max_beam_size, max_steps), -1, dtype=np.int8)  # Shape: [B, max_beam_size, max_steps]
+    padded_beam_sols = np.full((num_mazes, max_solution_length, 2), -1, dtype=np.int8)  # Shape: [B, max_solution_length, 2]
+    beam_costs_array = np.array(beam_costs, dtype=np.float32)  # Shape: [B]
+    
+    # Fill arrays with actual data
+    for maze_idx in range(num_mazes):
+        # Fill state matrix
+        state_matrix = state_matrices[maze_idx]
+        for beam_idx in range(len(state_matrix)):
+            for step_idx in range(len(state_matrix[beam_idx])):
+                if state_matrix[beam_idx][step_idx] is not None:
+                    x, y = state_matrix[beam_idx][step_idx]
+                    padded_state_matrices[maze_idx, beam_idx, step_idx] = [x, y]
+        
+        # Fill backpointer matrix
+        bp_matrix = bp_matrices[maze_idx]
+        for beam_idx in range(len(bp_matrix)):
+            for step_idx in range(len(bp_matrix[beam_idx])):
+                if bp_matrix[beam_idx][step_idx] is not None:
+                    padded_bp_matrices[maze_idx, beam_idx, step_idx] = bp_matrix[beam_idx][step_idx]
+        
+        # Fill solution path
+        beam_sol = beam_sols[maze_idx]
+        for pos_idx in range(len(beam_sol)):
+            x, y = beam_sol[pos_idx]
+            padded_beam_sols[maze_idx, pos_idx] = [x, y]
+    
+    # Save to NPZ file
+    np.savez_compressed(filename,
+                       state_matrices=padded_state_matrices,
+                       bp_matrices=padded_bp_matrices, 
+                       beam_sols=padded_beam_sols,
+                       beam_costs=beam_costs_array)
+    
+    print(f"Saved beam search data to {filename}")
+    print(f"  {num_mazes} mazes, max beam size: {max_beam_size}, max steps: {max_steps}, max solution length: {max_solution_length}")
+
+
+def _npz_to_maze_beam_sols(filename: str):
+    """
+    Load beam search data from NPZ format and restore original data structures.
+    
+    Args:
+        filename: Path to the NPZ file containing beam search data
+        
+    Returns:
+        Tuple of (state_matrices, bp_matrices, beam_sols, beam_costs) in original format
+    """
+    # Load NPZ file
+    data = np.load(filename)
+    
+    state_matrices_padded = data['state_matrices']  # [num_mazes, max_beam_size, max_steps, 2]
+    bp_matrices_padded = data['bp_matrices']        # [num_mazes, max_beam_size, max_steps]
+    beam_sols_padded = data['beam_sols']            # [num_mazes, max_solution_length, 2]
+    beam_costs_array = data['beam_costs']           # [num_mazes]
+    
+    num_mazes = state_matrices_padded.shape[0]
+    
+    # Restore original data structures
+    state_matrices = []
+    bp_matrices = []
+    beam_sols = []
+    beam_costs = []
+    
+    for maze_idx in range(num_mazes):
+        # Restore state matrix - convert from padded array back to list of lists with None values
+        state_matrix = []
+        for beam_idx in range(state_matrices_padded.shape[1]):
+            beam_states = []
+            for step_idx in range(state_matrices_padded.shape[2]):
+                state_coord = state_matrices_padded[maze_idx, beam_idx, step_idx]
+                if state_coord[0] != -1 and state_coord[1] != -1:  # Not padding
+                    beam_states.append((int(state_coord[0]), int(state_coord[1])))
+                else:
+                    beam_states.append(None)
+            state_matrix.append(beam_states)
+        state_matrices.append(state_matrix)
+        
+        # Restore backpointer matrix - convert from padded array back to list of lists with None values
+        bp_matrix = []
+        for beam_idx in range(bp_matrices_padded.shape[1]):
+            bp_indices = []
+            for step_idx in range(bp_matrices_padded.shape[2]):
+                bp_val = bp_matrices_padded[maze_idx, beam_idx, step_idx]
+                if bp_val != -1:  # Not padding
+                    bp_indices.append(int(bp_val))
+                else:
+                    bp_indices.append(None)
+            bp_matrix.append(bp_indices)
+        bp_matrices.append(bp_matrix)
+        
+        # Restore solution path - convert from padded array back to list of tuples
+        beam_sol = []
+        for pos_idx in range(beam_sols_padded.shape[1]):
+            pos_coord = beam_sols_padded[maze_idx, pos_idx]
+            if pos_coord[0] != -1 and pos_coord[1] != -1:  # Not padding
+                beam_sol.append((int(pos_coord[0]), int(pos_coord[1])))
+        beam_sols.append(beam_sol)
+        
+        # Restore cost
+        beam_costs.append(float(beam_costs_array[maze_idx]))
+    
+    print(f"Loaded beam search data from {filename}")
+    print(f"  {num_mazes} mazes restored to original format")
+    
+    return state_matrices, bp_matrices, beam_sols, beam_costs
+
 
 def _save_search_results(stats: MazeSearchStats, maze_size: int, beam_size: int, 
-                        backtrack_gen: bool, max_steps: int, logger: logging.Logger):
+                        backtrack_gen: bool, max_steps: int, logger: logging.Logger,
+                        save_path: Optional[str] = None, tokenizer=None):
     """Save search results to files."""
     if not stats.accepted_mazes:
         logger.warning("No accepted mazes to save.")
@@ -306,8 +571,45 @@ def _save_search_results(stats: MazeSearchStats, maze_size: int, beam_size: int,
     logger.info(f"Saving results for {len(stats.accepted_mazes)} accepted mazes...")
     
     # Extract maze data for saving
-    mazes = [maze_data['maze'] for maze_data in stats.accepted_mazes]
+    mazes          = [maze_data['maze']          for maze_data in stats.accepted_mazes]
+    state_matrices = [maze_data['state_matrix']  for maze_data in stats.accepted_mazes]
+    bp_matrices    = [maze_data['bp_matrix']     for maze_data in stats.accepted_mazes]
+    beam_sols      = [maze_data['beam_solution'] for maze_data in stats.accepted_mazes]
+    beam_costs     = [maze_data['beam_cost']     for maze_data in stats.accepted_mazes]
     
+    # Save in npz format
+    basename = f"{maze_size}x{maze_size}_{beam_size}beam_{'backtrack' if backtrack_gen else 'random'}"
+    maze_path = f"{save_path}/{basename}_mazes.npz"
+    beamsol_path = f"{save_path}/{basename}_beam_sols.npz"
+    mazes_to_npz(mazes, maze_path)
+    _maze_beam_sols_to_npz(state_matrices, bp_matrices, beam_sols, beam_costs, beamsol_path)
+    
+    # Load and tokenize
+    tokenized_mazes = load_and_tokenize_mazes(maze_path, tokenizer)  # Shape: [B, max_length]
+    result = load_and_tokenize_beam_sols(beamsol_path, tokenizer)
+    state_matrices = result['state_matrices']  # Shape: [B, max_beam_size, max_sequence_length]
+    bp_matrices = result['bp_matrices']        # Shape: [B, max_beam_size, max_sequence_length]
+    beam_sols = result['beam_sols']            # Shape: [B, max_solution_length]
+    beam_costs = result['beam_costs']          # Shape: [B]
+    
+
+    """
+    TODO REMOVE
+    DONE -> First, turn list of mazes into npz
+    DONE -> Then, also format them into string using maze_to_string from generate_maze.py, followed by tokenization with NEW FUNCTION 1
+
+    DONE -> Also, save the state and back pointer matrices as well as beam path in compact format (npz, implement NEW FUNCTION 2)
+    Finally, tokenize those:
+    DONE -> state matrix will first be converted into appropriate string via a variant of path_to_string function from generate_maze.py
+    DONE -> then, the state & backpointers will be adjusted to accommodate for example 3 tokens for each 'step'
+      in beam search (e.g. 'plan' '3' '4'), using NEW FUNCTION 3
+    DONE ->  then, state matrix will be tokenized accordingly using a function (WANNA REUSE NEW FUNCTION 1 IF POSSIBLE)
+    DONE ->  solution path is also tokenized and stored in its own arrays (NEW FUNCTION 4)
+
+    We then finally divide the set into training and testing sets, and then we save the result.
+    TODO REMOVE END
+    """
+
     # Save mazes using the multi-maze storage function
     # TODO: Implement save_multiple_mazes_compressed function
     maze_filename = f"beam_search_mazes_size{maze_size}_beam{beam_size}_count{len(stats.accepted_mazes)}.txt"
@@ -372,7 +674,7 @@ def _save_search_results(stats: MazeSearchStats, maze_size: int, beam_size: int,
 
 def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int = 4, 
                       backtrack_gen: bool = True, min_length: int = 5, max_steps: int = 1000,
-                      save_results: bool = False, verbose: bool = False):
+                      save_path: Optional[str] = None, tokenizer=None, verbose: bool = False):
     """
     Run multiple maze searches and track statistics comparing A* vs Beam Search.
     Only accepts mazes where beam search found a solution, and A*'s solution is at least min_length.
@@ -384,7 +686,8 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
         backtrack_gen: Whether to generate mazes using backtracking (true), or randomly (false).
         min_length: Minimum length of A* solution required to accept a maze.
         max_steps: Maximum steps before giving up for A* and beam search.
-        save_results: Whether to save the generated mazes & search results.
+        save_path: Path to save generated mazes & search results as npz, if provided.
+        tokenizer: Tokenizer used for both maze and paths.
         verbose: Whether to use verbose logging (DEBUG level)
     
     Returns:
@@ -435,8 +738,8 @@ def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int 
         log_final_summary(logger, stats)
         
         # Save results if requested
-        if save_results:
-            _save_search_results(stats, maze_size, beam_size, backtrack_gen, max_steps, logger)
+        if save_path:
+            _save_search_results(stats, maze_size, beam_size, backtrack_gen, max_steps, logger, save_path, tokenizer)
         else:
             logger.info("Not saving results (save_results=False)")
     
