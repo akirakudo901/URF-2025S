@@ -886,6 +886,8 @@ def save_generated_datasets(datasets: dict, save_path: str, data_type: str = "gs
             if data_type == "maze":
                 if 'beam_solutions' in train_dataset:
                     torch.save(train_dataset['beam_solutions'], os.path.join(train_save_dir, "beam_solutions.pt"))
+                if 'beam_solutions_mask' in train_dataset:
+                    torch.save(train_dataset['beam_solutions_mask'], os.path.join(train_save_dir, "beam_solutions_mask.pt"))
                 if 'beam_costs' in train_dataset:
                     torch.save(train_dataset['beam_costs'], os.path.join(train_save_dir, "beam_costs.pt"))
         
@@ -902,6 +904,8 @@ def save_generated_datasets(datasets: dict, save_path: str, data_type: str = "gs
             if data_type == "maze":
                 if 'beam_solutions' in test_dataset:
                     torch.save(test_dataset['beam_solutions'], os.path.join(test_save_dir, "beam_solutions.pt"))
+                if 'beam_solutions_mask' in test_dataset:
+                    torch.save(test_dataset['beam_solutions_mask'], os.path.join(test_save_dir, "beam_solutions_mask.pt"))
                 if 'beam_costs' in test_dataset:
                     torch.save(test_dataset['beam_costs'], os.path.join(test_save_dir, "beam_costs.pt"))
         
@@ -932,6 +936,8 @@ def save_generated_datasets(datasets: dict, save_path: str, data_type: str = "gs
             if data_type == "maze":
                 if 'beam_solutions' in train_dataset:
                     summary['shapes']['train_beam_solutions'] = train_dataset['beam_solutions'].shape
+                if 'beam_solutions_mask' in train_dataset:
+                    summary['shapes']['train_beam_solutions_mask'] = train_dataset['beam_solutions_mask'].shape
                 if 'beam_costs' in train_dataset:
                     summary['shapes']['train_beam_costs'] = train_dataset['beam_costs'].shape
         
@@ -948,6 +954,8 @@ def save_generated_datasets(datasets: dict, save_path: str, data_type: str = "gs
             if data_type == "maze":
                 if 'beam_solutions' in test_dataset:
                     summary['shapes']['test_beam_solutions'] = test_dataset['beam_solutions'].shape
+                if 'beam_solutions_mask' in test_dataset:
+                    summary['shapes']['test_beam_solutions_mask'] = test_dataset['beam_solutions_mask'].shape
                 if 'beam_costs' in test_dataset:
                     summary['shapes']['test_beam_costs'] = test_dataset['beam_costs'].shape
         

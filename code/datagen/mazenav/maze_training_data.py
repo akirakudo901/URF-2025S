@@ -49,7 +49,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from datagen.datagen import save_generated_datasets
 
 def load_and_tokenize_mazes(maze_npz: str,
-                           tokenizer=None) -> torch.Tensor:
+                           tokenizer=None) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Load maze npz from file and tokenize them.
     
@@ -58,7 +58,9 @@ def load_and_tokenize_mazes(maze_npz: str,
         tokenizer: Tokenizer to use (optional, defaults to GPT2TokenizerFast)
         
     Returns:
-        tokenized_sequences: torch.Tensor of shape (num_mazes, max_length)
+        tuple: (tokenized_sequences, attention_masks)
+            - tokenized_sequences: torch.Tensor of shape (num_mazes, max_length)
+            - attention_masks: torch.Tensor of shape (num_mazes, max_length) indicating valid tokens
     """
     # Load tokenizer
     if tokenizer is None:
@@ -73,6 +75,7 @@ def load_and_tokenize_mazes(maze_npz: str,
     maze_strings = [m.to_string_format(add_special_tokens=False) for m in maze_data]
     
     # Tokenize
+    # TODO DOUBLE CHECK IF ATTENTION_MASK IS THE MASK I AM LOOKING FOR
     tokenized = tokenizer(
         maze_strings,
         padding=True,
@@ -81,7 +84,7 @@ def load_and_tokenize_mazes(maze_npz: str,
         return_tensors="pt"
     )
     
-    return tokenized['input_ids']
+    return tokenized['input_ids'], tokenized['attention_mask']
 
 
 def save_tokenized_maze_data(maze_npz: str,
@@ -269,9 +272,13 @@ def load_and_tokenize_beam_sols(beam_sols_npz: str, tokenizer):
     
     # Create padded tensors
     state_matrices_tensor = torch.full((num_mazes, max_beam_size, max_sequence_length), tokenizer.pad_token_id, dtype=torch.long)  # Shape: [B, max_beam_size, max_sequence_length]
-    bp_matrices_tensor    = torch.full((num_mazes, max_beam_size, max_sequence_length), tokenizer.pad_token_id, dtype=torch.long)  # Shape: [B, max_beam_size, max_sequence_length]
+    bp_matrices_tensor    = torch.zeros((num_mazes, max_beam_size, max_sequence_length), dtype=torch.long)  # Shape: [B, max_beam_size, max_sequence_length]
     beam_sols_tensor      = torch.full((num_mazes, max_solution_length), tokenizer.pad_token_id, dtype=torch.long)  # Shape: [B, max_solution_length]
     beam_costs_tensor     = torch.tensor(beam_costs, dtype=torch.float32)  # Shape: [B]
+    
+    # Create attention masks (1 for valid tokens, 0 for padding)
+    state_matrices_mask = torch.zeros((num_mazes, max_beam_size, max_sequence_length), dtype=torch.bool)  # Shape: [B, max_beam_size, max_sequence_length]
+    beam_sols_mask      = torch.zeros((num_mazes, max_solution_length), dtype=torch.bool)  # Shape: [B, max_solution_length]
     
     # Fill tensors with actual data
     for maze_idx in range(num_mazes):
@@ -279,7 +286,9 @@ def load_and_tokenize_beam_sols(beam_sols_npz: str, tokenizer):
         state_matrix = tokenized_state_matrices[maze_idx]
         for beam_idx in range(len(state_matrix)):
             sequence = state_matrix[beam_idx]
-            state_matrices_tensor[maze_idx, beam_idx, :len(sequence)] = torch.tensor(sequence, dtype=torch.long)
+            seq_len = len(sequence)
+            state_matrices_tensor[maze_idx, beam_idx, :seq_len] = torch.tensor(sequence, dtype=torch.long)
+            state_matrices_mask[maze_idx, beam_idx, :seq_len] = True  # Mark valid tokens
         
         # Fill backpointer matrix tensor
         bp_matrix = extended_bp_matrices[maze_idx]
@@ -289,14 +298,18 @@ def load_and_tokenize_beam_sols(beam_sols_npz: str, tokenizer):
         
         # Fill beam solution tensor
         beam_sol = tokenized_beam_sols[maze_idx]
-        beam_sols_tensor[maze_idx, :len(beam_sol)] = torch.tensor(beam_sol, dtype=torch.long)
+        sol_len = len(beam_sol)
+        beam_sols_tensor[maze_idx, :sol_len] = torch.tensor(beam_sol, dtype=torch.long)
+        beam_sols_mask[maze_idx, :sol_len] = True  # Mark valid tokens
     
     # Create result dictionary with tensors
     result = {
         'state_matrices': state_matrices_tensor,
         'bp_matrices': bp_matrices_tensor, 
         'beam_sols': beam_sols_tensor,
-        'beam_costs': beam_costs_tensor
+        'beam_costs': beam_costs_tensor,
+        'state_matrices_mask': state_matrices_mask,
+        'beam_sols_mask': beam_sols_mask
     }
     
     print(f"Loaded and tokenized beam search data from {beam_sols_npz}")
@@ -305,6 +318,8 @@ def load_and_tokenize_beam_sols(beam_sols_npz: str, tokenizer):
     print(f"  Backpointer matrices tensor shape: {bp_matrices_tensor.shape}")
     print(f"  Beam solutions tensor shape: {beam_sols_tensor.shape}")
     print(f"  Beam costs tensor shape: {beam_costs_tensor.shape}")
+    print(f"  State matrices mask shape: {state_matrices_mask.shape}")
+    print(f"  Beam solutions mask shape: {beam_sols_mask.shape}")
     
     return result
 
@@ -628,20 +643,24 @@ def _save_search_results(stats: MazeSearchStats, maze_size: int, beam_size: int,
     _maze_beam_sols_to_npz(test_state_matrices, test_bp_matrices, test_beam_sols, test_beam_costs, test_beamsol_path)
     
     # Load and tokenize training data
-    tokenized_train_mazes = load_and_tokenize_mazes(train_maze_path, tokenizer)  # Shape: [B_train, max_length]
+    tokenized_train_mazes, train_maze_masks = load_and_tokenize_mazes(train_maze_path, tokenizer)  # Shape: [B_train, max_length]
     train_result = load_and_tokenize_beam_sols(train_beamsol_path, tokenizer)
     train_state_matrices = train_result['state_matrices']  # Shape: [B_train, max_beam_size, max_sequence_length]
     train_bp_matrices = train_result['bp_matrices']        # Shape: [B_train, max_beam_size, max_sequence_length]
     train_beam_sols = train_result['beam_sols']            # Shape: [B_train, max_solution_length]
     train_beam_costs = train_result['beam_costs']          # Shape: [B_train]
+    train_state_matrices_mask = train_result['state_matrices_mask']  # Shape: [B_train, max_beam_size, max_sequence_length]
+    train_beam_sols_mask = train_result['beam_sols_mask']            # Shape: [B_train, max_solution_length]
     
     # Load and tokenize testing data
-    tokenized_test_mazes = load_and_tokenize_mazes(test_maze_path, tokenizer)  # Shape: [B_test, max_length]
+    tokenized_test_mazes, test_maze_masks = load_and_tokenize_mazes(test_maze_path, tokenizer)  # Shape: [B_test, max_length]
     test_result = load_and_tokenize_beam_sols(test_beamsol_path, tokenizer)
     test_state_matrices = test_result['state_matrices']  # Shape: [B_test, max_beam_size, max_sequence_length]
     test_bp_matrices = test_result['bp_matrices']        # Shape: [B_test, max_beam_size, max_sequence_length]
     test_beam_sols = test_result['beam_sols']            # Shape: [B_test, max_solution_length]
     test_beam_costs = test_result['beam_costs']          # Shape: [B_test]
+    test_state_matrices_mask = test_result['state_matrices_mask']  # Shape: [B_test, max_beam_size, max_sequence_length]
+    test_beam_sols_mask = test_result['beam_sols_mask']            # Shape: [B_test, max_solution_length]
     
     logger.info(f"Saved training data: {train_maze_path}, {train_beamsol_path}")
     logger.info(f"Saved testing data: {test_maze_path}, {test_beamsol_path}")
@@ -652,10 +671,11 @@ def _save_search_results(stats: MazeSearchStats, maze_size: int, beam_size: int,
             'train': {
                 'prompt_sequences': tokenized_train_mazes,  # Shape: [B_train, max_length]
                 'cot_sequences': train_state_matrices,       # Shape: [B_train, max_beam_size, max_sequence_length]
-                'prompt_mask': torch.ones_like(tokenized_train_mazes, dtype=torch.bool),  # All tokens are valid
-                'cot_mask': torch.ones_like(train_state_matrices, dtype=torch.bool),      # All tokens are valid
+                'prompt_mask': train_maze_masks,             # Shape: [B_train, max_length] - proper attention mask
+                'cot_mask': train_state_matrices_mask,       # Shape: [B_train, max_beam_size, max_sequence_length] - proper attention mask
                 'backpointers': train_bp_matrices,           # Shape: [B_train, max_beam_size, max_sequence_length]
                 'beam_solutions': train_beam_sols,            # Shape: [B_train, max_solution_length]
+                'beam_solutions_mask': train_beam_sols_mask,  # Shape: [B_train, max_solution_length] - proper attention mask
                 'beam_costs': train_beam_costs,              # Shape: [B_train]
                 'metadata': {
                     'num_prompts': len(train_mazes),
@@ -668,10 +688,11 @@ def _save_search_results(stats: MazeSearchStats, maze_size: int, beam_size: int,
             'test': {
                 'prompt_sequences': tokenized_test_mazes,     # Shape: [B_test, max_length]
                 'cot_sequences': test_state_matrices,         # Shape: [B_test, max_beam_size, max_sequence_length]
-                'prompt_mask': torch.ones_like(tokenized_test_mazes, dtype=torch.bool),  # All tokens are valid
-                'cot_mask': torch.ones_like(test_state_matrices, dtype=torch.bool),       # All tokens are valid
+                'prompt_mask': test_maze_masks,               # Shape: [B_test, max_length] - proper attention mask
+                'cot_mask': test_state_matrices_mask,         # Shape: [B_test, max_beam_size, max_sequence_length] - proper attention mask
                 'backpointers': test_bp_matrices,             # Shape: [B_test, max_beam_size, max_sequence_length]
                 'beam_solutions': test_beam_sols,             # Shape: [B_test, max_solution_length]
+                'beam_solutions_mask': test_beam_sols_mask,   # Shape: [B_test, max_solution_length] - proper attention mask
                 'beam_costs': test_beam_costs,                # Shape: [B_test]
                 'metadata': {
                     'num_prompts': len(test_mazes),
