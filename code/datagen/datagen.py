@@ -849,13 +849,14 @@ def beam_search_with_backpointers(
 
 
 
-def save_generated_datasets(datasets: dict, save_path: str):
+def save_generated_datasets(datasets: dict, save_path: str, data_type: str = "gsm8k"):
     """
     Save generated datasets in the format expected by load_training_data.
     
     Args:
         datasets: Dictionary containing the generated datasets with train/test splits
         save_path: Base directory to save the datasets
+        data_type: Type of data being saved ("gsm8k" or "maze")
     """
     print("\nSaving datasets...")
     for beam_width_key, beam_datasets in datasets.items():
@@ -880,6 +881,13 @@ def save_generated_datasets(datasets: dict, save_path: str):
             torch.save(train_dataset['prompt_mask'], os.path.join(train_save_dir, "prompt_mask.pt"))
             torch.save(train_dataset['cot_mask'], os.path.join(train_save_dir, "cot_mask.pt"))
             torch.save(train_dataset['backpointers'], os.path.join(train_save_dir, "backpointers.pt"))
+            
+            # Save maze-specific data if available
+            if data_type == "maze":
+                if 'beam_solutions' in train_dataset:
+                    torch.save(train_dataset['beam_solutions'], os.path.join(train_save_dir, "beam_solutions.pt"))
+                if 'beam_costs' in train_dataset:
+                    torch.save(train_dataset['beam_costs'], os.path.join(train_save_dir, "beam_costs.pt"))
         
         # Save test data if available
         if test_dataset:
@@ -889,6 +897,13 @@ def save_generated_datasets(datasets: dict, save_path: str):
             torch.save(test_dataset['prompt_mask'], os.path.join(test_save_dir, "prompt_mask.pt"))
             torch.save(test_dataset['cot_mask'], os.path.join(test_save_dir, "cot_mask.pt"))
             torch.save(test_dataset['backpointers'], os.path.join(test_save_dir, "backpointers.pt"))
+            
+            # Save maze-specific data if available
+            if data_type == "maze":
+                if 'beam_solutions' in test_dataset:
+                    torch.save(test_dataset['beam_solutions'], os.path.join(test_save_dir, "beam_solutions.pt"))
+                if 'beam_costs' in test_dataset:
+                    torch.save(test_dataset['beam_costs'], os.path.join(test_save_dir, "beam_costs.pt"))
         
         # Save metadata and summary
         summary = {
@@ -900,6 +915,7 @@ def save_generated_datasets(datasets: dict, save_path: str):
             'max_prompt_len': train_dataset['metadata']['max_prompt_len'] if train_dataset else test_dataset['metadata']['max_prompt_len'],
             'max_cot_len': train_dataset['metadata']['max_cot_len'] if train_dataset else test_dataset['metadata']['max_cot_len'],
             'pad_token_id': train_dataset['metadata']['pad_token_id'] if train_dataset else test_dataset['metadata']['pad_token_id'],
+            'data_type': data_type,
             'shapes': {}
         }
         
@@ -911,6 +927,13 @@ def save_generated_datasets(datasets: dict, save_path: str):
                 'train_cot_mask': train_dataset['cot_mask'].shape,
                 'train_backpointers': train_dataset['backpointers'].shape,
             })
+            
+            # Add maze-specific shapes if available
+            if data_type == "maze":
+                if 'beam_solutions' in train_dataset:
+                    summary['shapes']['train_beam_solutions'] = train_dataset['beam_solutions'].shape
+                if 'beam_costs' in train_dataset:
+                    summary['shapes']['train_beam_costs'] = train_dataset['beam_costs'].shape
         
         if test_dataset:
             summary['shapes'].update({
@@ -920,6 +943,13 @@ def save_generated_datasets(datasets: dict, save_path: str):
                 'test_cot_mask': test_dataset['cot_mask'].shape,
                 'test_backpointers': test_dataset['backpointers'].shape,
             })
+            
+            # Add maze-specific shapes if available
+            if data_type == "maze":
+                if 'beam_solutions' in test_dataset:
+                    summary['shapes']['test_beam_solutions'] = test_dataset['beam_solutions'].shape
+                if 'beam_costs' in test_dataset:
+                    summary['shapes']['test_beam_costs'] = test_dataset['beam_costs'].shape
         
         with open(os.path.join(base_save_dir, "summary.json"), 'w') as f:
             json.dump(summary, f, indent=2)

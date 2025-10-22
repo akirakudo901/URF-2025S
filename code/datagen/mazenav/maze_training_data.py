@@ -42,6 +42,12 @@ from logging_utils import (
     setup_logging
 )
 
+# Import data generation utilities
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from datagen.datagen import save_generated_datasets
+
 def load_and_tokenize_mazes(maze_npz: str,
                            tokenizer=None) -> torch.Tensor:
     """
@@ -639,6 +645,47 @@ def _save_search_results(stats: MazeSearchStats, maze_size: int, beam_size: int,
     
     logger.info(f"Saved training data: {train_maze_path}, {train_beamsol_path}")
     logger.info(f"Saved testing data: {test_maze_path}, {test_beamsol_path}")
+    
+    # Prepare data in the format expected by save_generated_datasets
+    datasets = {
+        f'beam_width_{beam_size}': {
+            'train': {
+                'prompt_sequences': tokenized_train_mazes,  # Shape: [B_train, max_length]
+                'cot_sequences': train_state_matrices,       # Shape: [B_train, max_beam_size, max_sequence_length]
+                'prompt_mask': torch.ones_like(tokenized_train_mazes, dtype=torch.bool),  # All tokens are valid
+                'cot_mask': torch.ones_like(train_state_matrices, dtype=torch.bool),      # All tokens are valid
+                'backpointers': train_bp_matrices,           # Shape: [B_train, max_beam_size, max_sequence_length]
+                'beam_solutions': train_beam_sols,            # Shape: [B_train, max_solution_length]
+                'beam_costs': train_beam_costs,              # Shape: [B_train]
+                'metadata': {
+                    'num_prompts': len(train_mazes),
+                    'beam_width': beam_size,
+                    'max_prompt_len': tokenized_train_mazes.shape[1],
+                    'max_cot_len': train_state_matrices.shape[2],
+                    'pad_token_id': tokenizer.pad_token_id,
+                }
+            },
+            'test': {
+                'prompt_sequences': tokenized_test_mazes,     # Shape: [B_test, max_length]
+                'cot_sequences': test_state_matrices,         # Shape: [B_test, max_beam_size, max_sequence_length]
+                'prompt_mask': torch.ones_like(tokenized_test_mazes, dtype=torch.bool),  # All tokens are valid
+                'cot_mask': torch.ones_like(test_state_matrices, dtype=torch.bool),       # All tokens are valid
+                'backpointers': test_bp_matrices,             # Shape: [B_test, max_beam_size, max_sequence_length]
+                'beam_solutions': test_beam_sols,             # Shape: [B_test, max_solution_length]
+                'beam_costs': test_beam_costs,                # Shape: [B_test]
+                'metadata': {
+                    'num_prompts': len(test_mazes),
+                    'beam_width': beam_size,
+                    'max_prompt_len': tokenized_test_mazes.shape[1],
+                    'max_cot_len': test_state_matrices.shape[2],
+                    'pad_token_id': tokenizer.pad_token_id,
+                }
+            }
+        }
+    }
+    
+    # Save using the modified save_generated_datasets function
+    save_generated_datasets(datasets, save_path, data_type="maze")
     
 
     """
