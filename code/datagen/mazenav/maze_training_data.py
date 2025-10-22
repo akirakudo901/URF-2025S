@@ -581,6 +581,79 @@ def _npz_to_maze_beam_sols(filename: str):
     return state_matrices, bp_matrices, beam_sols, beam_costs
 
 
+def _write_search_results_file(stats: MazeSearchStats, maze_size: int, beam_size: int, 
+                              backtrack_gen: bool, max_steps: int, logger: logging.Logger) -> str:
+    """
+    Write detailed search results to a text file.
+    
+    Args:
+        stats: MazeSearchStats object containing all search statistics
+        maze_size: Size of mazes that were searched
+        beam_size: Beam width used for beam search
+        backtrack_gen: Whether mazes were generated using backtracking
+        max_steps: Maximum steps allowed for search
+        logger: Logger for output messages
+        
+    Returns:
+        str: Filename of the created results file
+    """
+    results_filename = f"beam_search_results_size{maze_size}_beam{beam_size}_count{len(stats.accepted_mazes)}.txt"
+    
+    summary = stats.get_summary()
+    
+    with open(results_filename, 'w') as f:
+        f.write("Beam Search Experiment Results\n")
+        f.write("=" * 40 + "\n\n")
+        
+        # Write experiment parameters
+        f.write("Experiment Parameters:\n")
+        f.write(f"  Maze size: {maze_size}x{maze_size}\n")
+        f.write(f"  Beam size: {beam_size}\n")
+        f.write(f"  Generation method: {'recursive_backtracking' if backtrack_gen else 'random'}\n")
+        f.write(f"  Max steps: {max_steps}\n")
+        f.write(f"  Total generation trials: {summary['total_generation_trials']}\n")
+        f.write(f"  Accepted mazes: {summary['accepted_mazes']}\n\n")
+        
+        # Write statistics summary
+        f.write("Statistics Summary:\n")
+        f.write(f"  Acceptance rate: {summary['acceptance_rate']:.1f}%\n")
+        f.write(f"  A* found solution but beam didn't: {summary['astar_only_solutions']}\n")
+        f.write(f"  A* success rate: {summary['astar_success_rate']:.1f}%\n")
+        f.write(f"  Beam success rate: {summary['beam_success_rate']:.1f}%\n")
+        f.write(f"  Both found same solution: {summary['both_same_solution']} ({100*summary['both_same_solution']/summary['accepted_mazes']:.1f}%)\n")
+        f.write(f"  Both found different solutions: {summary['both_different_solution']} ({100*summary['both_different_solution']/summary['accepted_mazes']:.1f}%)\n")
+        
+        # Write detailed maze results
+        f.write("Detailed Maze Results, first five mazes:\n")
+        f.write("=" * 20 + "\n\n")
+        
+        for i, maze_data in enumerate(stats.accepted_mazes[:5]):
+            maze = maze_data['maze']
+            f.write(f"Maze {i+1}:\n")
+            f.write(f"  Start: {maze.start_pos}, End: {maze.end_pos}, Size: {maze.size}x{maze.size}\n")
+            f.write(f"  Walls: {len(maze.walls)} walls\n")
+            
+            beam_solution = maze_data['beam_solution']
+            beam_cost = maze_data['beam_cost']
+            astar_cost = maze_data['astar_cost']
+            
+            f.write(f"  Beam solution: {len(beam_solution)} steps, cost {beam_cost:.2f}\n")
+            f.write(f"  A* solution cost: {astar_cost:.2f}\n")
+            
+            # Create maze visualizations with paths
+            f.write(f"\n  Maze visualization with beam search path:\n")
+            beam_visualization = maze.visualize(beam_solution)
+            f.write("  ")
+            f.write(beam_visualization.replace('\n', '\n  '))
+            f.write("\n")
+            
+            f.write(f"\n  Legend: S=Start, E=End, #=Wall, arrows show beam search path direction\n")
+            f.write("\n")
+    
+    logger.info(f"Saved detailed results to '{results_filename}'")
+    return results_filename
+
+
 def _save_search_results(stats: MazeSearchStats, maze_size: int, beam_size: int, 
                         backtrack_gen: bool, max_steps: int, logger: logging.Logger,
                         save_path: Optional[str] = None, tokenizer=None, train_test_split: float = 0.8, 
@@ -708,84 +781,8 @@ def _save_search_results(stats: MazeSearchStats, maze_size: int, beam_size: int,
     # Save using the modified save_generated_datasets function
     save_generated_datasets(datasets, save_path, data_type="maze")
     
-
-    """
-    TODO REMOVE
-    DONE -> First, turn list of mazes into npz
-    DONE -> Then, also format them into string using maze_to_string from generate_maze.py, followed by tokenization with NEW FUNCTION 1
-
-    DONE -> Also, save the state and back pointer matrices as well as beam path in compact format (npz, implement NEW FUNCTION 2)
-    Finally, tokenize those:
-    DONE -> state matrix will first be converted into appropriate string via a variant of path_to_string function from generate_maze.py
-    DONE -> then, the state & backpointers will be adjusted to accommodate for example 3 tokens for each 'step'
-      in beam search (e.g. 'plan' '3' '4'), using NEW FUNCTION 3
-    DONE ->  then, state matrix will be tokenized accordingly using a function (WANNA REUSE NEW FUNCTION 1 IF POSSIBLE)
-    DONE ->  solution path is also tokenized and stored in its own arrays (NEW FUNCTION 4)
-
-    We then finally divide the set into training and testing sets, and then we save the result.
-    TODO REMOVE END
-    """
-
-    # Save mazes using the multi-maze storage function
-    # TODO: Implement save_multiple_mazes_compressed function
-    maze_filename = f"beam_search_mazes_size{maze_size}_beam{beam_size}_count{len(stats.accepted_mazes)}.txt"
-    logger.info(f"Would save {len(mazes)} mazes to '{maze_filename}' (function not implemented)")
-    
     # Save search results data
-    results_filename = f"beam_search_results_size{maze_size}_beam{beam_size}_count{len(stats.accepted_mazes)}.txt"
-    
-    summary = stats.get_summary()
-    
-    with open(results_filename, 'w') as f:
-        f.write("Beam Search Experiment Results\n")
-        f.write("=" * 40 + "\n\n")
-        
-        # Write experiment parameters
-        f.write("Experiment Parameters:\n")
-        f.write(f"  Maze size: {maze_size}x{maze_size}\n")
-        f.write(f"  Beam size: {beam_size}\n")
-        f.write(f"  Generation method: {'recursive_backtracking' if backtrack_gen else 'random'}\n")
-        f.write(f"  Max steps: {max_steps}\n")
-        f.write(f"  Total generation trials: {summary['total_generation_trials']}\n")
-        f.write(f"  Accepted mazes: {summary['accepted_mazes']}\n\n")
-        
-        # Write statistics summary
-        f.write("Statistics Summary:\n")
-        f.write(f"  Acceptance rate: {summary['acceptance_rate']:.1f}%\n")
-        f.write(f"  A* found solution but beam didn't: {summary['astar_only_solutions']}\n")
-        f.write(f"  A* success rate: {summary['astar_success_rate']:.1f}%\n")
-        f.write(f"  Beam success rate: {summary['beam_success_rate']:.1f}%\n")
-        f.write(f"  Both found same solution: {summary['both_same_solution']} ({100*summary['both_same_solution']/summary['accepted_mazes']:.1f}%)\n")
-        f.write(f"  Both found different solutions: {summary['both_different_solution']} ({100*summary['both_different_solution']/summary['accepted_mazes']:.1f}%)\n")
-        
-        # Write detailed maze results
-        f.write("Detailed Maze Results, first five mazes:\n")
-        f.write("=" * 20 + "\n\n")
-        
-        for i, maze_data in enumerate(stats.accepted_mazes[:5]):
-            maze = maze_data['maze']
-            f.write(f"Maze {i+1}:\n")
-            f.write(f"  Start: {maze.start_pos}, End: {maze.end_pos}, Size: {maze.size}x{maze.size}\n")
-            f.write(f"  Walls: {len(maze.walls)} walls\n")
-            
-            beam_solution = maze_data['beam_solution']
-            beam_cost = maze_data['beam_cost']
-            astar_cost = maze_data['astar_cost']
-            
-            f.write(f"  Beam solution: {len(beam_solution)} steps, cost {beam_cost:.2f}\n")
-            f.write(f"  A* solution cost: {astar_cost:.2f}\n")
-            
-            # Create maze visualizations with paths
-            f.write(f"\n  Maze visualization with beam search path:\n")
-            beam_visualization = maze.visualize(beam_solution)
-            f.write("  ")
-            f.write(beam_visualization.replace('\n', '\n  '))
-            f.write("\n")
-            
-            f.write(f"\n  Legend: S=Start, E=End, #=Wall, arrows show beam search path direction\n")
-            f.write("\n")
-    
-    logger.info(f"Saved detailed results to '{results_filename}'")
+    results_filename = _write_search_results_file(stats, maze_size, beam_size, backtrack_gen, max_steps, logger)
 
 
 def batch_maze_search(num_trials: int = 10, maze_size: int = 10, beam_size: int = 4, 
