@@ -146,17 +146,17 @@ class Maze:
         
         return " ".join(tokens)
     
-    def __hash__(self) -> str:
+    def __hash__(self) -> int:
         """
         Generate a unique hash for this maze configuration.
         
         Returns:
-            String hash representing the maze configuration
+            Integer hash representing the maze configuration
         """
         # Create hash string from maze components
         maze_str = f"{self.size}_{self.start_pos[0]}_{self.start_pos[1]}_{self.end_pos[0]}_{self.end_pos[1]}_{'_'.join([f'{w[0]}_{w[1]}' for w in self.walls])}"
         # Use Python's built-in hash function for a compact representation
-        return str(hash(maze_str))
+        return hash(maze_str)
 
 
 def generate_maze_recursive_backtracking(size: int = 10) -> Maze:
