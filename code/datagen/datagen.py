@@ -1,21 +1,39 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-License-Identifier: Apache-2.0
 
-from vllm import LLM
-from vllm.sampling_params import BeamSearchParams
 import numpy as np
 import itertools
 import torch
 from tqdm.auto import tqdm
 from transformers import GPT2Tokenizer
 from typing import Optional, Union, Sequence, cast
-from vllm.inputs import TextPrompt, TokensPrompt
-from vllm.lora.request import LoRARequest
-from vllm.sampling_params import SamplingParams
-from vllm.beam_search import BeamSearchInstance, BeamSearchOutput, BeamSearchSequence, create_sort_beams_key_function
-from vllm.entrypoints.llm import LLM as VLLMLLM
 import os
 import json
+
+# Optional vllm imports - only load if available
+try:
+    from vllm import LLM
+    from vllm.sampling_params import BeamSearchParams
+    from vllm.inputs import TextPrompt, TokensPrompt
+    from vllm.lora.request import LoRARequest
+    from vllm.sampling_params import SamplingParams
+    from vllm.beam_search import BeamSearchInstance, BeamSearchOutput, BeamSearchSequence, create_sort_beams_key_function
+    from vllm.entrypoints.llm import LLM as VLLMLLM
+    VLLM_AVAILABLE = True
+except ImportError:
+    # Define dummy types for when vllm is not available
+    LLM = None
+    BeamSearchParams = None
+    TextPrompt = None
+    TokensPrompt = None
+    LoRARequest = None
+    SamplingParams = None
+    BeamSearchInstance = None
+    BeamSearchOutput = None
+    BeamSearchSequence = None
+    create_sort_beams_key_function = None
+    VLLMLLM = None
+    VLLM_AVAILABLE = False
 
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -141,6 +159,9 @@ def generate_gsm8k_datasets(
             }
         }
     """
+    if not VLLM_AVAILABLE:
+        raise ImportError("vllm is required for generate_gsm8k_datasets but is not available. Please install vllm or use a different function.")
+    
     if results_per_prompt != 1:
         raise Exception("Temporally deprecating results_per_prompt, has to be 1 to be ran as vanilla beam search is deterministic and thus it doesn't make sense.")
     # Load prompts from GSM8K dataset
@@ -442,6 +463,9 @@ def beam_search_with_backpointers(
                 - backpointers: numpy array of shape (K, L) where (i,j) entry indicates which beam (i,j-1) came from
                 - debug_info: dictionary containing debug information about the beam search
         """
+        if not VLLM_AVAILABLE:
+            raise ImportError("vllm is required for beam_search_with_backpointers but is not available. Please install vllm or use a different function.")
+        
         beam_width = params.beam_width
         max_tokens = params.max_tokens
         temperature = params.temperature
@@ -1646,6 +1670,11 @@ def test_dataset_loading():
     )
 
 def main():
+    if not VLLM_AVAILABLE:
+        print("Error: vllm is not available. Please install vllm to run the main function.")
+        print("You can still use save_generated_datasets and other non-vllm functions.")
+        return
+    
     # Generate GSM8K datasets with beam search
     BEAM_WIDTHS = [4]
     MAX_TOKENS = 128
