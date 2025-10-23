@@ -75,13 +75,13 @@ def load_and_tokenize_mazes(maze_npz: str,
     maze_strings = [m.to_string_format(add_special_tokens=False) for m in maze_data]
     
     # Tokenize
-    # TODO DOUBLE CHECK IF ATTENTION_MASK IS THE MASK I AM LOOKING FOR
     tokenized = tokenizer(
         maze_strings,
         padding=True,
         truncation=False,
         max_length=None,
-        return_tensors="pt"
+        return_tensors="pt",
+        return_attention_mask=True
     )
     
     return tokenized['input_ids'], tokenized['attention_mask']
