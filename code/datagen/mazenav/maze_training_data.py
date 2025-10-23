@@ -45,7 +45,7 @@ from logging_utils import (
 # Import data generation utilities
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from datagen.datagen import save_generated_datasets
 
 def load_and_tokenize_mazes(maze_npz: str,
