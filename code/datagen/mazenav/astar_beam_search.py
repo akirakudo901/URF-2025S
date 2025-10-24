@@ -22,6 +22,7 @@ class BeamEntry(Generic[StateT]):
     state: StateT
     g_cost: float
     h_cost: float
+    best_costs: Dict[StateT, float]  # Track best cost for each state in this beam entry's path
 
     @property
     def f_score(self) -> float:
@@ -57,25 +58,42 @@ class AStarBeamSearch(Generic[StateT]):
         self.is_goal_fn = is_goal_fn
         self.cost_fn = cost_fn
 
-    def _expand_state(self, entry: BeamEntry[StateT]) -> List[Tuple[StateT, float]]:
+    def _expand_state(self, entry: BeamEntry[StateT]) -> List[BeamEntry[StateT]]:
         """
         Expand a state using `next_states`.
         Supports two formats from `next_states(state)`:
           - Iterable[neighbor_state]
           - Iterable[(neighbor_state, step_cost)]
-        Returns: list of (neighbor_state, new_g_cost)
+        Returns: list of new BeamEntry objects for valid neighbors
         """
-        expanded: List[Tuple[StateT, float]] = []
+        expanded: List[BeamEntry[StateT]] = []
         for candidate in self.next_states(entry.state):
             if isinstance(candidate, tuple) and len(candidate) >= 2:
                 neighbor, step_cost = candidate[0], float(candidate[1])    
             else:
                 neighbor, step_cost = candidate, 1.0  # type: ignore[assignment]
+            
+            # Skip if already visited in this beam entry's path
+            if neighbor in entry.best_costs:
+                continue
+                
             if self.cost_fn is None:
                 new_g = entry.g_cost + step_cost
             else:
                 new_g = self.cost_fn(entry.g_cost, entry.state, neighbor, step_cost)
-            expanded.append((neighbor, new_g))
+            
+            # Update best costs for this beam entry
+            new_best_costs = entry.best_costs.copy()
+            new_best_costs[neighbor] = new_g
+            
+            # Create new BeamEntry directly
+            neighbor_entry = BeamEntry(
+                state=neighbor,
+                g_cost=new_g,
+                h_cost=self.heuristic_fn(neighbor),
+                best_costs=new_best_costs
+            )
+            expanded.append(neighbor_entry)
         return expanded
 
     def solve(
@@ -104,13 +122,15 @@ class AStarBeamSearch(Generic[StateT]):
             raise ValueError("beam_size must be positive")
 
         # Initialize beam with start state
-        start_entry = BeamEntry(state=start_state, g_cost=0.0, h_cost=self.heuristic_fn(start_state))
+        start_entry = BeamEntry(
+            state=start_state, 
+            g_cost=0.0, 
+            h_cost=self.heuristic_fn(start_state),
+            best_costs={start_state: 0.0}
+        )
         beam: List[BeamEntry[StateT]] = [start_entry]
 
         # For path reconstruction: map (iteration_index, rank) -> (prev_iteration_rank, state)
-        # Also keep best_seen to avoid revisiting identical states with higher cost
-        best_g_for_state: Dict[Any, float] = {start_state: 0.0}
-
         # Matrices: rows=k, columns=iterations (we will append a column per iteration)
         state_matrix: List[List[Optional[StateT]]] = [[] for _ in range(beam_size)]
         backpointer_matrix: List[List[Optional[int]]] = [[] for _ in range(beam_size)]
@@ -160,13 +180,7 @@ class AStarBeamSearch(Generic[StateT]):
             # Expand each beam entry
             candidates: List[Tuple[BeamEntry[StateT], int]] = []  # (entry, parent_rank)
             for parent_rank, parent in enumerate(sorted_beam):
-                for neighbor, new_g in self._expand_state(parent):
-                    # Dominance pruning: keep best g for a state
-                    prev_best = best_g_for_state.get(neighbor)
-                    if prev_best is not None and prev_best <= new_g:
-                        continue
-                    best_g_for_state[neighbor] = new_g
-                    neighbor_entry = BeamEntry(state=neighbor, g_cost=new_g, h_cost=self.heuristic_fn(neighbor))
+                for neighbor_entry in self._expand_state(parent):
                     candidates.append((neighbor_entry, parent_rank))
 
             # If no candidates, search cannot proceed
@@ -320,9 +334,12 @@ class AStarBeamSearch(Generic[StateT]):
                     return None, g_cost
             
             # Expand current state
-            for neighbor, tentative_g in self._expand_state(
-                BeamEntry(state=current_state, g_cost=g_cost, h_cost=0.0)
-            ):  
+            for neighbor_entry in self._expand_state(
+                BeamEntry(state=current_state, g_cost=g_cost, h_cost=0.0, best_costs={})
+            ):
+                neighbor = neighbor_entry.state
+                tentative_g = neighbor_entry.g_cost
+                
                 # Skip if we've already found a better path to this neighbor
                 if tentative_g >= g_costs.get(neighbor, float('inf')):
                     continue
