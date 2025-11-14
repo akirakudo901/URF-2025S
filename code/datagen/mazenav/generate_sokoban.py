@@ -538,6 +538,108 @@ def generate_sokoban_random(size: int, M: int, N: int) -> Sokoban:
         goals=tuple(sorted(goals))
     )
 
+def sokobans_to_npz(sokobans: List[Sokoban], filename: str) -> None:
+    """
+    Convert a list of Sokoban objects to NPZ format and save to file.
+    
+    Args:
+        sokobans: List of Sokoban objects to save
+        filename: Path to save the NPZ file
+    """
+    num_sokobans = len(sokobans)
+    
+    # Initialize arrays for each field
+    sizes = np.zeros(num_sokobans, dtype=np.int8)
+    start_positions = np.zeros((num_sokobans, 2), dtype=np.int8)
+    
+    # Find the maximum number of walls, boxes, and goals across all sokobans to determine array sizes
+    max_walls = max(len(sokoban.walls) for sokoban in sokobans) if sokobans else 0
+    max_boxes = max(len(sokoban.boxes) for sokoban in sokobans) if sokobans else 0
+    max_goals = max(len(sokoban.goals) for sokoban in sokobans) if sokobans else 0
+    
+    # Initialize arrays with -1 as padding value (invalid coordinate)
+    walls = np.full((num_sokobans, max_walls, 2), -1, dtype=np.int8)
+    boxes = np.full((num_sokobans, max_boxes, 2), -1, dtype=np.int8)
+    goals = np.full((num_sokobans, max_goals, 2), -1, dtype=np.int8)
+    
+    # Fill arrays with sokoban data
+    for i, sokoban in enumerate(sokobans):
+        sizes[i] = sokoban.size
+        start_positions[i] = [sokoban.start_pos[0], sokoban.start_pos[1]]
+        
+        # Fill walls array
+        for j, wall in enumerate(sokoban.walls):
+            walls[i, j] = [wall[0], wall[1]]
+        
+        # Fill boxes array
+        for j, box in enumerate(sokoban.boxes):
+            boxes[i, j] = [box[0], box[1]]
+        
+        # Fill goals array
+        for j, goal in enumerate(sokoban.goals):
+            goals[i, j] = [goal[0], goal[1]]
+    
+    # Save to NPZ file
+    np.savez_compressed(filename, 
+             sizes=sizes,
+             start_positions=start_positions,
+             walls=walls,
+             boxes=boxes,
+             goals=goals)
+
+
+def npz_to_sokobans(filename: str) -> List[Sokoban]:
+    """
+    Load Sokoban puzzles from NPZ format and recreate Sokoban objects.
+    
+    Args:
+        filename: Path to the NPZ file
+        
+    Returns:
+        List of Sokoban objects reconstructed from the NPZ data
+    """
+    # Load NPZ file
+    data = np.load(filename)
+    
+    sizes = data['sizes']
+    start_positions = data['start_positions']
+    walls = data['walls']
+    boxes = data['boxes']
+    goals = data['goals']
+    
+    num_sokobans = len(sizes)
+    sokobans = []
+    
+    # Reconstruct each sokoban
+    for i in range(num_sokobans):
+        size = int(sizes[i])
+        start_pos = (int(start_positions[i, 0]), int(start_positions[i, 1]))
+        
+        # Extract walls, filtering out padding values (-1)
+        sokoban_walls = []
+        for wall_coord in walls[i]:
+            if wall_coord[0] != -1 and wall_coord[1] != -1:  # Skip padding
+                sokoban_walls.append((int(wall_coord[0]), int(wall_coord[1])))
+        
+        # Extract boxes, filtering out padding values (-1)
+        sokoban_boxes = []
+        for box_coord in boxes[i]:
+            if box_coord[0] != -1 and box_coord[1] != -1:  # Skip padding
+                sokoban_boxes.append((int(box_coord[0]), int(box_coord[1])))
+        
+        # Extract goals, filtering out padding values (-1)
+        sokoban_goals = []
+        for goal_coord in goals[i]:
+            if goal_coord[0] != -1 and goal_coord[1] != -1:  # Skip padding
+                sokoban_goals.append((int(goal_coord[0]), int(goal_coord[1])))
+        
+        # Create Sokoban object
+        sokoban = Sokoban(size=size, start_pos=start_pos, walls=tuple(sokoban_walls), boxes=tuple(sokoban_boxes), goals=tuple(sokoban_goals))
+        sokobans.append(sokoban)
+    
+    return sokobans
+
+
 def main():
     new_sokoban = generate_sokoban_random(size=5, M=2, N=2)
     print(new_sokoban.visualize((1, 1)))
