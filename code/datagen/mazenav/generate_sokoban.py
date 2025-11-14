@@ -1,6 +1,6 @@
 # Author: Akira Kudo
 # Created: 2025/11/10
-# Last Updated: 2025/11/10
+# Last Updated: 2025/11/14
 
 """
 This file aims to extend the Maze class defined in generate_maze.py, to cover Sokoban problems.
@@ -25,7 +25,9 @@ The heuristic used for A* will be as follows:
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Union, Set
 import random
-from itertools import permutations
+
+import numpy as np
+import scipy
 
 @dataclass
 class Sokoban:
@@ -127,7 +129,7 @@ class Sokoban:
         
         The heuristic matches every box to the closest dock (goal) and computes
         the sum of all Manhattan distances between each box-dock pair.
-        Uses an optimal matching algorithm to find the minimum total distance.
+        Uses the Hungarian algorithm for Balanced Assignment to find the minimum total distance.
         
         Args:
             boxes: Box positions (list, tuple, or set)
@@ -136,74 +138,62 @@ class Sokoban:
         Returns:
             Sum of Manhattan distances between matched box-goal pairs (minimum cost matching)
         """
+        def solve_assignment_hungarian(docks: List[Tuple[int, int]], 
+                                       boxes: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+            """
+            Solve the assignment problem in O(n^3) using the Hungarian algorithm (optimal solution).
+            
+            Args:
+                docks: List of dock positions as (x, y) tuples
+                boxes: List of box positions as (x, y) tuples
+            
+            Returns:
+                List of pairs (dock_index, box_index) representing the optimal assignment
+            
+            Raises:
+                ValueError: If docks and boxes have different lengths
+            """
+            if len(docks) != len(boxes):
+                raise ValueError(f"Docks and boxes must have the same length. "
+                                 f"Got {len(docks)} docks and {len(boxes)} boxes.")
+
+            n = len(docks)
+
+            # Build cost matrix: cost[i, j] = manhattan distance from dock i to box j
+            cost_matrix = np.zeros((n, n), dtype=int)
+            for i, dock in enumerate(docks):
+                for j, box in enumerate(boxes):
+                    cost_matrix[i, j] = self.manhattan_distance(dock, box)
+            
+            # Solve using Hungarian algorithm
+            row_indices, col_indices = scipy.optimize.linear_sum_assignment(cost_matrix)
+            
+            # Return as list of tuples (dock_index, box_index)
+            assignment = [(int(row_indices[i]), int(col_indices[i])) 
+                          for i in range(len(row_indices))]
+            return assignment
+
         if goals is None:
             goals = self.goals
-        
+
         boxes_list = list(boxes)
         goals_list = list(goals)
         
         # If number of boxes doesn't match number of goals, return a large value
         if len(boxes_list) != len(goals_list):
             return float('inf')
-        
-        # For small numbers, use brute force to find optimal matching
-        # For larger numbers, use greedy matching as approximation
+
         n = len(boxes_list)
-        
+
         if n == 0:
             return 0.0
         elif n == 1:
-            # Single box, single goal - return distance
             return self.manhattan_distance(boxes_list[0], goals_list[0])
-            # TODO CONSIDER GALE SHAPELY AS POSSIBLE OPTIMAL SOLUTION WITH RUN SPEED O(n^2)
-        elif n <= 8:
-            # For small n, compute optimal matching using brute force
-            # Generate all possible matchings and find the minimum cost
-            min_total_distance = float('inf')
-            
-            # Try all possible assignments of boxes to goals
-            for goal_permutation in permutations(goals_list):
-                total_distance = 0.0
-                for box, goal in zip(boxes_list, goal_permutation):
-                    total_distance += self.manhattan_distance(box, goal)
-                min_total_distance = min(min_total_distance, total_distance)
-            
-            return min_total_distance
         else:
-            # For larger n, use greedy matching as approximation
-            # Sort boxes by some criteria to get better matching
-            goals_set = set(goals_list)
-            unmatched_goals = goals_set.copy()
             total_distance = 0.0
-            
-            # Compute all distances and sort boxes by their minimum distance to any goal
-            box_goal_distances = []
-            for box in boxes_list:
-                min_dist = min(self.manhattan_distance(box, goal) for goal in goals_list)
-                box_goal_distances.append((min_dist, box))
-            
-            # Sort boxes by minimum distance (closest boxes first)
-            box_goal_distances.sort(key=lambda x: x[0])
-            
-            for _, box in box_goal_distances:
-                if not unmatched_goals:
-                    break
-                
-                # Find the closest unmatched goal
-                min_distance = float('inf')
-                closest_goal = None
-                
-                for goal in unmatched_goals:
-                    distance = self.manhattan_distance(box, goal)
-                    if distance < min_distance:
-                        min_distance = distance
-                        closest_goal = goal
-                
-                # Match this box to the closest goal
-                if closest_goal is not None:
-                    total_distance += min_distance
-                    unmatched_goals.remove(closest_goal)
-            
+            assignment = solve_assignment_hungarian(goals_list, boxes_list)
+            for dock_index, box_index in assignment:
+                total_distance += self.manhattan_distance(goals_list[dock_index], boxes_list[box_index])
             return total_distance
     
     def _validate_boxes(self, boxes: Union[List[Tuple[int, int]], Tuple[Tuple[int, int], ...], Set[Tuple[int, int]]]) -> None:
