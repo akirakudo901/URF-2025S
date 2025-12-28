@@ -28,6 +28,12 @@ import random
 
 import numpy as np
 import scipy
+import os
+import sys
+
+# Add parent directory to path to import astar_beam_search
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from astar_beam_search import AStarBeamSearch
 
 @dataclass
 class Sokoban:
@@ -641,8 +647,145 @@ def npz_to_sokobans(filename: str) -> List[Sokoban]:
 
 
 def main():
-    new_sokoban = generate_sokoban_random(size=5, M=2, N=2)
-    print(new_sokoban.visualize((1, 1)))
+    """
+    Demonstration of solving a randomly generated Sokoban puzzle using A* Beam Search.
+    """
+    # Generate a small Sokoban puzzle for demonstration
+    SIZE = 5
+    NUM_WALLS = 2
+    NUM_BOXES = 2
+    
+    print("=" * 60)
+    print("Sokoban Puzzle Solver Demonstration")
+    print("=" * 60)
+    print()
+    
+    # Generate random Sokoban puzzle
+    print(f"Generating random Sokoban puzzle (size={SIZE}, walls={NUM_WALLS}, boxes={NUM_BOXES})...")
+    sokoban = generate_sokoban_random(size=SIZE, M=NUM_WALLS, N=NUM_BOXES)
+    
+    print("\nInitial Puzzle State:")
+    print(sokoban.visualize(sokoban.start_pos, sokoban.boxes))
+    print(f"Start position: {sokoban.start_pos}")
+    print(f"Initial boxes: {sokoban.boxes}")
+    print(f"Goals: {sokoban.goals}")
+    print(f"Walls: {sokoban.walls}")
+    print()
+    
+    # Define wrapper functions for AStarBeamSearch
+    # State format: (position, boxes_tuple) where boxes_tuple is a sorted tuple
+    initial_state = (sokoban.start_pos, sokoban.boxes)
+    
+    def next_states(state):
+        """
+        Get neighboring states from a given state.
+        
+        Args:
+            state: Tuple of (position, boxes_tuple)
+            
+        Returns:
+            List of ((new_position, new_boxes), step_cost) tuples
+        """
+        pos, boxes = state
+        return sokoban.get_neighbors(pos, boxes)
+    
+    def heuristic_fn(state):
+        """
+        Compute heuristic value for a state.
+        
+        Args:
+            state: Tuple of (position, boxes_tuple)
+            
+        Returns:
+            Heuristic value (sum of Manhattan distances for optimal box-goal matching)
+        """
+        pos, boxes = state
+        return sokoban.heuristic(boxes)
+    
+    def is_goal_fn(state):
+        """
+        Check if a state is the goal state.
+        
+        Args:
+            state: Tuple of (position, boxes_tuple)
+            
+        Returns:
+            True if all goals are covered by boxes, False otherwise
+        """
+        pos, boxes = state
+        return sokoban.is_goal(boxes)
+    
+    # Create A* Beam Search instance
+    beam_search = AStarBeamSearch(
+        next_states=next_states,
+        heuristic_fn=heuristic_fn,
+        is_goal_fn=is_goal_fn,
+        cost_fn=None  # Use additive costs (g + step_cost)
+    )
+    
+    # Run normal A* search first
+    print("Running Normal A* Search...")
+    print("-" * 60)
+    astar_solution, astar_cost = beam_search.solve_normal_astar(
+        start_state=initial_state,
+        max_steps=None
+    )
+    
+    print(f"A* Solution found: {astar_solution is not None}")
+    if astar_solution:
+        print(f"A* Solution path length: {len(astar_solution)} steps")
+        print(f"A* Total cost: {astar_cost}")
+        print(f"A* Number of states explored: {len(astar_solution)}")
+        print()
+        
+        # Display solution path visualization
+        print("Solution Path Visualization:")
+        print("-" * 60)
+        for step_idx, state in enumerate(astar_solution):
+            pos, boxes = state
+            print(f"Step {step_idx}:")
+            print(sokoban.visualize(pos, boxes))
+            print()
+    else:
+        print("A* could not find a solution within the step limit.")
+    print()
+    
+    # Run beam search with small beam size for comparison
+    BEAM_SIZE = 30
+    print(f"Running Beam Search (beam_size={BEAM_SIZE})...")
+    print("-" * 60)
+    beam_solution, state_matrix, backpointer_matrix, beam_cost = beam_search.solve(
+        start_state=initial_state,
+        beam_size=BEAM_SIZE,
+        max_steps=100000
+    )
+    
+    print(f"Beam Search Solution found: {beam_solution is not None}")
+    if beam_solution:
+        print(f"Beam Search Solution path length: {len(beam_solution)} steps")
+        print(f"Beam Search Total cost: {beam_cost}")
+        print(f"State matrix shape: {len(state_matrix)} x {len(state_matrix[0]) if state_matrix else 0}")
+        print(f"Backpointer matrix shape: {len(backpointer_matrix)} x {len(backpointer_matrix[0]) if backpointer_matrix else 0}")
+    else:
+        print("Beam Search could not find a solution within the step limit.")
+    print()
+    
+    # Comparison summary
+    print("=" * 60)
+    print("Summary:")
+    print("=" * 60)
+    if astar_solution and beam_solution:
+        print(f"A* path length: {len(astar_solution)}, Beam path length: {len(beam_solution)}")
+        print(f"A* cost: {astar_cost}, Beam cost: {beam_cost}")
+        print(f"Both found solutions: Yes")
+        print(f"Solutions are identical: {astar_solution == beam_solution}")
+    elif astar_solution:
+        print("Only A* found a solution")
+    elif beam_solution:
+        print("Only Beam Search found a solution")
+    else:
+        print("Neither method found a solution within the step limit")
+    print()
 
 if __name__ == "__main__":
     main()
