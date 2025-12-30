@@ -38,10 +38,9 @@ except ImportError:
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from trainer.train_utils import load_training_data
+from config.paths import DATA_DIR
 from dartmath_prompt.get_prompt import get_prompt
-
-
+from trainer.train_utils import load_training_data
 
 def load_gsm8k_prompts(
     data_dir: str = "data/GSM8K/128_128/batch_1", 
@@ -1681,7 +1680,7 @@ def main():
     NUM_TRAIN_PROMPTS = 20
     NUM_TEST_PROMPTS = 20
     RESULTS_PER_PROMPT = 1
-    SAVE_PATH = "data/GSM8K/generate_test_hightemp"
+    SAVE_PATH = os.path.join(DATA_DIR, "data", "GSM8K", "generate_test_hightemp")
     REQUIRE_ANSWERBOX = True
     STOP_AT_ANSWER = True
     KEEP_DONE_BEAMS = True

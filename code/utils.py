@@ -9,6 +9,8 @@ import numpy as np
 from typing import List, Tuple, Optional
 import os
 
+from config.paths import DATA_DIR
+
 def tokenize_prompts_and_responses(queries: List[str], 
                                   responses_groups: List[List[str]], 
                                   tokenizer: GPT2TokenizerFast) -> Tuple[List[List[int]], List[List[List[int]]]]:
@@ -1540,8 +1542,8 @@ def calculate_padding_ratio(dataset_dir: str) -> dict:
 
 if __name__ == "__main__":
     # GSM8K dataset
-    FILE_PATH = "dart-math-uniform/data/train-00001-of-00002.parquet"
-    OUTPUT_DIR = "data/GSM8K/128_128"
+    FILE_PATH = os.path.join(DATA_DIR, "dart-math-uniform", "data", "train-00001-of-00002.parquet")
+    OUTPUT_DIR = os.path.join(DATA_DIR, "URF-2025S", "data", "GSM8K", "v2")
 
     save_tensors_in_usable_form(FILE_PATH, output_dir=OUTPUT_DIR, 
                                 max_prompt_length=128, max_cot_length=128, 
