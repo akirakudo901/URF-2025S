@@ -6,7 +6,7 @@ import itertools
 import torch
 from tqdm.auto import tqdm
 from transformers import GPT2Tokenizer
-from typing import Optional, Union, Sequence, cast
+from typing import Any, Optional, Union, Sequence, cast
 import os
 import json
 
@@ -49,6 +49,7 @@ def load_gsm8k_prompts(
 ) -> tuple[list[str], list[str]]:
     """
     Load unique prompts from the GSM8K dataset into strings for training and testing.
+    Prompts are loaded separately from train and test splits, ensuring no overlap.
 
     Args:
         data_dir: Directory containing GSM8K data files
@@ -58,34 +59,66 @@ def load_gsm8k_prompts(
     Returns:
         tuple[list[str], list[str]]: (train_prompts, test_prompts)
     """
-    total_prompts = num_train_prompts + num_test_prompts
-    # fetch many prompts to ensure we get at least total_prompts unique ones
-    train_prompt_sequences, _, train_prompt_mask, _, _, _, _, _ = load_training_data(
-        data_dir=data_dir, max_samples=total_prompts*50, num_thoughts=None, seed=42
+    # Fetch many prompts to ensure we get enough unique ones from each split
+    result = load_training_data(
+        data_dir=data_dir, 
+        max_samples=max(num_train_prompts*50, num_test_prompts*50), 
+        num_thoughts=None, 
+        seed=42
     )
+    
+    # Handle both cases: with and without backpointers
+    if len(result) == 8: # No backpointers
+        train_prompt_sequences, _, train_prompt_mask, _, test_prompt_sequences, _, test_prompt_mask, _ = result
+    elif len(result) == 10: # With backpointers
+        train_prompt_sequences, _, train_prompt_mask, _, _, test_prompt_sequences, _, test_prompt_mask, _, _ = result
+    else:
+        raise ValueError(f"Unexpected number of return values from load_training_data: {len(result)}")
 
-    # train_prompt_sequences: [B, L], train_prompt_mask: [B, L]
+    # train_prompt_sequences: [B_tr, L], train_prompt_mask: [B_tr, L]
+    # test_prompt_sequences: [B_ts, L], test_prompt_mask: [B_ts, L]
     # Find unique prompts (by content, not by tensor identity), ignoring padding tokens as indicated by the mask.
     # Load the GPT2Tokenizer (assumes 'gpt2' model, adjust if needed)
     tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
 
-    seen_prompt_strs = set()
+    # Extract unique prompts from training set
+    train_seen_prompt_strs = set()
     for seq, mask in zip(train_prompt_sequences, train_prompt_mask):
-        if len(seen_prompt_strs) >= total_prompts: break
+        if len(train_seen_prompt_strs) >= num_train_prompts: break
         seq = seq[mask.bool()]
         # Convert to string
         prompt_str = tokenizer.decode(seq.tolist(), skip_special_tokens=True)
-        if prompt_str in seen_prompt_strs: continue
-        seen_prompt_strs.add(prompt_str)
+        if prompt_str in train_seen_prompt_strs: continue
+        train_seen_prompt_strs.add(prompt_str)
 
-    if len(seen_prompt_strs) < total_prompts:
-        print(f"Could only find {len(seen_prompt_strs)} unique prompts ({total_prompts} requested), proceeding.")
-        total_prompts = len(seen_prompt_strs)
+    # Extract unique prompts from test set
+    test_seen_prompt_strs = set()
+    for seq, mask in zip(test_prompt_sequences, test_prompt_mask):
+        if len(test_seen_prompt_strs) >= num_test_prompts: break
+        seq = seq[mask.bool()]
+        # Convert to string
+        prompt_str = tokenizer.decode(seq.tolist(), skip_special_tokens=True)
+        if prompt_str in test_seen_prompt_strs: continue
+        test_seen_prompt_strs.add(prompt_str)
+
+    # Ensure no overlap between train and test prompts
+    overlap = train_seen_prompt_strs & test_seen_prompt_strs
+    if overlap:
+        print(f"Warning: Found {len(overlap)} overlapping prompts between train and test sets. Removing from test set.")
+        test_seen_prompt_strs -= overlap
+
+    # Check if we have enough unique prompts
+    if len(train_seen_prompt_strs) < num_train_prompts:
+        print(f"Warning: Could only find {len(train_seen_prompt_strs)} unique train prompts ({num_train_prompts} requested), proceeding.")
+        num_train_prompts = len(train_seen_prompt_strs)
     
-    # Split into train and test prompts
-    all_prompts = list(seen_prompt_strs)
-    train_prompts = all_prompts[:num_train_prompts]
-    test_prompts = all_prompts[num_train_prompts:num_train_prompts + num_test_prompts]
+    if len(test_seen_prompt_strs) < num_test_prompts:
+        print(f"Warning: Could only find {len(test_seen_prompt_strs)} unique test prompts ({num_test_prompts} requested), proceeding.")
+        num_test_prompts = len(test_seen_prompt_strs)
+    
+    # Convert to lists and take the requested number
+    train_prompts = list(train_seen_prompt_strs)[:num_train_prompts]
+    test_prompts = list(test_seen_prompt_strs)[:num_test_prompts]
     
     return train_prompts, test_prompts
 
@@ -1649,7 +1682,7 @@ def test_dataset_loading():
     Test function to load and display a generated dataset.
     """
     BEAM_SIZE = 4
-    DATADIR_PATH = f"data/GSM8K/generate_test_hightemp/beam_width_{BEAM_SIZE}/"
+    DATADIR_PATH = os.path.join(DATA_DIR, "URF-2025S", "data", "GSM8K", "test_gen", f"beam_width_{BEAM_SIZE}", "")
     MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
     print("\n" + "="*80)
     print("TESTING DATASET LOADING")
@@ -1677,10 +1710,12 @@ def main():
     # Generate GSM8K datasets with beam search
     BEAM_WIDTHS = [4]
     MAX_TOKENS = 128
-    NUM_TRAIN_PROMPTS = 20
-    NUM_TEST_PROMPTS = 20
+    NUM_TRAIN_PROMPTS = 20 #114,367 # actual training prompts with overlap (~40 of each prompt repeated)
+    NUM_TEST_PROMPTS = 20 #12,592 # actual testing prompts with overlap (~40 of each prompt repeated)
     RESULTS_PER_PROMPT = 1
-    SAVE_PATH = os.path.join(DATA_DIR, "data", "GSM8K", "generate_test_hightemp")
+    COMMON_PATH = os.path.join(DATA_DIR, "URF-2025S", "data", "GSM8K")
+    SAVE_PATH = os.path.join(COMMON_PATH, "test_batchsize")
+    GSM8K_TORCH_DIR = os.path.join(COMMON_PATH, "128_128", "batch_1")
     REQUIRE_ANSWERBOX = True
     STOP_AT_ANSWER = True
     KEEP_DONE_BEAMS = True
@@ -1694,7 +1729,7 @@ def main():
     datasets = generate_gsm8k_datasets(
         llm=llm,
         pad_token_id=151643, # <- for qwen, 50256 for GPT2 eos_token
-        data_dir="data/GSM8K/128_128/batch_1",
+        data_dir=GSM8K_TORCH_DIR,
         beam_widths=BEAM_WIDTHS,
         num_train_prompts=NUM_TRAIN_PROMPTS,
         num_test_prompts=NUM_TEST_PROMPTS,
